@@ -1,0 +1,2 @@
+# mdqpaste
+Markdown quickly paste
