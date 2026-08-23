@@ -1,77 +1,48 @@
-# mdqp
+# mdqp — Markdown Quickly Paste
 
-释义：Markdown quickly paste
+> **Markdown 快速剪贴板** — 用 cpoauth 登录，快速新建、编辑、分享 Markdown 剪贴板。
 
-一个**纯前端、零后端**的轻量用户系统示例：账号注册 / 登录 / 关联洛谷账号，所有用户数据直接以 `users.json` 的形式保存在本仓库，任何修改通过 GitHub API 实时推送回仓库。
+## 功能
 
-🌐 线上地址：https://yanzien.github.io/mdqp/
+- **cpoauth OAuth 登录**（推荐）— 用算法竞赛统一身份一键登录，安全无密码
+- **手动注册/登录**（⚠️ 不安全，仅供测试）
+- **Markdown 剪贴板 CRUD** — 新建、编辑、预览（实时渲染）、删除
+- **公开/私有** — 剪贴板可设为公开（他人可见）或私有
+- **搜索与筛选** — 按标题/内容搜索，按归属筛选
+- **数据存储于 GitHub 仓库** — 通过 GitHub Contents API 读写
 
----
+## 使用方法
 
-## ✨ 功能
+1. 打开 https://yanzien.github.io/mdqp/
+2. 首次使用：点击「连接设置」，填写 GitHub 用户名、仓库名、PAT
+3. 点击「用 CP OAuth 登录」（推荐）或手动注册
+4. 登录后即可创建和管理剪贴板
 
-- **注册**：用户名 + 密码（SHA-256 哈希存储，不存明文）+ 选填洛谷账号
-- **登录**：账号密码校验
-- **关联洛谷账号**：在「我的」页面填写洛谷用户名并保存（**无验证**，仅记录字符串）
-- **个性签名**：可编辑个人简介
-- **用户目录**：公开展示所有注册用户及其洛谷账号
-- **连接设置**：在页面内填写 GitHub 用户名 / 仓库 / 分支 / PAT，存浏览器本地
+## 技术栈
 
----
+- 纯前端（HTML + CSS + JS），无需后端服务器
+- [CP OAuth](https://www.cpoauth.com) — OAuth 2.0 + PKCE 身份认证
+- GitHub Contents API — 数据存储
+- [marked.js](https://marked.js.org/) — Markdown 渲染
 
-## 🗂️ 数据存储
-
-所有用户数据保存在仓库根的 `users.json`：
-
-```json
-[
-  {
-    "username": "alice",
-    "passwordHash": "e3b0c44298fc1c14...",
-    "luogu": "LuoguUser123",
-    "bio": "hello",
-    "createdAt": "2026-08-23T12:00:00.000Z"
-  }
-]
-```
-
-每次注册 / 改资料都会 `GET` 最新 `users.json`（乐观锁）→ 修改 → `PUT` 回仓库。
-
----
-
-## 🚀 使用方式
-
-1. 打开站点，进入「连接设置」页
-2. 填写：
-   - **GitHub 用户名**：`yanzien`
-   - **仓库名**：`mdqp`
-   - **分支**：`main`
-   - **PAT**：具备 `repo` 权限的个人访问令牌（仅存本浏览器，不写进代码）
-3. 点「测试连接」确认可读取仓库
-4. 回到首页即可注册 / 登录 / 关联洛谷
-
----
-
-## ⚠️ 安全声明（务必阅读）
-
-本项目为**演示 / 练习用途**，存在以下固有风险，请勿用于真实敏感账号：
-
-- 仓库为**公开仓库**，`users.json`（含密码哈希）任何人可读
-- **PAT 运行在前端**（浏览器），技术上可被提取，请勿使用重要账号的 Token
-- 密码仅做 SHA-256 哈希、**无加盐**，公开仓库下理论上可被彩虹表攻击
-- 洛谷关联**无任何验证**，仅作字符串记录
-
-适合场景：学习 GitHub API、前端用户系统原型、低敏 / 临时用途。
-
----
-
-## 📁 项目结构
+## 项目结构
 
 ```
-mdqp/
-├── index.html    # 单页应用界面
-├── style.css     # 样式
-├── app.js        # 逻辑：GitHub API 读写 / SHA-256 / 用户 CRUD
-├── users.json    # 用户数据（由站点自动维护）
-└── README.md
+├── index.html       # 主页面（SPA）
+├── callback.html    # cpoauth OAuth 回调处理
+├── style.css        # 样式
+├── app.js           # 核心逻辑
+├── README.md        # 本文件
+└── data/
+    └── clips.json   # 剪贴板数据（自动生成）
 ```
+
+## 安全说明
+
+- ⚠️ **手动注册不安全**：用户名和密码哈希直接存储在公开仓库中
+- ✅ **cpoauth 登录推荐**：使用标准 OAuth 2.0 流程，密码不经过本站
+- 🔑 **PAT 安全**：Personal Access Token 存储在浏览器 localStorage 中，不会写死在代码里
+
+## License
+
+MIT
