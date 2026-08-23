@@ -5,5 +5,11 @@
     "luogu": "yanzie",
     "bio": "",
     "createdAt": "2026-08-23T06:19:10.060Z"
+  },
+  {
+    "username": "test",
+    "passwordHash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+    "createdAt": "2026-08-23T08:21:18.640Z",
+    "method": "manual"
   }
 ]
