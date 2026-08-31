@@ -1796,19 +1796,26 @@ async function loadAuthMethods() {
   try { const { data } = await api('/api/auth/methods'); if (data) authMethods = data; } catch {}
 }
 
+/** 按 cpoauth 可用状态切换「第三方登录按钮 / 降级横幅」 */
+function applyCpoauthState(ok) {
+  const cpoBtn = $('#authCpoauthBtn'); const banner = $('#authBanner');
+  if (cpoBtn) cpoBtn.classList.toggle('hidden', !ok);
+  if (!banner) return;
+  if (ok) banner.classList.add('hidden');
+  else { banner.classList.remove('hidden'); banner.textContent = '⚠️ 第三方登录（cpoauth）暂时不可用，请使用账号密码登录或注册。'; }
+}
+
 function openAuthModal(mode = 'login') {
   authMode = mode || 'login';
   const modal = $('#authModal'); if (!modal) return;
-  const cpoDown = !authMethods.cpoauth;
-  const cpoBtn = $('#authCpoauthBtn'); const banner = $('#authBanner');
-  if (cpoBtn) cpoBtn.classList.toggle('hidden', cpoDown);
-  if (banner) {
-    if (cpoDown) { banner.classList.remove('hidden'); banner.textContent = '⚠️ 第三方登录（cpoauth）暂时不可用，请使用账号密码登录或注册。'; }
-    else banner.classList.add('hidden');
-  }
+  applyCpoauthState(authMethods.cpoauth !== false); // 先按已知配置乐观渲染，避免弹窗闪烁
   setAuthMode(authMode);
   modal.classList.remove('hidden'); modal.classList.add('show');
   setTimeout(() => $('#authUsername')?.focus(), 50);
+  // 打开后再做一次真实连通性探测：cpoauth 宕机时自动隐藏按钮并提示走密码登录
+  api('/api/auth/cpoauth-status')
+    .then(({ data }) => { if (data && typeof data.ok === 'boolean') applyCpoauthState(data.ok); })
+    .catch(() => {});
 }
 function closeAuthModal() {
   const modal = $('#authModal'); if (!modal) return;
