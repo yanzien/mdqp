@@ -225,6 +225,24 @@ oauthRoutes.get('/methods', (c) =>
   c.json({ cpoauth: !!c.env.CPOAUTH_CLIENT_ID, password: true })
 );
 
+/**
+ * cpoauth 真实连通性探测（仅在用户打开登录弹窗时调用，不影响首屏）
+ * 判定：能拿到任何非 5xx 响应即视为存活（ authorize 端点无参数时返回 4xx 也说明服务在）
+ */
+oauthRoutes.get('/cpoauth-status', async (c) => {
+  if (!c.env.CPOAUTH_CLIENT_ID) return c.json({ ok: false, reason: 'not_configured' });
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 4000);
+  try {
+    const r = await fetch(CPOAUTH.authUrl, { redirect: 'manual', signal: ctrl.signal });
+    return c.json({ ok: r.status < 500, status: r.status });
+  } catch {
+    return c.json({ ok: false, reason: 'unreachable' });
+  } finally {
+    clearTimeout(timer);
+  }
+});
+
 /** 密码注册（cpoauth 兜底身份，provider='password'） */
 oauthRoutes.post('/password/register', async (c) => {
   const db = c.env.db;
