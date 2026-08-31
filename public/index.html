@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>mdqp — Markdown 快速剪贴板</title>
+<meta name="description" content="mdqp (Markdown quickly paste) — 免登录可用的 Markdown 云剪贴板，支持密码保护、定时过期、阅读次数限制与自定义短链。">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📋</text></svg>">
+<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/vendor/katex/katex.min.css">
+<script src="/vendor/marked.min.js"></script>
+<script src="/vendor/purify.min.js"></script>
+<script src="/vendor/qrcode.min.js"></script>
+<script src="/vendor/katex/katex.min.js"></script>
+<script src="/vendor/katex/auto-render.min.js"></script>
+</head>
+<body>
+
+<!-- ========== 侧边栏 ========== -->
+<aside class="sidebar" id="sidebar">
+  <a class="brand" href="/" data-link>
+    <span class="brand-logo">📋</span>
+    <span class="brand-text">mdqp<em>Markdown quickly paste</em></span>
+  </a>
+
+  <nav class="nav">
+    <a class="nav-item" href="/" data-link data-nav="home">
+      <span class="nav-ico">🏠</span><span class="nav-label">首页</span>
+    </a>
+    <a class="nav-item nav-item-primary" href="/new" data-link data-nav="new">
+      <span class="nav-ico">＋</span><span class="nav-label">新建剪贴板</span>
+    </a>
+    <a class="nav-item" href="/me" data-link data-nav="me">
+      <span class="nav-ico">👤</span><span class="nav-label">我的</span>
+    </a>
+    <a class="nav-item" href="/invite" data-link data-nav="invite">
+      <span class="nav-ico">🎁</span><span class="nav-label">邀请</span>
+    </a>
+    <a class="nav-item" href="/vip" data-link data-nav="vip">
+      <span class="nav-ico">⭐</span><span class="nav-label">VIP</span>
+    </a>
+    <a class="nav-item hidden" id="navAdminLink" href="/admin" data-link data-nav="admin">
+      <span class="nav-ico">🛡</span><span class="nav-label">管理后台</span>
+    </a>
+    <a class="nav-item hidden" id="navCodeLink" href="/admin/code" data-link data-nav="code">
+      <span class="nav-ico">💻</span><span class="nav-label">查看代码</span>
+    </a>
+  </nav>
+
+  <div class="nav nav-bottom">
+    <a class="nav-item" href="/help" data-link data-nav="help">
+      <span class="nav-ico">❓</span><span class="nav-label">帮助</span>
+    </a>
+    <a class="nav-item" href="/about" data-link data-nav="about">
+      <span class="nav-ico">ℹ️</span><span class="nav-label">关于</span>
+    </a>
+    <a class="nav-item" href="/changelog" data-link data-nav="changelog">
+      <span class="nav-ico">📝</span><span class="nav-label">更新日志</span>
+    </a>
+    <a class="nav-item" href="/feedback" data-link data-nav="feedback">
+      <span class="nav-ico">💬</span><span class="nav-label">反馈</span>
+    </a>
+  </div>
+
+  <button class="sidebar-toggle" id="sidebarToggle" title="折叠 / 展开侧边栏" aria-label="折叠或展开侧边栏">
+    <span class="st-ico">«</span><span class="nav-label">收起侧栏</span>
+  </button>
+</aside>
+
+<!-- 移动端遮罩 -->
+<div class="nav-overlay" id="navOverlay"></div>
+
+<div class="main-col">
+  <!-- ========== 顶栏 ========== -->
+  <header class="topbar">
+    <div class="topbar-left">
+      <button class="icon-btn menu-toggle" id="menuToggle" title="菜单">☰</button>
+    </div>
+    <div class="topbar-actions">
+      <button class="icon-btn" id="cmdkTrigger" title="搜索 / 命令面板 (⌘K)">🔍</button>
+      <button class="icon-btn" id="themeBtn" title="切换主题">🌙</button>
+      <span id="navAuth"></span>
+    </div>
+  </header>
+
+  <!-- ========== 通知条 ========== -->
+  <div id="toast" class="toast"></div>
+
+  <main id="app">
+    <!-- ========== 首页 ========== -->
+    <section class="view" id="view-home">
+      <div class="hero">
+        <h1>Markdown 云剪贴板</h1>
+        <p class="hero-sub">粘上就走，拿链接就能分享。<b>不登录也能用</b>，登录后不限量且只有你能改。</p>
+        <div class="hero-jump">
+          <input id="jumpInput" class="input" placeholder="输入剪贴板 ID / 短链，例如 ltx9k2m4" autocomplete="off">
+          <button class="btn btn-primary" id="jumpBtn">前往</button>
+        </div>
+        <div class="hero-stats" id="heroStats"></div>
+      </div>
+
+      <div id="announcementBanner" class="announcement-banner hidden"></div>
+
+      <div class="list-head">
+        <h2>🌐 公开剪贴板</h2>
+        <input id="searchInput" class="input input-sm" placeholder="🔍 搜索标题 / 内容 / 作者">
+      </div>
+      <div id="clipList" class="clip-grid"><div class="skeleton-row"></div><div class="skeleton-row"></div></div>
+      <div id="pager" class="pager"></div>
+    </section>
+
+    <!-- ========== 剪贴板详情 ========== -->
+    <section class="view" id="view-clip">
+      <div class="crumb">
+        <a href="/" data-link>← 全部剪贴板</a>
+        <div class="crumb-right" id="clipTools"></div>
+      </div>
+      <div id="clipGate"></div>
+      <article id="clipArticle" class="hidden">
+        <h1 id="clipTitle" class="clip-title"></h1>
+        <div class="meta-row">
+          <a class="author" id="clipAuthor" href="#"><span class="avatar" id="clipAvatar"></span><span id="clipAuthorName"></span></a>
+          <span class="meta-sep">·</span>
+          <span id="clipMeta" class="muted"></span>
+        </div>
+        <div id="clipBadges" class="badge-row"></div>
+        <div id="clipContent" class="markdown-body"></div>
+        <div id="clipOutline" class="toc-panel hidden"></div>
+        <div class="share-box">
+          <div class="share-row">
+            <input id="shareLink" class="input input-sm" readonly>
+            <button class="btn btn-sm" id="copyLinkBtn">复制链接</button>
+            <button class="btn btn-sm" id="copyTextBtn">复制内容</button>
+            <a class="btn btn-sm btn-ghost" id="rawLink" target="_blank">Raw</a>
+            <button class="btn btn-sm btn-ghost" id="qrBtn">二维码</button>
+          </div>
+          <div id="qrBox" class="qr-box hidden"></div>
+        </div>
+        <div id="commentSection"></div>
+      </article>
+    </section>
+
+    <!-- ========== 用户主页 ========== -->
+    <section class="view" id="view-user">
+      <div class="crumb"><a href="/" data-link>← 全部剪贴板</a></div>
+      <div class="profile" id="profile"></div>
+      <div class="list-head"><h2 id="userClipsTitle">Ta 的剪贴板</h2></div>
+      <div id="userClips" class="clip-grid"></div>
+    </section>
+
+    <!-- ========== 编辑器（新建 / 修改共用） ========== -->
+    <section class="view" id="view-edit">
+      <div class="crumb">
+        <a href="/" data-link>← 取消</a>
+        <div class="crumb-right">
+          <span id="editorIdentity" class="muted"></span>
+          <button class="btn btn-primary" id="saveBtn">💾 发布</button>
+        </div>
+      </div>
+
+      <div id="guestNotice" class="notice hidden"></div>
+
+      <input id="edTitle" class="input title-input" placeholder="标题（可留空）" maxlength="200">
+
+      <div class="editor-toolbar">
+        <button data-md="h1" title="一级标题">H1</button>
+        <button data-md="h2" title="二级标题">H2</button>
+        <button data-md="h3" title="三级标题">H3</button>
+        <button data-md="bold" title="加粗"><b>B</b></button>
+        <button data-md="italic" title="斜体"><i>I</i></button>
+        <button data-md="strike" title="删除线"><s>S</s></button>
+        <button data-md="link" title="链接">🔗</button>
+        <button data-md="image" title="图片">🖼</button>
+        <button data-md="code" title="代码块">‹›</button>
+        <button data-md="quote" title="引用">❝</button>
+        <button data-md="list" title="列表">•</button>
+        <button data-md="table" title="表格">▦</button>
+        <button data-md="hr" title="分割线">―</button>
+        <span class="tb-sep"></span>
+        <button id="fixerBtn" class="tb-action" title="自动修复 Markdown / LaTeX / KaTeX">🔧 修复</button>
+        <button id="previewToggle" class="tb-toggle">👁 实时预览</button>
+        <button id="tocToggle" class="tb-toggle">📑 目录</button>
+        <span class="tb-count muted" id="charCount">0 字</span>
+      </div>
+
+      <div class="editor-split" id="editorSplit">
+        <textarea id="edContent" class="editor-area" placeholder="在这里粘贴 Markdown…&#10;&#10;# 支持标题&#10;- 列表&#10;`代码` **加粗**&#10;&#10;| 表格 | 也行 |&#10;|---|---|"></textarea>
+        <div id="edPreview" class="markdown-body preview-pane"></div>
+      </div>
+      <div id="edToc" class="toc-panel hidden"></div>
+
+      <details class="adv" id="advBox">
+        <summary>⚙️ 高级选项：过期时间 · 密码 · 阅读次数 · 自定义短链</summary>
+        <div class="adv-grid">
+          <label>过期时间
+            <select id="edExpiry" class="input input-sm">
+              <option value="never">永不过期</option>
+              <option value="1h">1 小时后</option>
+              <option value="1d">1 天后</option>
+              <option value="7d">7 天后</option>
+              <option value="30d">30 天后</option>
+            </select>
+          </label>
+          <label>阅读次数上限
+            <input id="edMaxViews" class="input input-sm" type="number" min="0" placeholder="0 = 不限" value="0">
+          </label>
+          <label>访问密码
+            <input id="edPassword" class="input input-sm" type="text" placeholder="留空 = 不加密">
+          </label>
+          <label>自定义短链
+            <input id="edSlug" class="input input-sm" placeholder="3-32 位，如 my-notes">
+          </label>
+          <label class="check"><input type="checkbox" id="edPublic" checked> 出现在公开列表（取消则仅凭链接访问）</label>
+          <label class="check" id="edCollabWrap"><input type="checkbox" id="edCollab"> 允许任何人编辑（协作剪贴板）</label>
+          <label class="check"><input type="checkbox" id="edLoginRequired"> 仅登录用户可查看（登录门禁）</label>
+          <label>读者人数上限（按独立访客计，0=不限）
+            <input id="edMaxReaders" class="input input-sm" type="number" min="0" placeholder="0 = 不限" value="0">
+          </label>
+        </div>
+      </details>
+    </section>
+
+    <!-- ========== 站点页面（/help /about） ========== -->
+    <section class="view" id="view-page">
+      <div class="crumb">
+        <a href="/" data-link>← 全部剪贴板</a>
+        <div class="crumb-right" id="pageTools"></div>
+      </div>
+      <article class="page-article">
+        <h1 id="pageTitle" class="clip-title"></h1>
+        <p class="muted" id="pageMeta"></p>
+        <div id="pageContent" class="markdown-body"></div>
+        <div id="pageOutline" class="toc-panel hidden"></div>
+      </article>
+    </section>
+
+    <!-- ========== 管理后台 ========== -->
+    <section class="view" id="view-admin">
+      <div class="crumb"><a href="/" data-link>← 全部剪贴板</a></div>
+      <div id="adminBox"></div>
+    </section>
+
+    <!-- ========== 我的 ========== -->
+    <section class="view" id="view-me">
+      <div class="crumb"><a href="/" data-link>← 全部剪贴板</a></div>
+      <div id="meHead"></div>
+      <div id="meClips" class="clip-grid"></div>
+    </section>
+
+    <!-- ========== 邀请中心（营销风格） ========== -->
+    <section class="view" id="view-invite">
+      <div id="invitePageContent"></div>
+    </section>
+
+    <!-- ========== VIP 页面（营销风格） ========== -->
+    <section class="view" id="view-vip">
+      <div id="vipPageContent"></div>
+    </section>
+
+    <!-- ========== 官方反馈贴 ========== -->
+    <section class="view" id="view-feedback">
+      <div class="crumb"><a href="/" data-link>← 首页</a></div>
+      <div id="feedbackBox"></div>
+    </section>
+
+    <!-- ========== 查看代码 / 在线编辑 / 审批部署 ========== -->
+    <section class="view" id="view-admin-code">
+      <div class="crumb"><a href="/admin" data-link>← 管理后台</a></div>
+      <div id="adminCodeBox"></div>
+    </section>
+
+    <!-- ========== 404 ========== -->
+    <section class="view" id="view-404">
+      <div class="empty big">
+        <div class="empty-art" aria-hidden="true">
+          <svg viewBox="0 0 120 100" fill="none" class="empty-svg">
+            <circle cx="50" cy="45" r="32" stroke="currentColor" stroke-width="2.5" opacity=".25"/>
+            <path d="M35 42 L46 53 L66 33" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" opacity=".15"/>
+            <circle cx="85" cy="28" r="14" fill="currentColor" opacity=".08"/>
+            <path d="M80 28 L90 28 M85 23 L85 33" stroke="currentColor" stroke-width="2" stroke-linecap="round" opacity=".2"/>
+          </svg>
+        </div>
+        <h2>🤔 找不到这个剪贴板</h2>
+        <p class="muted">它可能已被删除、已过期，或者已达到阅读次数上限。</p>
+        <a class="btn btn-primary" href="/" data-link>回首页</a>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span>mdqp · Markdown quickly paste</span>
+    <span class="muted"><a href="/help" data-link>使用帮助</a> · <a href="/about" data-link>关于</a> · <a href="/changelog" data-link>更新日志</a> · 登录由 <a href="https://www.cpoauth.com/" target="_blank">cpoauth</a> 提供</span>
+  </footer>
+</div>
+
+<!-- ========== 命令面板 (⌘K) ========== -->
+<div class="cmdk" id="cmdk">
+  <div class="cmdk-backdrop" id="cmdkBackdrop"></div>
+  <div class="cmdk-panel" role="dialog" aria-modal="true" aria-label="命令面板">
+    <div class="cmdk-input-row">
+      <span class="cmdk-search-ico">🔍</span>
+      <input id="cmdkInput" class="cmdk-input" placeholder="搜索页面、操作…" autocomplete="off" spellcheck="false">
+      <span class="cmdk-esc">Esc</span>
+    </div>
+    <div class="cmdk-list" id="cmdkList"></div>
+    <div class="cmdk-foot">
+      <span><kbd>↑</kbd><kbd>↓</kbd> 选择</span>
+      <span><kbd>↵</kbd> 打开</span>
+      <span><kbd>Esc</kbd> 关闭</span>
+    </div>
+  </div>
+</div>
+
+<!-- ========== Markdown / LaTeX / KaTeX 自动修复 ========== -->
+<div class="modal hidden" id="fixerModal">
+  <div class="modal-backdrop" id="fixerBackdrop"></div>
+  <div class="modal-panel fixer-panel" role="dialog" aria-modal="true" aria-label="自动修复">
+    <div class="modal-head">
+      <h3>🔧 Markdown / LaTeX / KaTeX 自动修复</h3>
+      <button class="modal-close" id="fixerClose" aria-label="关闭">✕</button>
+    </div>
+    <p class="muted" style="margin:6px 0 10px">粘贴有问题的 Markdown / LaTeX / KaTeX，点「修复」会尽量自动补全未闭合的符号并校验公式语法。结果可复制或填回编辑器。</p>
+    <textarea id="fixerInput" class="fixer-input" placeholder="在此粘贴需要修复的内容…"></textarea>
+    <div class="fixer-actions">
+      <button class="btn btn-sm btn-primary" id="fixerRun">🛠 修复</button>
+      <button class="btn btn-sm" id="fixerToEditor">⬇ 填入编辑器</button>
+      <button class="btn btn-sm btn-ghost" id="fixerCopy">复制结果</button>
+    </div>
+    <div id="fixerChanges" class="fixer-changes hidden"></div>
+    <textarea id="fixerOutput" class="fixer-input fixer-output" readonly placeholder="修复结果将显示在这里…"></textarea>
+  </div>
+</div>
+
+<!-- ========== 登录 / 注册（cpoauth 兜底：账号密码） ========== -->
+<div class="modal-overlay hidden" id="authModal">
+  <div class="modal auth-modal" role="dialog" aria-modal="true" aria-label="登录或注册">
+    <div class="modal-head">
+      <h3 id="authTitle">🔐 登录 mdqp</h3>
+      <button class="modal-close" id="authClose" aria-label="关闭">✕</button>
+    </div>
+    <div class="modal-body auth-body">
+      <div id="authBanner" class="auth-banner hidden"></div>
+
+      <a class="btn btn-primary btn-block" id="authCpoauthBtn" href="/api/auth/login">🔑 用 cpoauth 账号登录</a>
+      <div class="auth-divider"><span>或用账号密码</span></div>
+
+      <div class="auth-tabs">
+        <button class="auth-tab active" id="authTabLogin" type="button">密码登录</button>
+        <button class="auth-tab" id="authTabRegister" type="button">注册新账号</button>
+      </div>
+
+      <form id="authForm" class="auth-form" autocomplete="on">
+        <input class="input" id="authUsername" type="text" placeholder="用户名（2–20 字符）" autocomplete="username" maxlength="20">
+        <input class="input" id="authPassword" type="password" placeholder="密码（至少 6 位）" autocomplete="current-password" maxlength="128">
+        <div id="authError" class="auth-error hidden"></div>
+        <button class="btn btn-primary btn-block" id="authSubmit" type="submit">登录</button>
+      </form>
+      <p class="auth-hint">密码登录是 <b>cpoauth 的备用方案</b>：即使第三方登录服务器宕机，你也能凭账号密码进入。</p>
+    </div>
+  </div>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>
