@@ -2,7 +2,11 @@
 
 mdqp 的主要版本变动记录。当前部署版本 **v4.2**。
 
-> 维护约定：任何功能改动、修复或配置变更，都必须在本文件追加条目，并同步 `public/app.js` 顶部的 `CHANGELOG_MD` 常量（更新日志页直接读它，不走数据库）。若改动影响用户可见行为（`docs/help.md` 里写了的），同步更新帮助文档与数据库 `pages.help`。
+> **维护约定**：任何功能改动、修复或配置变更，都必须在本文件追加条目，然后运行 `node scripts/sync-docs.mjs` 完成同步：
+> - `/changelog` 页读的是 `public/app.js` 顶部的 `CHANGELOG_MD` 常量（**不走数据库**），脚本负责从本文件写入；
+> - `/help` 页读的是数据库 `pages.help`，脚本负责从 `docs/help.md` 写入——**`docs/help.md` 是帮助内容的唯一源**，后台在线编辑的结果会在下次同步时被覆盖，长期修改请改文件后跑脚本；
+> - 别忘了同步 `src/worker.js` 顶部的 `const VERSION`；
+> - 发布前用 `node scripts/sync-docs.mjs --check` 自检（不同步则退出码 1）。
 
 ---
 
