@@ -1,0 +1,13 @@
+name = "mdqp"
+pages_build_output_dir = "pages-build"
+compatibility_date = "2024-11-01"
+
+# === D1 数据库绑定（与 Worker 共用同一个物理库 mdqp-db）===
+[[d1_databases]]
+binding = "db"
+database_name = "mdqp-db"
+database_id = "e334728b-dab4-4731-9225-e7665d2be8ca"
+
+# === cpoauth 凭据（必须用 secret 注入，绝不写进文件）===
+#   npx wrangler pages secret put CPOAUTH_CLIENT_ID --project-name mdqp
+#   npx wrangler pages secret put CPOAUTH_CLIENT_SECRET --project-name mdqp
