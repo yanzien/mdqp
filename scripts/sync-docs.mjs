@@ -22,8 +22,8 @@ const checkOnly = args.includes('--check');
 /* ---------------- 更新日志：CHANGELOG.md -> app.js ---------------- */
 function syncChangelog() {
   let md = fs.readFileSync('CHANGELOG.md', 'utf8').trim();
-  // 去掉内部维护约定（不面向用户展示）
-  md = md.replace(/^> 维护约定：[\s\S]*?\n(?=\n---)/m, '').replace(/\n{3,}/g, '\n\n').trim();
+  // 去掉内部维护约定块（以 > 开头、含「维护约定」，直到下一个 --- 分隔线；不面向用户展示）
+  md = md.replace(/^>.*维护约定[\s\S]*?(?=\n---)/m, '').replace(/\n{3,}/g, '\n\n').trim();
   const escaped = md.replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$\{/g, '\\${');
 
   const appPath = 'public/app.js';
