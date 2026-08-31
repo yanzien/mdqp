@@ -1,0 +1,32 @@
+name = "mdqp"
+main = "src/worker.js"
+compatibility_date = "2024-11-01"
+workers_dev = true
+
+# === D1 数据库绑定 ===
+[[d1_databases]]
+binding = "db"
+database_name = "mdqp-db"
+database_id = "e334728b-dab4-4731-9225-e7665d2be8ca"
+
+# === 前端静态资源（Workers Static Assets）===
+[assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
+# === cpoauth 凭据 ===
+# ⚠️ 绝不写在这里！用 secret 注入：
+#   npx wrangler pages secret put CPOAUTH_CLIENT_ID
+#   npx wrangler pages secret put CPOAUTH_CLIENT_SECRET
+
+# === 自定义域名 ===
+[[routes]]
+pattern = "mdqp.cc.cd"
+custom_domain = true
+zone_name = "mdqp.cc.cd"
+
+[[routes]]
+pattern = "www.mdqp.cc.cd"
+custom_domain = true
+zone_name = "mdqp.cc.cd"
