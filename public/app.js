@@ -6,7 +6,16 @@
 // 更新日志：随代码发布自动同步
 const CHANGELOG_MD = `# 📝 更新日志
 
-mdqp 的主要版本变动记录。当前部署版本 **v4.3**。
+mdqp 的主要版本变动记录。当前部署版本 **v4.3.1**。
+
+---
+
+## v4.3.1 · 2026-09-01（CPOAuth 接入体验 + 健壮性补强）
+- 🚪 **退出时撤销 cpoauth 令牌**：登出会读取用户保存的 \`refresh_token\` 并调用 cpoauth 撤销接口，避免令牌在第三方侧残留（撤销失败不阻塞退出）
+- 🧭 **宕机三步自救引导**：第三方登录不可用时，按钮不再隐藏而是**置灰 + tooltip**，并按登录态给出不同指引——已登录未设密码者提示「立即设置密码」，其余用户给「登录帮助 / 联系站长」兜底入口（指向 \`/c/loginhelp\`）
+- 🔑 **登录弹窗说明**：cpoauth 按钮下方新增一句话说明它是什么、能同步哪些竞赛账号
+- 🃏 **关联账号品牌卡片**：个人主页的关联账号从纯文本 chip 升级为带品牌色、可点击跳转平台主页的卡片网格；本人未绑定时显示空态提示
+- 🌐 **低版本浏览器引导**：通过可选链 \`?.\`/\`??\` 语法探测，过旧浏览器（如 IE、旧 Edge、Chrome<60、FF<55、Safari<11）打开即弹出引导弹窗，推荐下载 Firefox 新版，并跳过 SPA 初始化避免白屏
 
 ---
 
@@ -699,9 +708,32 @@ function openPermsModal(displayName) {
   });
 }
 
-function linkedAccountChips(list) {
-  if (!list || !list.length) return '';
-  return `<div class="linked-accounts">${list.map(a => { const p = PLATFORM_NAMES[a.platform] || a.platform; const handle = a.platformUsername || a.platformUid || ''; return `<span class="chip" title="${esc(p)} UID: ${esc(String(a.platformUid || ''))}">${esc(p)} · ${esc(String(handle))}</span>`; }).join('')}</div>`;
+// 各竞赛平台品牌色 + 主页 URL 模板（链接指向平台个人页，新标签打开）
+const PLATFORM_META = {
+  luogu:      { name: '洛谷', color: '#1a7feb', url: (a) => `https://www.luogu.com.cn/user/${esc(String(a.platformUid || ''))}` },
+  codeforces: { name: 'Codeforces', color: '#3f8cff', url: (a) => `https://codeforces.com/profile/${esc(String(a.platformUsername || ''))}` },
+  atcoder:    { name: 'AtCoder', color: '#2b2b2b', url: (a) => `https://atcoder.jp/users/${esc(String(a.platformUsername || ''))}` },
+  github:     { name: 'GitHub', color: '#24292f', url: (a) => `https://github.com/${esc(String(a.platformUsername || ''))}` },
+  google:     { name: 'Google', color: '#ea4335', url: () => '' },
+  clist:      { name: 'Clist', color: '#7c3aed', url: (a) => `https://clist.by/user/${esc(String(a.platformUsername || ''))}/` }
+};
+
+/** 关联账号 → 可点击品牌卡片网格；self=true 且无绑定时给空态提示 */
+function linkedAccountChips(list, self) {
+  if (!list || !list.length) {
+    if (self) return `<div class="linked-empty">未关联竞赛账号</div>`;
+    return '';
+  }
+  const cards = list.map((a) => {
+    const meta = PLATFORM_META[a.platform] || { name: a.platform, color: 'var(--primary)', url: () => '' };
+    const handle = a.platformUsername || a.platformUid || '';
+    const inner = `<span class="lc-name" style="color:${meta.color}">${esc(meta.name)}</span><span class="lc-handle">@${esc(String(handle))}</span>`;
+    const href = meta.url(a);
+    return href
+      ? `<a class="linked-card" href="${href}" target="_blank" rel="noopener" style="--lc:${meta.color}">${inner}</a>`
+      : `<span class="linked-card" style="--lc:${meta.color}">${inner}</span>`;
+  }).join('');
+  return `<div class="linked-cards">${cards}</div>`;
 }
 
 /** v4.0: 功能开关标签展示 */
@@ -737,7 +769,7 @@ async function renderUser(uid) {
       <div class="profile-stats"><span>📋 ${u.clip_count} 个剪贴板</span>${self ? '<span class="badge">这是你</span>' : ''}
         ${u.invite_code ? `<span>🎁 邀请码：<code class="card-id">${esc(u.invite_code)}</code></span>` : ''}
       </div>
-      ${linkedAccountChips(linked)}
+      ${linkedAccountChips(linked, self)}
       ${linked.length || self ? `<div class="profile-actions">${self ? '<a class="btn btn-sm" href="https://www.cpoauth.com/profile" target="_blank" rel="noopener">🔗 关联账号管理（cpoauth）</a>' : ''}</div>` : ''}
       <div class="profile-wechat"><h4>扫一扫，添加我为好友</h4><img src="/wechat-qr.png" alt="WeChat QR" onerror="this.style.display='none'"></div>
       ${self ? `<div class="bio-edit"><details open><summary>✏️ 编辑个人资料</summary>
@@ -1046,7 +1078,7 @@ async function renderMe() {
       ${bioHtml}
       ${flagsHtml}
       ${quotaHtml}
-      ${linkedAccountChips(linked)}
+      ${linkedAccountChips(linked, true)}
       <div class="profile-stats">
         <a class="btn btn-sm" href="/u/${esc(me.userId)}" data-link>查看公开主页</a>
         <a class="btn btn-sm" href="/invite" data-link>🎁 邀请好友</a>
@@ -1857,13 +1889,35 @@ async function loadAuthMethods() {
   try { const { data } = await api('/api/auth/methods'); if (data) authMethods = data; } catch {}
 }
 
-/** 按 cpoauth 可用状态切换「第三方登录按钮 / 降级横幅」 */
+/** 按 cpoauth 可用状态切换「第三方登录按钮 / 降级横幅」
+ *  - 可用：按钮正常、横幅隐藏
+ *  - 不可用：按钮置灰 + tooltip（不隐藏，避免用户以为功能消失），并按登录态给出三步自救指引 */
 function applyCpoauthState(ok) {
-  const cpoBtn = $('#authCpoauthBtn'); const banner = $('#authBanner');
-  if (cpoBtn) cpoBtn.classList.toggle('hidden', !ok);
+  const cpoBtn = $('#authCpoauthBtn');
+  const banner = $('#authBanner');
+  const me = state.me || {};
+  if (ok) {
+    if (cpoBtn) { cpoBtn.classList.remove('is-disabled'); cpoBtn.removeAttribute('aria-disabled'); cpoBtn.removeAttribute('title'); cpoBtn.onclick = null; }
+    if (banner) banner.classList.add('hidden');
+    return;
+  }
+  // cpoauth 不可用：按钮置灰 + tooltip，点击拦截并提示
+  if (cpoBtn) {
+    cpoBtn.classList.add('is-disabled');
+    cpoBtn.setAttribute('aria-disabled', 'true');
+    cpoBtn.title = 'cpoauth 暂时不可用，请使用账号密码登录';
+    cpoBtn.onclick = (e) => { e.preventDefault(); toast('第三方登录（cpoauth）暂时不可用，请使用账号密码'); };
+  }
   if (!banner) return;
-  if (ok) banner.classList.add('hidden');
-  else { banner.classList.remove('hidden'); banner.textContent = '⚠️ 第三方登录（cpoauth）暂时不可用，请使用账号密码登录或注册。'; }
+  banner.classList.remove('hidden');
+  // 已登录但没设密码 → 引导立即设置密码（避免下次彻底进不来）
+  if (me.type === 'user' && me.has_password === false) {
+    banner.innerHTML = `⚠️ 第三方登录（cpoauth）暂时不可用。建议你 <b>立即设置登录密码</b>，避免下次无法进入。 <button type="button" class="banner-link" id="authBannerSetPw">立即设置</button>`;
+    const sp = $('#authBannerSetPw'); if (sp) sp.onclick = () => openSetPwModal();
+  } else {
+    // 未登录 / 已设密码：提示走密码，给无法自救者的兜底入口
+    banner.innerHTML = `⚠️ 第三方登录（cpoauth）暂时不可用，请使用账号密码登录或注册。若你 <b>还没设密码且无法登录</b>，可查看 <a class="banner-link" href="/c/loginhelp" target="_blank" rel="noopener">登录帮助</a> 或联系站长。`;
+  }
 }
 
 function openAuthModal(mode = 'login') {
@@ -2005,6 +2059,8 @@ document.addEventListener('click', (e) => { const a = e.target.closest('a[data-l
 window.addEventListener('popstate', render);
 
 (async function init() {
+  // 低版本浏览器：已弹出引导弹窗，跳过 SPA 初始化（避免现代语法报错白屏）
+  if (window.__MDQP_LEGACY) return;
   initTheme(); const mt = $('#menuToggle'); if (mt) mt.onclick = () => document.body.classList.toggle('nav-open');
   const ov = $('#navOverlay'); if (ov) ov.onclick = closeNav; setupCmdk();
   setupAuthModal(); loadAuthMethods();
