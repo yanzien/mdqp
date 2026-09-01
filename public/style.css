@@ -848,3 +848,47 @@ a.linked-card:hover { transform: translateY(-1px); box-shadow: 0 3px 10px rgba(0
 .legacy-modal { width: min(440px, 100%); }
 .legacy-modal .btn-block { margin-top: 4px; }
 
+/* ========== 「我的」/ 个人主页：优化布局 ============ */
+.profile-top { display: flex; gap: 18px; align-items: flex-start; }
+.profile-top .profile-info { flex: 1; min-width: 0; }
+.profile-gear { font-size: 18px; padding: 6px 8px; margin-left: auto; align-self: flex-start; }
+.profile-name { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.me-section { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--border); }
+.me-section-title { font-size: 15px; margin: 0 0 10px; color: var(--text); }
+.cp-card-img { width: 100%; max-width: 340px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface-2); }
+.cp-summary { margin-top: 10px; }
+.cp-summary-grid { display: flex; flex-wrap: wrap; gap: 10px; }
+.cp-stat { min-width: 120px; padding: 10px 12px; border-radius: 10px; background: color-mix(in srgb, var(--lc, var(--primary)) 8%, var(--surface)); border: 1px solid color-mix(in srgb, var(--lc, var(--primary)) 35%, var(--border)); display: flex; flex-direction: column; gap: 2px; }
+.cp-stat-name { font-size: 12px; color: var(--muted); }
+.cp-stat-rating { font-size: 20px; font-weight: 700; color: var(--lc, var(--primary)); }
+.cp-stat-sub { font-size: 11px; color: var(--muted); }
+.cp-summary-hint { font-size: 12.5px; }
+
+/* 信任等级 + 成就徽章 */
+.badges-row { margin-top: 10px; }
+.badge-trust { background: color-mix(in srgb, #6d28d9 12%, var(--surface)); color: #6d28d9; border-color: color-mix(in srgb, #6d28d9 35%, var(--border)); }
+.badge-trust.tl-3 { background: color-mix(in srgb, #b45309 14%, var(--surface)); color: #b45309; border-color: color-mix(in srgb, #b45309 40%, var(--border)); }
+.badge-trust.tl-2 { color: #047857; border-color: color-mix(in srgb, #047857 35%, var(--border)); background: color-mix(in srgb, #047857 10%, var(--surface)); }
+.badge-ach { background: var(--surface-2); color: var(--text-2); border-color: var(--border); }
+
+/* ========== 刷新引导弹窗 ============ */
+.refresh-guide-modal { width: min(420px, 100%); }
+.rg-icon { font-size: 34px; text-align: center; }
+.rg-text { text-align: center; line-height: 1.6; margin: 4px 0 6px; }
+.rg-actions { display: flex; flex-direction: column; gap: 8px; }
+.rg-actions .btn { text-decoration: none; }
+.rg-foot { display: flex; justify-content: center; gap: 14px; margin-top: 6px; }
+.rg-foot .btn-ghost { color: var(--muted); }
+
+/* ========== 设置弹窗（通用 / 账号与安全） ============ */
+.settings-modal { width: min(460px, 100%); }
+.settings-tabs { display: flex; gap: 6px; background: var(--surface-2); padding: 4px; border-radius: 10px; margin-bottom: 14px; }
+.settings-tab { flex: 1; border: none; background: none; padding: 9px; border-radius: 7px; cursor: pointer; color: var(--muted); font-size: 14px; }
+.settings-tab.active { background: var(--surface); color: var(--text); font-weight: 600; box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+.settings-pane { display: flex; flex-direction: column; gap: 10px; }
+.sec-row { display: flex; gap: 12px; align-items: center; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.sec-row:last-child { border-bottom: none; }
+.sec-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.sec-info b { font-size: 14px; }
+.sec-info .muted { font-size: 12.5px; line-height: 1.5; }
+
