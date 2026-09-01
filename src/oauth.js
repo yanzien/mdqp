@@ -15,8 +15,9 @@ const CPOAUTH = {
   tokenUrl: 'https://www.cpoauth.com/api/oauth/token',
   userinfoUrl: 'https://www.cpoauth.com/api/oauth/userinfo',
   // cp:linked: 返回 linked_accounts（洛谷/AtCoder/Codeforces/GitHub 等绑定账号）
-  // 可用 Worker Secret CPOAUTH_SCOPE 覆盖（如 cpoauth 后台未放行该 scope 时退回 'openid profile'）
-  defaultScope: 'openid profile cp:linked'
+  // email: 返回邮箱（仅作登录标识与展示，不独立绑定流程）
+  // 可用 Worker Secret CPOAUTH_SCOPE 覆盖（如 cpoauth 后台未放行某 scope 时退回 'openid profile'）
+  defaultScope: 'openid profile cp:linked email'
 };
 
 function b64url(bytes) {
@@ -71,11 +72,18 @@ oauthRoutes.get('/login', async (c) => {
   const inviteCookie = inviteCode
     ? [`mdqp_invite=${encodeURIComponent(inviteCode)}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=600`]
     : [];
+  // 账号关联模式：已登录的密码用户点「绑定 cpoauth」时带 ?link=1，
+  // 用短效 cookie 记住"这是关联流程"，回调后把 sub 写回当前账号而非新建
+  const isLink = (c.req.query('link') || '').toString() === '1';
+  const linkCookie = isLink
+    ? [`mdqp_link=1; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=600`]
+    : [];
 
   return redirectWithCookies(CPOAUTH.authUrl + '?' + params.toString(), [
     `pkce_v=${verifier}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=600`,
     `oauth_state=${state}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=600`,
-    ...inviteCookie
+    ...inviteCookie,
+    ...linkCookie
   ]);
 });
 
@@ -99,7 +107,8 @@ oauthRoutes.get('/callback', async (c) => {
   const clearCookies = [
     'pkce_v=; Path=/; Max-Age=0',
     'oauth_state=; Path=/; Max-Age=0',
-    'mdqp_invite=; Path=/; Max-Age=0'
+    'mdqp_invite=; Path=/; Max-Age=0',
+    'mdqp_link=; Path=/; Max-Age=0'
   ];
 
   try {
@@ -150,7 +159,35 @@ oauthRoutes.get('/callback', async (c) => {
     const linked = Array.isArray(user.linked_accounts) ? JSON.stringify(user.linked_accounts) : '';
     // cpoauth 个人简介：多字段兜底（不同版本 cpoauth 可能返回 bio / description / about / summary）
     const cbio = [user.bio, user.description, user.about, user.summary].find((v) => typeof v === 'string' && v.trim());
+    // 邮箱（scope email；未授权则为空）
+    const email = typeof user.email === 'string' ? user.email.slice(0, 200) : '';
+    const emailVerified = user.email_verified ? 1 : 0;
     const db = c.env.db;
+
+    // ===== 账号关联模式：已登录的密码用户点「绑定 cpoauth」，
+    //       把 cpoauth 的 sub 写回「当前账号」(WHERE id)，而不是新建/orphan =====
+    const linkCookie = cookieHeader.match(/mdqp_link=([^;]+)/)?.[1];
+    if (linkCookie) {
+      const sessionM = cookieHeader.match(/mdqp_session=([^;]+)/);
+      if (sessionM) {
+        const sp = verifyJWT(decodeURIComponent(sessionM[1]), c.env.CPOAUTH_CLIENT_SECRET);
+        if (sp && sp.userId) {
+          await db.prepare(
+            "UPDATE users SET sub = ?, display_name = ?, avatar = ?, linked_accounts = ?, email = ?, email_verified = ?, cpoauth_refresh = ?, cpoauth_token_exp = ?, last_login = datetime('now') WHERE id = ?"
+          ).bind(user.sub, name, avatar, linked, email, emailVerified, refreshToken, tokenExp, String(sp.userId)).run();
+          await db.prepare("UPDATE clipboards SET owner_name = ? WHERE owner_type = 'user' AND owner_id = ?")
+            .bind(name, String(sp.userId)).run();
+          const finalRedirect = inviteCode ? `/me?linked=1&invite_code=${encodeURIComponent(inviteCode)}` : '/me?linked=1';
+          return redirectWithCookies(finalRedirect, [
+            'mdqp_link=; Path=/; Max-Age=0',
+            'pkce_v=; Path=/; Max-Age=0',
+            'oauth_state=; Path=/; Max-Age=0',
+            'mdqp_invite=; Path=/; Max-Age=0'
+          ]);
+        }
+      }
+      // link cookie 存在但会话已失效：不报错，落到下面的普通登录流程（不会 orphan）
+    }
 
     const existing = await db.prepare('SELECT id, role, bio AS curBio FROM users WHERE sub = ?').bind(user.sub).first();
     // 重新登录时：cpoauth 有简介则同步，否则保留用户已在站点手动设置的 bio（不覆盖）
@@ -158,8 +195,8 @@ oauthRoutes.get('/callback', async (c) => {
     let userId;
     if (existing) {
       await db
-        .prepare("UPDATE users SET username = ?, display_name = ?, avatar = ?, linked_accounts = ?, bio = ?, cpoauth_refresh = ?, cpoauth_token_exp = ?, last_login = datetime('now') WHERE sub = ?")
-        .bind(user.username || name, name, avatar, linked, bio, refreshToken, tokenExp, user.sub)
+        .prepare("UPDATE users SET username = ?, display_name = ?, avatar = ?, linked_accounts = ?, bio = ?, email = ?, email_verified = ?, cpoauth_refresh = ?, cpoauth_token_exp = ?, last_login = datetime('now') WHERE sub = ?")
+        .bind(user.username || name, name, avatar, linked, bio, email, emailVerified, refreshToken, tokenExp, user.sub)
         .run();
       userId = existing.id;
       // 同步该用户历史剪贴板的冗余显示名
@@ -167,8 +204,8 @@ oauthRoutes.get('/callback', async (c) => {
         .bind(name, String(userId)).run();
     } else {
       const r = await db
-        .prepare("INSERT INTO users (sub, username, display_name, avatar, linked_accounts, bio, cpoauth_refresh, cpoauth_token_exp, invite_code, last_login) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))")
-        .bind(user.sub, user.username || name, name, avatar, linked, bio, refreshToken, tokenExp, genInviteCode())
+        .prepare("INSERT INTO users (sub, username, display_name, avatar, linked_accounts, bio, email, email_verified, cpoauth_refresh, cpoauth_token_exp, invite_code, last_login) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))")
+        .bind(user.sub, user.username || name, name, avatar, linked, bio, email, emailVerified, refreshToken, tokenExp, genInviteCode())
         .run();
       userId = r.meta.last_row_id;
       // 站点首位用户 = 开发者（全新部署时自动册封）
@@ -419,8 +456,8 @@ oauthRoutes.post('/password/login', async (c) => {
   }
 
   const row = await db
-    .prepare('SELECT id, username, display_name, avatar, password_hash, sub FROM users WHERE username = ? AND password_hash != \'\'')
-    .bind(username)
+    .prepare('SELECT id, username, display_name, avatar, password_hash, sub FROM users WHERE (username = ? OR email = ?) AND password_hash != \'\'')
+    .bind(username, username)
     .first();
 
   // 注意：无论"用户不存在"还是"密码错误"，都返回同一句话，避免泄露账号是否存在
