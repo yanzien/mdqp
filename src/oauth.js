@@ -243,6 +243,62 @@ oauthRoutes.get('/cpoauth-status', async (c) => {
   }
 });
 
+// ========== 密码策略 / 限流工具 ==========
+
+const PW_MIN = 6;
+/** 上限必须存在：hashPassword 是纯 SHA-256，无 KDF 拉伸，
+ *  实测 20 万字符密码会让单次请求从 1.0s 涨到 4.7s（CPU 放大 ≈4.7 倍），
+ *  并发即可构成 DoS。128 位足够任何正常使用。 */
+const PW_MAX = 128;
+
+/** 限流窗口与阈值 */
+const GUARD_WINDOW_MIN = 15;
+const GUARD_IP_MAX = 10;      // 单 IP 窗口内失败上限
+const GUARD_USER_MAX = 8;     // 单账号窗口内失败上限（略低，防分布式撞库）
+
+function clientIP(c) {
+  return (
+    c.req.header('CF-Connecting-IP') ||
+    (c.req.header('X-Forwarded-For') || '').split(',')[0].trim() ||
+    'unknown'
+  );
+}
+
+/** 恒定时间字符串比较，避免通过响应耗时逐字节试探哈希 */
+function safeEqual(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  let diff = a.length ^ b.length;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ (i < b.length ? b.charCodeAt(i) : 0);
+  }
+  return diff === 0;
+}
+
+/** 登录前检查：超过阈值直接拒绝。返回 null 表示放行 */
+async function loginGuard(db, ip, username) {
+  const since = `-${GUARD_WINDOW_MIN} minutes`;
+  const [byIp, byUser] = await Promise.all([
+    db.prepare("SELECT COUNT(*) AS cnt FROM login_attempts WHERE ip = ? AND ok = 0 AND created_at >= datetime('now', ?)").bind(ip, since).first(),
+    db.prepare("SELECT COUNT(*) AS cnt FROM login_attempts WHERE username = ? AND ok = 0 AND created_at >= datetime('now', ?)").bind(username, since).first()
+  ]);
+  if ((byIp?.cnt || 0) >= GUARD_IP_MAX) return 'ip';
+  if ((byUser?.cnt || 0) >= GUARD_USER_MAX) return 'account';
+  return null;
+}
+
+/** 记录一次尝试。ok=1 时顺带清掉该 IP 的历史失败计数 */
+async function recordAttempt(db, ip, username, ok) {
+  if (ok) {
+    await db.prepare('DELETE FROM login_attempts WHERE ip = ?').bind(ip).run();
+  } else {
+    await db.prepare('INSERT INTO login_attempts (ip, username, ok) VALUES (?, ?, 0)').bind(ip, username).run();
+  }
+  // 概率清理，避免表无限增长（约 5% 的请求触发一次）
+  if (Math.random() < 0.05) {
+    await db.prepare("DELETE FROM login_attempts WHERE created_at < datetime('now', '-1 day')").run();
+  }
+}
+
 /** 密码注册（cpoauth 兜底身份，provider='password'） */
 oauthRoutes.post('/password/register', async (c) => {
   const db = c.env.db;
@@ -255,11 +311,15 @@ oauthRoutes.post('/password/register', async (c) => {
 
   if (username.length < 2 || username.length > 20)
     return c.json({ error: 'invalid_username', message: '用户名需 2–20 个字符' }, 400);
-  if (password.length < 6)
-    return c.json({ error: 'weak_password', message: '密码至少 6 位' }, 400);
+  if (password.length < PW_MIN)
+    return c.json({ error: 'weak_password', message: `密码至少 ${PW_MIN} 位` }, 400);
+  if (password.length > PW_MAX)
+    return c.json({ error: 'password_too_long', message: `密码最多 ${PW_MAX} 位` }, 400);
 
-  // 用户名全局唯一（含 cpoauth 用户），避免密码登录歧义
-  const dup = await db.prepare('SELECT id FROM users WHERE username = ?').bind(username).first();
+  // 用户名全局唯一（含 cpoauth 用户），避免密码登录歧义。
+  // 额外做大小写查重：username 列没有 COLLATE NOCASE，登录走精确匹配，
+  // 若同时存在 abc / ABC，登录将无法确定身份。
+  const dup = await db.prepare('SELECT id FROM users WHERE username = ? COLLATE NOCASE').bind(username).first();
   if (dup) return c.json({ error: 'username_taken', message: '用户名已被占用' }, 409);
 
   const ph = await hashPassword(password);
@@ -302,15 +362,35 @@ oauthRoutes.post('/password/login', async (c) => {
   const username = (body.username || '').toString().trim();
   const password = (body.password || '').toString();
   if (!username || !password) return c.json({ error: 'missing_fields', message: '请输入用户名和密码' }, 400);
+  // 先拦超长密码再做任何 hash 计算，否则等于把 CPU 放大漏洞敞开给匿名请求
+  if (password.length > PW_MAX)
+    return c.json({ error: 'invalid_credentials', message: '用户名或密码错误' }, 401);
+
+  const ip = clientIP(c);
+  const blockedBy = await loginGuard(db, ip, username);
+  if (blockedBy) {
+    return c.json(
+      { error: 'too_many_attempts', message: `尝试过于频繁，请 ${GUARD_WINDOW_MIN} 分钟后再试` },
+      429
+    );
+  }
 
   const row = await db
     .prepare('SELECT id, username, display_name, avatar, password_hash, sub FROM users WHERE username = ? AND password_hash != \'\'')
     .bind(username)
     .first();
-  if (!row) return c.json({ error: 'invalid_credentials', message: '用户名或密码错误' }, 401);
+
+  // 注意：无论"用户不存在"还是"密码错误"，都返回同一句话，避免泄露账号是否存在
+  if (!row) {
+    await recordAttempt(db, ip, username, false);
+    return c.json({ error: 'invalid_credentials', message: '用户名或密码错误' }, 401);
+  }
 
   const ph = await hashPassword(password);
-  if (ph !== row.password_hash) return c.json({ error: 'invalid_credentials', message: '用户名或密码错误' }, 401);
+  if (!safeEqual(ph, row.password_hash || '')) {
+    await recordAttempt(db, ip, username, false);
+    return c.json({ error: 'invalid_credentials', message: '用户名或密码错误' }, 401);
+  }
 
   const name = row.display_name || row.username;
   const jwt = await signJWT(
@@ -318,6 +398,7 @@ oauthRoutes.post('/password/login', async (c) => {
     c.env.CPOAUTH_CLIENT_SECRET
   );
   await db.prepare("UPDATE users SET last_login = datetime('now') WHERE id = ?").bind(row.id).run();
+  await recordAttempt(db, ip, username, true);
   return jsonWithCookies({ ok: true, user: { id: Number(row.id), name } }, [sessionCookie(jwt)]);
 });
 
@@ -332,11 +413,18 @@ oauthRoutes.post('/password/set', async (c) => {
   let body;
   try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
   const password = (body.password || '').toString();
-  if (password.length < 6) return c.json({ error: 'weak_password', message: '密码至少 6 位' }, 400);
+  if (password.length < PW_MIN) return c.json({ error: 'weak_password', message: `密码至少 ${PW_MIN} 位` }, 400);
+  if (password.length > PW_MAX) return c.json({ error: 'password_too_long', message: `密码最多 ${PW_MAX} 位` }, 400);
+
+  const db = c.env.db;
+  // 校验账号仍然存在：JWT 在 7 天内有效，但账号可能已被管理员删除
+  const u = await db.prepare('SELECT id, username FROM users WHERE id = ?').bind(String(p.userId)).first();
+  if (!u) return c.json({ error: 'account_gone', message: '账号不存在' }, 401);
 
   const ph = await hashPassword(password);
-  await c.env.db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').bind(ph, p.userId).run();
-  return c.json({ ok: true });
+  await db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').bind(ph, String(p.userId)).run();
+  // 返回登录名，前端据此提示"以后可用 xxx + 密码登录"
+  return c.json({ ok: true, username: u.username || '' });
 });
 
 export { oauthRoutes };
