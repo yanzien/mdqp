@@ -83,17 +83,6 @@
     </div>
   </header>
 
-  <!-- ========== 未设置密码引导条（仅「已登录 + 未设密码」时显示） ========== -->
-  <div id="pwGuideBar" class="pw-guide hidden">
-    <span class="pw-guide-icon">🛡️</span>
-    <div class="pw-guide-text">
-      <b>还没设置登录密码</b>
-      <span>第三方登录（cpoauth）一旦宕机，你将无法进入自己的账号。花 10 秒设一个密码作为备用入口。</span>
-    </div>
-    <button class="btn btn-sm btn-primary" id="pwGuideSetBtn">立即设置</button>
-    <button class="icon-btn" id="pwGuideClose" title="7 天内不再提醒" aria-label="关闭">✕</button>
-  </div>
-
   <!-- ========== 通知条 ========== -->
   <div id="toast" class="toast"></div>
 
@@ -392,6 +381,75 @@
         <button class="btn btn-primary btn-block" id="setPwSubmit" type="submit">保存密码</button>
       </form>
       <p class="auth-hint" id="setPwSuccess"></p>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 刷新时统一引导弹窗（未绑 cpoauth → 建议绑定；已绑未设密码 → 建议设密码） ============ -->
+<div class="modal-overlay hidden" id="refreshGuideModal">
+  <div class="modal refresh-guide-modal" role="dialog" aria-modal="true" aria-label="完善你的账号">
+    <div class="modal-head">
+      <h3 id="rgTitle">完善你的账号</h3>
+      <button class="modal-close" id="rgClose" aria-label="关闭">✕</button>
+    </div>
+    <div class="modal-body auth-body">
+      <div class="rg-icon" id="rgIcon">🔑</div>
+      <p class="rg-text" id="rgText"></p>
+      <div class="rg-actions">
+        <button class="btn btn-primary btn-block" id="rgPrimary">立即绑定</button>
+        <a class="btn btn-block" id="rgSecondary" href="/c/loginhelp?from=mdqp" target="_blank" rel="noopener">查看注册指南</a>
+      </div>
+      <div class="rg-foot">
+        <button class="btn btn-ghost btn-sm" id="rgLater">稍后再说</button>
+        <button class="btn btn-ghost btn-sm" id="rgNever">不再提示</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 设置弹窗（通用 / 账号与安全） ============ -->
+<div class="modal-overlay hidden" id="settingsModal">
+  <div class="modal settings-modal" role="dialog" aria-modal="true" aria-label="设置">
+    <div class="modal-head">
+      <h3>⚙️ 设置</h3>
+      <button class="modal-close" id="settingsClose" aria-label="关闭">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="settings-tabs">
+        <button class="settings-tab active" id="setTabGeneral" type="button">通用</button>
+        <button class="settings-tab" id="setTabSecurity" type="button">账号与安全</button>
+      </div>
+      <div class="settings-pane" id="setPaneGeneral">
+        <label class="field-label">个性签名（200 字内）</label>
+        <textarea id="setSig" class="input" maxlength="200" placeholder="写一句个性签名"></textarea>
+        <label class="field-label">个人简介（500 字内，展示在个人主页）</label>
+        <textarea id="setBio" class="input" maxlength="500" placeholder="介绍一下你自己"></textarea>
+        <label class="field-label">主题</label>
+        <select id="setTheme" class="input">
+          <option value="auto">跟随系统</option>
+          <option value="light">浅色</option>
+          <option value="dark">深色</option>
+        </select>
+        <button class="btn btn-primary btn-block" id="setSaveGeneral">保存</button>
+      </div>
+      <div class="settings-pane hidden" id="setPaneSecurity">
+        <div class="sec-row">
+          <div class="sec-info"><b>🔒 登录密码</b><span class="muted" id="secPwText"></span></div>
+          <button class="btn btn-sm" id="secSetPw">设置 / 修改</button>
+        </div>
+        <div class="sec-row">
+          <div class="sec-info"><b>🔗 cpoauth 绑定</b><span class="muted" id="secCpText"></span></div>
+          <button class="btn btn-sm" id="secBind">去绑定</button>
+        </div>
+        <div class="sec-row">
+          <div class="sec-info"><b>📧 邮箱</b><span class="muted" id="secEmailText"></span></div>
+          <span class="muted">来自 cpoauth</span>
+        </div>
+        <div class="sec-row">
+          <div class="sec-info"><b>🛡 信任等级</b><span class="muted" id="secTlText"></span></div>
+        </div>
+        <button class="btn btn-ghost btn-block" id="secLogout">退出登录</button>
+      </div>
     </div>
   </div>
 </div>
