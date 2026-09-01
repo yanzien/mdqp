@@ -6,9 +6,17 @@
 // 更新日志：随代码发布自动同步
 const CHANGELOG_MD = `# 📝 更新日志
 
-mdqp 的主要版本变动记录。当前部署版本 **v4.2**。
+mdqp 的主要版本变动记录。当前部署版本 **v4.3**。
 
 ---
+
+## v4.3 · 2026-09-01
+- 🔑 **设置密码入口统一**：「我的」与个人主页共用同一个设置密码弹窗（两次输入确认、实时校验），去掉个人主页里重复的内联表单
+- 🧭 **未设密码自动引导**：登录后若检测到账号还没有密码，顶部会出现引导条，点一下即可补设；关闭后 7 天内不再打扰
+- 🛡 **「账号安全」区块**：「我的」页新增账号安全区，直观显示当前是否已设置密码、登录用户名是什么
+- 🚫 **游客登录修正**：个人主页游客态原先会硬跳转授权页，现在正确弹出统一登录弹窗
+- 🔒 **密码登录加固**：密码长度限制 6–128 位；登录失败按「账号 + IP」双维度限流（15 分钟窗口），超阈值返回 429；用户名查重改为大小写不敏感，杜绝 \`abc\` / \`ABC\` 并存导致登录歧义
+- 📖 文档校正：帮助页与更新日志中的注册规则统一修正为**用户名 2–20 字符、密码 6–128 位**（此前误写为 3–20 / ≥8）
 
 ## v4.2 · 2026-08-31
 - 🔐 **密码登录 / 注册**：新增账号密码体系作为第三方登录的备用通道，用户名 3–20 位、密码 ≥ 8 位，密码以加盐 SHA-256 存储
@@ -337,6 +345,8 @@ async function loadMe() {
   }
   const al = $('#navAdminLink'); if (al) al.classList.toggle('hidden', !isAdmin());
   const cl = $('#navCodeLink'); if (cl) cl.classList.toggle('hidden', !isAdmin());
+  // 已登录但未设密码 → 顶部引导（cpoauth 宕机时仍有入口）
+  checkPasswordGuide();
 }
 
 function avatarHtml(url, name) { if (url) return `<img class="avatar" src="${esc(url)}" alt="">`; const ch = (name || '?').trim().charAt(0).toUpperCase(); return `<span class="avatar avatar-txt">${esc(ch)}</span>`; }
@@ -738,11 +748,17 @@ async function renderUser(uid) {
         <button class="btn btn-sm btn-primary" id="sigSaveBtn">保存</button>
       </details></div>` : ''}
       ${self ? `<div class="invite-section"><details><summary>🎁 邀请好友</summary><div id="inviteInfo" class="invite-info">加载中…</div></details></div>` : ''}
-      ${self ? `<div class="bio-edit"><details><summary>🔒 设置密码（cpoauth 宕机备用登录）</summary>
-        <p class="muted" style="margin:4px 0 8px">设置一个密码，之后即使第三方登录（cpoauth）服务器宕机，你也能用<b>账号密码</b>登录。</p>
-        <div class="setpw-row"><input class="input" id="setPwInput" type="password" placeholder="新密码（至少 6 位）" maxlength="128"><button class="btn btn-sm btn-primary" id="setPwBtn">保存密码</button></div>
-        <span id="setPwMsg" class="muted"></span>
-      </details></div>` : ''}
+      ${self ? `<div class="security-section">
+        <div class="security-row">
+          <div class="security-info">
+            <b>🔒 登录密码</b>
+            <span class="muted">${u.has_password
+              ? '已设置 · 第三方登录不可用时，可用「' + esc(u.username) + ' + 密码」进入'
+              : '未设置 · 第三方登录（cpoauth）一旦宕机，你将无法进入账号'}</span>
+          </div>
+          <button class="btn btn-sm ${u.has_password ? '' : 'btn-primary'}" id="userSetPwBtn">${u.has_password ? '修改密码' : '设置密码'}</button>
+        </div>
+      </div>` : ''}
       ${adminView && !self && u.role !== 'developer' ? `<div class="admin-user-actions">
           <b class="muted">管理操作：</b>
           ${u.role === 'admin' ? `<button class="btn btn-sm" data-role-act="user" data-uid="${u.id}">撤下管理</button>` : `<button class="btn btn-sm btn-primary" data-role-act="admin" data-uid="${u.id}">册封管理</button>`}
@@ -755,14 +771,8 @@ async function renderUser(uid) {
 
   if (self) {
     $('#sigSaveBtn').onclick = async () => { const sig = $('#sigInput').value; const bio = ($('#bioInput') || {}).value || ''; const r = await api('/api/me', { method: 'PATCH', body: JSON.stringify({ signature: sig, bio }) }); if (r.ok) { toast('已保存'); renderUser(uid); } else toast('保存失败：' + (r.data?.error || r.status), 'err'); };
-    const setPwBtn = $('#setPwBtn');
-    if (setPwBtn) setPwBtn.onclick = async () => {
-      const pw = $('#setPwInput').value; const msg = $('#setPwMsg');
-      if (pw.length < 6) { msg.textContent = '密码至少 6 位'; msg.style.color = 'var(--danger,#e5484d)'; return; }
-      const r = await api('/api/auth/password/set', { method: 'POST', body: JSON.stringify({ password: pw }) });
-      if (r.ok) { msg.textContent = '✅ 密码已保存，cpoauth 宕机时也能登录'; msg.style.color = ''; $('#setPwInput').value = ''; }
-      else { msg.textContent = '保存失败：' + (r.data?.message || r.status); msg.style.color = 'var(--danger,#e5484d)'; }
-    };
+    // 统一走设置密码弹窗（内联表单的 #setPwInput 会与弹窗同名 ID 冲突，已移除）
+    const userSetPw = $('#userSetPwBtn'); if (userSetPw) userSetPw.onclick = () => openSetPwModal();
     loadInviteInfo();
   }
 
@@ -1052,17 +1062,31 @@ async function renderMe() {
         <textarea id="bioInput" class="input bio-input" maxlength="500" placeholder="介绍一下你自己">${esc(me.bio || '')}</textarea>
         <button class="btn btn-sm btn-primary" id="meSaveBtn">保存</button>
       </details></div>
+      <div class="security-section">
+        <div class="security-row">
+          <div class="security-info">
+            <b>🔒 登录密码</b>
+            <span class="muted">${me.has_password
+              ? '已设置 · 第三方登录不可用时，可用「' + esc(me.username || '你的用户名') + ' + 密码」进入'
+              : '未设置 · 第三方登录（cpoauth）一旦宕机，你将无法进入账号'}</span>
+          </div>
+          <button class="btn btn-sm ${me.has_password ? '' : 'btn-primary'}" id="meSetPwBtn">${me.has_password ? '修改密码' : '设置密码'}</button>
+        </div>
+      </div>
     </div></div>`;
 
     // 邀请已移至独立页面 /invite
     $('#meSaveBtn').onclick = async () => { const sig = $('#sigInput').value; const bio = ($('#bioInput') || {}).value || ''; const r = await api('/api/me', { method: 'PATCH', body: JSON.stringify({ signature: sig, bio }) }); if (r.ok) { toast('已保存'); renderMe(); } else toast('保存失败：' + (r.data?.error || r.status), 'err'); };
+    const meSetPw = $('#meSetPwBtn'); if (meSetPw) meSetPw.onclick = () => openSetPwModal();
   } else {
     const left = Math.max(0, (me.limit || 5) - (me.count || 0));
     const period = me.period === 'weekly' ? '本周' : '';
     $('#meHead').innerHTML = `<div class="notice notice-warn">
       <b>你现在是游客模式</b>
       <p>已创建 ${me.count || 0} / ${me.limit || 5} 个（${period}），还能建 ${left} 个。游客剪贴板<b>任何人都能编辑或删除</b>。</p>
-      <p><a class="btn btn-sm btn-primary" href="/api/auth/login">🔑 用 cpoauth 登录</a> 后日限 5 / 月限 50，且仅你可改自己的内容。</p></div>`;
+      <p><button class="btn btn-sm btn-primary" id="meGuestLoginBtn">🔑 登录 / 注册</button> 后日限 5 / 月限 50，且仅你可改自己的内容。</p></div>`;
+    // 走统一弹窗而非直跳 cpoauth：第三方登录宕机时仍有密码入口
+    const guestLogin = $('#meGuestLoginBtn'); if (guestLogin) guestLogin.onclick = () => openAuthModal('login');
   }
   const clips = me.clips || [];
   $('#meClips').innerHTML = clips.length ? clips.map((c) => clipCard(Object.assign({ owner_type: me.type, owner_id: me.type === 'user' ? me.userId : me.guestId, owner_name: me.type === 'user' ? me.name : '游客' }, c))).join('') : emptyHTML('me', '还没有剪贴板', '<a class="btn btn-primary btn-sm" href="/new" data-link>＋ 新建一个</a>');
@@ -1896,6 +1920,86 @@ function setupAuthModal() {
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !modal.classList.contains('hidden')) closeAuthModal(); });
 }
 
+// ============ 设置登录密码（统一弹窗） ============
+function openSetPwModal() {
+  const modal = $('#setPwModal'); if (!modal) return;
+  const uname = (state.me && state.me.username) || '';
+  const nameInput = $('#setPwUsername'); if (nameInput) nameInput.value = uname;
+  const desc = $('#setPwDesc');
+  if (desc) {
+    desc.innerHTML = uname
+      ? `设置后，即使第三方登录（cpoauth）不可用，你也能用 <b>${esc(uname)}</b> + 这个密码登录。`
+      : '设置后，即使第三方登录（cpoauth）不可用，你也能用<b>用户名 + 密码</b>登录。';
+  }
+  const err = $('#setPwError'); if (err) { err.classList.add('hidden'); err.textContent = ''; }
+  const suc = $('#setPwSuccess'); if (suc) { suc.textContent = ''; suc.style.color = ''; }
+  modal.classList.remove('hidden'); modal.classList.add('show');
+  setTimeout(() => $('#setPwInput')?.focus(), 50);
+}
+
+function closeSetPwModal() {
+  const modal = $('#setPwModal'); if (!modal) return;
+  modal.classList.remove('show'); modal.classList.add('hidden');
+  const f = $('#setPwForm'); if (f) f.reset();
+  const err = $('#setPwError'); if (err) { err.classList.add('hidden'); err.textContent = ''; }
+  const suc = $('#setPwSuccess'); if (suc) { suc.textContent = ''; suc.style.color = ''; }
+}
+
+async function submitSetPassword(e) {
+  e.preventDefault();
+  const pw = ($('#setPwInput')?.value) || '';
+  const pw2 = ($('#setPwInput2')?.value) || '';
+  const err = $('#setPwError'); const suc = $('#setPwSuccess');
+  const fail = (t) => { if (err) { err.textContent = t; err.classList.remove('hidden'); } if (suc) suc.textContent = ''; };
+  if (pw.length < 6) return fail('密码至少 6 位');
+  if (pw.length > 128) return fail('密码最多 128 位');
+  if (pw !== pw2) return fail('两次输入的密码不一致');
+
+  const btn = $('#setPwSubmit');
+  if (btn) { btn.disabled = true; btn.textContent = '保存中…'; }
+  const r = await api('/api/auth/password/set', { method: 'POST', body: JSON.stringify({ password: pw }) });
+  if (btn) { btn.disabled = false; btn.textContent = '保存密码'; }
+  if (!r.ok) return fail('保存失败：' + (r.data?.message || r.data?.error || r.status));
+
+  // 本地状态立刻同步，避免要刷新页面才看到"已设置"
+  if (state.me) state.me.has_password = true;
+  hidePwGuide();
+  if (err) { err.classList.add('hidden'); err.textContent = ''; }
+  if (suc) { suc.textContent = '✅ 密码已保存'; suc.style.color = 'var(--primary)'; }
+  toast('密码已设置，cpoauth 宕机时也能登录');
+  setTimeout(() => { closeSetPwModal(); render(); }, 900);
+}
+
+function setupSetPwModal() {
+  const modal = $('#setPwModal'); if (!modal) return;
+  $('#setPwClose').onclick = closeSetPwModal;
+  modal.addEventListener('click', (e) => { if (e.target === modal) closeSetPwModal(); });
+  $('#setPwForm').onsubmit = submitSetPassword;
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !modal.classList.contains('hidden')) closeSetPwModal(); });
+}
+
+// ============ 未设密码自动引导 ============
+const PW_GUIDE_KEY = 'mdqp_pw_guide_dismissed_at';
+const PW_GUIDE_SNOOZE = 7 * 86400000; // 选择"稍后"后 7 天不再打扰
+
+function hidePwGuide() { const b = $('#pwGuideBar'); if (b) b.classList.add('hidden'); }
+
+function checkPasswordGuide() {
+  const bar = $('#pwGuideBar'); if (!bar) return;
+  const me = state.me || {};
+  // 只有"已登录且确实没设密码"才提示；has_password 为 undefined 时不误伤
+  if (me.type !== 'user' || me.has_password !== false) { hidePwGuide(); return; }
+  const dismissedAt = Number(localStorage.getItem(PW_GUIDE_KEY) || 0);
+  if (dismissedAt && Date.now() - dismissedAt < PW_GUIDE_SNOOZE) { hidePwGuide(); return; }
+  bar.classList.remove('hidden');
+}
+
+function setupPwGuide() {
+  const bar = $('#pwGuideBar'); if (!bar) return;
+  $('#pwGuideSetBtn').onclick = () => openSetPwModal();
+  $('#pwGuideClose').onclick = () => { localStorage.setItem(PW_GUIDE_KEY, String(Date.now())); hidePwGuide(); };
+}
+
 // ==================== 启动 ====================
 document.addEventListener('click', (e) => { const a = e.target.closest('a[data-link]'); if (a && a.getAttribute('href')?.startsWith('/')) { e.preventDefault(); go(a.getAttribute('href')); } });
 window.addEventListener('popstate', render);
@@ -1904,6 +2008,7 @@ window.addEventListener('popstate', render);
   initTheme(); const mt = $('#menuToggle'); if (mt) mt.onclick = () => document.body.classList.toggle('nav-open');
   const ov = $('#navOverlay'); if (ov) ov.onclick = closeNav; setupCmdk();
   setupAuthModal(); loadAuthMethods();
+  setupSetPwModal(); setupPwGuide();
   // 侧边栏折叠（仅桌面生效，状态持久化）
   const st = $('#sidebarToggle');
   if (st) {
