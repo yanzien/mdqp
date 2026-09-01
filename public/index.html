@@ -353,6 +353,7 @@
       <div id="authBanner" class="auth-banner hidden"></div>
 
       <a class="btn btn-primary btn-block" id="authCpoauthBtn" href="/api/auth/login">🔑 用 cpoauth 账号登录</a>
+      <p class="auth-cpoauth-desc">cpoauth 是竞赛账号统一登录：一键同步你的 <b>洛谷 / Codeforces / AtCoder</b> 等绑定账号，免密码登录。没有 cpoauth 也能用账号密码登录或注册。</p>
       <div class="auth-divider"><span>或用账号密码</span></div>
 
       <div class="auth-tabs">
@@ -391,6 +392,49 @@
         <button class="btn btn-primary btn-block" id="setPwSubmit" type="submit">保存密码</button>
       </form>
       <p class="auth-hint" id="setPwSuccess"></p>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 低版本浏览器检测（在任何模块加载前独立运行） ============ -->
+<script>
+(function () {
+  function legacy() {
+    // 直接探测本应用用到的现代语法（可选链 ?. 与空值合并 ??）：
+    // 旧浏览器解析不了会抛 SyntaxError，宁可提示升级也不要白屏
+    try { new Function('return ({}).a?.b ?? 0'); } catch (e) { return 'syntax'; }
+    if (!window.Promise || !window.fetch || !window.crypto || !crypto.subtle ||
+        !window.URLSearchParams || !Object.assign || !String.prototype.includes) return 'feature';
+    var ua = navigator.userAgent;
+    if (/MSIE |Trident\//.test(ua)) return 'ie';
+    if (/Edge\//.test(ua) && !/Edg\//.test(ua)) return 'oldedge'; // EdgeHTML 旧版
+    var m;
+    if ((m = ua.match(/Chrome\/(\d+)/)) && +m[1] < 60) return 'chrome<60';
+    if ((m = ua.match(/Firefox\/(\d+)/)) && +m[1] < 55) return 'firefox<55';
+    if ((m = ua.match(/Version\/(\d+).*Safari/)) && +m[1] < 11) return 'safari<11';
+    return false;
+  }
+  var r = legacy();
+  if (r) {
+    window.__MDQP_LEGACY = r;
+    document.addEventListener('DOMContentLoaded', function () {
+      var o = document.getElementById('legacyOverlay');
+      if (o) o.classList.remove('hidden');
+    });
+  }
+})();
+</script>
+
+<!-- ============ 低版本浏览器引导弹窗 ============ -->
+<div class="modal-overlay hidden" id="legacyOverlay">
+  <div class="modal legacy-modal" role="dialog" aria-modal="true" aria-label="浏览器版本过低提示">
+    <div class="modal-head">
+      <h3>⚠️ 你的浏览器版本过低</h3>
+    </div>
+    <div class="modal-body auth-body">
+      <p>当前浏览器可能无法正常显示本站功能（如剪贴板、登录等）。建议下载新版浏览器，以获得完整体验：</p>
+      <a class="btn btn-primary btn-block" href="https://www.firefox.com/zh-CN/download/all/desktop-release/win64/zh-CN/" target="_blank" rel="noopener">⬇ 下载 Firefox 新版</a>
+      <p class="auth-hint">若暂时无法更新，基础浏览仍可使用，但部分高级功能可能受限。本站适配的最低版本参考：Chrome 60+ / Firefox 55+ / Safari 11+ / Edge（Chromium 版）。</p>
     </div>
   </div>
 </div>
