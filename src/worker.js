@@ -19,7 +19,7 @@ const app = new Hono();
 
 const GUEST_LIMIT = 5;
 const PAGE_SIZE = 20;
-const VERSION = '4.2';
+const VERSION = '4.3';
 const SEARCH_MAX = 100;
 const RESERVED = new Set([
   'api', 'raw', 'new', 'edit', 'u', 'user', 'users', 'admin', 'login', 'logout',
@@ -819,9 +819,11 @@ app.get('/api/users/:userId', async (c) => {
   const db = c.env.db;
   const userId = c.req.param('userId');
   const u = await db.prepare(
+    // has_pw 用 SQL 计算，避免 password_hash 进入 JS 作用域后被误返回
     `SELECT id, sub, username, display_name, avatar, bio, signature, role, linked_accounts,
             clip_limit, limit_period, created_at, is_vip, vip_until, invite_code,
-            inviter_id, invite_count, feature_flags
+            inviter_id, invite_count, feature_flags,
+            (password_hash IS NOT NULL AND password_hash != '') AS has_pw
      FROM users WHERE id = ? OR sub = ? OR username = ?`
   ).bind(userId, userId, userId).first();
   if (!u) return c.json({ error: 'not_found' }, 404);
@@ -853,7 +855,9 @@ app.get('/api/users/:userId', async (c) => {
       is_vip: !!u.is_vip, vip_until: u.vip_until,
       invite_code: u.invite_code || '',
       invite_count: u.invite_count || 0,
-      feature_flags: parseFeatureFlags(u.feature_flags)
+      feature_flags: parseFeatureFlags(u.feature_flags),
+      // v4.3: 仅本人 / 管理员可见，用于提示"尚未设置密码"
+      has_password: (isSelf || adminViewer) ? !!u.has_pw : undefined
     },
     is_self: isSelf,
     is_admin_viewer: adminViewer,
@@ -875,7 +879,7 @@ app.get('/api/me', async (c) => {
 
   if (identity.type === 'user') {
     const uRow = await db.prepare(
-      `SELECT role, bio, signature, linked_accounts, is_vip, vip_until,
+      `SELECT username, role, bio, signature, linked_accounts, is_vip, vip_until,
               invite_code, invite_count, feature_flags, password_hash
        FROM users WHERE id = ?`
     ).bind(String(identity.userId)).first();
@@ -899,6 +903,8 @@ app.get('/api/me', async (c) => {
 
     return c.json({
       authenticated: true, type: 'user', userId: identity.userId, name: identity.name,
+      // password 登录用的账号名（引导用户设置密码时需要展示）
+      username: uRow?.username || '',
       char_limit: charLimit,
       avatar: identity.avatar, sub: identity.sub,
       role: uRow?.role || 'user', bio: uRow?.bio || '', signature: uRow?.signature || '',
