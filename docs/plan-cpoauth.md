@@ -1,401 +1,146 @@
-# mdqp × CPOAuth：引导接入与功能升级方案
+# mdqp × CPOAuth 引导接入与功能升级 · 完整方案（v2）
 
-> 文档性质：规划设计稿，不是站点内容页（不会被同步到 `/help` 或 `/changelog`）。
-> 撰写时间：2026-09-01 · 对应 mdqp v4.3
-> 一句话结论：**mdqp 目前只把 CPOAuth 当成"登录按钮"，而它其实还能提供身份数据、竞赛战绩和撤销能力 —— 只用了不到两成。**
-
----
-
-## 〇、先看一个事实
-
-写这份方案时实测：
-
-```
-GET https://www.cpoauth.com/  →  502（连续 3 次）
-GET https://mdqp.pages.dev/api/auth/cpoauth-status  →  {"ok":false,"status":502}
-```
-
-**CPOAuth 此刻正在宕机，mdqp 已自动进入降级模式。** 这不是假设性的风险，是正在发生的状态。
-
-v4.2 做的密码兜底是对的，但它只解决了"进得去"，没解决"引导用户主动把兜底准备好"，更没解决"CPOAuth 明明还有很多能力没用上"。这份方案就是要补这两件事。
+> 状态：**v4.3.1 已上线**（含本方案「第一批」4 项 + 浏览器引导）。本文件为完整路线图，未实现项标注优先级，等待指令后分批开工。
+> 关键现实：**cpoauth 实测多次 502 宕机**，密码兜底已验证有效；mdqp 目前仅用了 cpoauth 约 23% 的能力。
 
 ---
 
-## 一、现状盘点：mdqp 现在到底用了 CPOAuth 的什么
+## 〇、已实现（本批，v4.3.1）
 
-### 1.1 已接入的部分
+| 项 | 内容 | 验证 |
+|---|---|---|
+| P0-1 退出撤销令牌 | `users` 表新增 `cpoauth_refresh` / `cpoauth_token_exp`；回调保存 `refresh_token`；`/api/auth/logout` 读取并调 `/api/oauth/revoke`（失败不阻塞退出） | 登出返回 `ok`；cpoauth 502 时仍正常退出 |
+| P0-3 宕机三步自救 | cpoauth 不可用时按钮**置灰 + tooltip**（不再隐藏），并按登录态分支：已登录未设密码→「立即设置密码」；其余→「登录帮助 / 联系站长」指向 `/c/loginhelp` | cpoauth-status 返回 502，前端降级链路激活 |
+| L0 登录弹窗改造 | cpoauth 按钮下方加一句话说明（是什么、同步哪些竞赛账号） | 线上 `index.html` 含新文案 |
+| 关联账号品牌卡片 | `linkedAccountChips` 升级为带品牌色、可点击跳转平台主页的卡片网格；本人未绑定时显示空态 | `style.css` 含 `linked-card` 样式并已部署 |
+| 浏览器引导 | 用 `?.`/`??` 语法探测，过旧浏览器（IE / 旧 Edge / Chrome<60 / FF<55 / Safari<11）打开即弹「下载 Firefox」引导并跳过 SPA 初始化防白屏 | `index.html` 含 `legacyOverlay` 与探测脚本 |
 
-| 项目 | 现状 |
+> 遗留：本批**未**做「仅密码用户 → 每次打开弹窗引导绑定 cpoauth」（原需求头条）。理由见 P1-B，需先补后端「账号关联」端点，否则会把密码账号 orphan 成新 cpoauth 账号。
+
+---
+
+## 一、CPOAuth 绑定引导
+
+### 1.1 触发规则（设计）
+- **触发条件**：`state.me.type==='user'` 且 `has_password===true` 且 `sub` 为空（即纯密码账号，未绑 cpoauth）且 cpoauth 当前可用（`/api/auth/cpoauth-status` 为 ok）。
+- **不触发**：已绑 cpoauth、本次会话已关闭、处于登录/绑定流程中、cpoauth 不可用（宕机时走 P0-3 自救，不叠加打扰）。
+- **频次控制**：
+  - 弹窗为**非阻断式顶部条 / 轻量 Modal**，主按钮「立即绑定」跳转 `/api/auth/login`；次按钮「查看注册指南」新标签打开 `/c/loginhelp?from=mdqp`。
+  - 关闭策略：①「稍后再说」→ `localStorage` 记录 7 天免打扰；②「不再提示」→ 写用户偏好字段 `prefs.no_cpoauth_nudge=1`（DB `users.feature_flags` 或独立列），服务端下发的 `/api/me` 携带，前端据此永久不弹。
+- **实现要点**：
+  - `checkCpoauthNudge()` 在 `render()` 后调用，复用 `state.me` 与 `authMethods`。
+  - 需后端新增字段：在 `/api/me` 的响应用 `prefs.no_cpoauth_nudge`（admin 可改），前端「不再提示」→ `PATCH /api/me` 写入。
+
+### 1.2 弹窗内容
+- 一句话价值：「绑定 cpoauth 后，一次登录即可同步你的洛谷 / Codeforces / AtCoder 战绩，再也不用手动记密码。」
+- 主按钮「立即绑定」→ `/api/auth/login`（走标准 OAuth，成功后回跳本站并**关联**到当前账号，见 P1-B）。
+- 次按钮「查看注册指南」→ `/c/loginhelp`（新标签，携 `?from=mdqp` 来源参数，便于埋点）。
+
+### 1.3 `/c/loginhelp` 图文注册指南页（待补）
+- 当前仅被弹窗/横幅引用，**内容尚未创建**。建议为独立静态页（`public/c/loginhelp.html` 或由 `/api/pages` 托管），含：
+  - 什么是 cpoauth、支持哪些平台；
+  - 从注册到绑定洛谷/CF/AtCoder 的图文步骤；
+  - 常见问题（收不到回调、绑定失败、密码忘了怎么办）。
+- 埋点：`/c/loginhelp` 访问量、来源（`from=mdqp` vs 直接）、「立即绑定」点击率。
+
+### 1.4 待确认项
+- `/c/loginhelp` 内容由谁产出（用户手写的图文 vs 我生成骨架）？
+- 「不再提示」是否要服务端持久化，还是仅本地 `localStorage` 即可（建议服务端，跨设备一致）。
+
+---
+
+## 二、CPOAuth 能力盘点（可落地产品设想）
+
+### 2.1 已用能力
+| 能力 | 现状 |
 |---|---|
-| 流程 | 授权码模式 + PKCE(S256) + state 防 CSRF（标准、正确） |
-| 端点 | `/oauth/authorize`、`/api/oauth/token`、`/api/oauth/userinfo` |
-| scope | `openid profile cp:linked`（可用 Secret `CPOAUTH_SCOPE` 覆盖） |
-| 用到字段 | `sub`、`username`、`display_name`、`avatar_url`、`bio`、`linked_accounts` |
-| 落库 | `users.sub` 作主键；`linked_accounts` 存 JSON |
-| 展示 | `linkedAccountChips()` 渲染成纯文字 chip（`洛谷 · xxx`），无图标、无跳转 |
-| 其他 | `/api/auth/cpoauth-status` 连通性探测（4s 超时）、宕机时隐藏按钮 + 降级横幅 |
+| 登录鉴权（authorize/token/userinfo） | ✅ 已用 |
+| 用户基本信息（openid + profile：display_name/avatar/username/bio） | ✅ 已用 |
+| 关联账号（cp:linked） | ✅ 已用（v4.3.1 升级为卡片展示） |
 
-### 1.2 一句话诊断
-
-> **登录链路是及格的，身份价值是零开发的。**
-> 用户绑定了洛谷 / Codeforces / AtCoder，mdqp 只把它显示成一行灰字，既不能点、也不好看、更不影响任何功能。
-
----
-
-## 二、CPOAuth 完整能力清单（及 mdqp 未用部分）
-
-数据来源：CPOAuth 官方仓库 `Ark-Aak/cp-oauth`。
-
-### 2.1 Scope 全景
-
-| Scope | 返回内容 | mdqp 是否使用 | 说明 |
+### 2.2 未用但高价值
+| 能力 | 适用性 | 难度 | 风险 |
 |---|---|---|---|
-| `openid` | `sub`（用户唯一 ID） | ✅ 已用 | 必需 |
-| `profile` | `username` `display_name` `avatar_url` `bio` | ✅ 已用 | |
-| `cp:linked` | `linked_accounts[]`（全部已绑平台） | ✅ 已用 | 但只做了文字展示 |
-| `email` | `email` `email_verified` | ❌ **未用** | 可用于账号找回 / 通知 |
-| `link:luogu` | 仅洛谷绑定项 | ❌ 未用 | 单平台最小授权 |
-| `link:atcoder` | 仅 AtCoder | ❌ 未用 | |
-| `link:codeforces` | 仅 Codeforces | ❌ 未用 | |
-| `link:github` | 仅 GitHub | ❌ 未用 | |
-| `link:google` | 仅 Google | ❌ 未用 | |
-| `link:clist` | 仅 Clist | ❌ 未用 | 见下方"重要前提" |
-| `link:leetcode` | 仅 LeetCode | ❌ 未用 | 上游尚未开放用户绑定入口 |
-| **`cp:summary`** | **`cp_summary`：各平台 rating、最高 rating、比赛场次、平台排名、最近活动** | ❌ **未用** | **价值最高的未用能力** |
-| **`cp:details`** | **`cp_details.rating_history[]`：逐场比赛的 old/new rating、名次、得分、时间** | ❌ **未用** | 可画 rating 曲线 |
+| **cp:summary**（各平台 rating/最高分/参赛场次/排名） | 个人主页「战绩概览」卡片 | 中（需上游放行 scope） | 覆盖低：须绑 Clist.by，预计 <20% 用户有数据 |
+| **cp:details**（完整 rating 历史） | 战绩曲线图（Chart.js） | 中 | 同上；数据量大需缓存 |
+| **email** | 邮箱验证、找回、通知 | 低 | 隐私合规 |
+| **per-platform link:\***（7 个单平台 scope） | 精细化「仅同步某平台」开关 | 低 | 需上游逐个放行 |
+| **refresh_token 主动刷新** | 延长登录、避免 1h access 过期反复重定向 | 低（已存 refresh） | 必须处理 refresh 轮换（每次刷新返回新 refresh，旧失效） |
+| **/api/oauth/revoke** | ✅ 本批已在登出调用 | — | — |
+| **TOTP / WebAuthn 2FA** | 高安全账号（管理员/VIP）二次验证 | 高 | cpoauth 侧实现未知 |
+| **GET /api/users/{username}/card.svg** | 个人主页嵌入「竞赛名片」`<img>` | 极低（一行代码） | 样式不可控 |
+| **事件通知 / webhook** | cpoauth 绑定变更 → 本站联动 | 高（依赖上游） | 上游未确认支持 |
 
-> **重要前提**：`cp:summary` / `cp:details` 的数据来自 **Clist.by**，**必须用户已绑定 Clist 账号**才有数据；否则返回 `{ "available": false, "message": "..." }`。
-> 这意味着它**覆盖不到大多数用户**，方案设计必须遵循"有则锦上添花，无则引导去绑" —— 不能做成核心依赖。
-
-### 2.2 端点全景
-
-| 端点 | 作用 | mdqp 是否使用 |
-|---|---|---|
-| `GET /oauth/authorize` | 发起授权 | ✅ |
-| `POST /api/oauth/token`（`grant_type=authorization_code`） | 换 token | ✅ |
-| `POST /api/oauth/token`（`grant_type=refresh_token`） | **刷新令牌** | ❌ **未用** |
-| `GET /api/oauth/userinfo` | 取用户资料 | ✅ |
-| `POST /api/oauth/revoke` | **撤销令牌（RFC 7009）** | ❌ **未用** |
-| `GET /api/users/{username}/card.svg` | **用户资料卡 SVG**（支持 `width` / `theme` / `lang`） | ❌ **未用** |
-
-**Token 生命周期（关键，mdqp 完全没管）：**
-- `access_token`：JWT，**有效期 1 小时**
-- `refresh_token`：不透明 token，**有效期 30 天**，且**强制轮换**（每次刷新都作废旧 token、发新 token）
-- 撤销 `refresh_token` 会连带使该 client + user 下所有 `access_token` 失效
-
-> **⚠️ 当前隐患**：mdqp 拿到的 `access_token` **用完即弃，从不保存**（换完 userinfo 就丢）。这在现在没问题（只用一次），但**一旦要做"后台定时同步竞赛数据"，就必须存 refresh_token 并实现轮换**。
-
-### 2.3 CPOAuth 侧的其他能力（mdqp 可借势）
-
-| 能力 | 说明 | 对 mdqp 的意义 |
-|---|---|---|
-| TOTP 2FA | CPOAuth 账号支持 | 可作为"高信任账号"信号 |
-| WebAuthn | CPOAuth 账号支持 | 同上 |
-| 用户端撤销授权 | 用户在 CPOAuth 个人页可撤销第三方应用 | mdqp 应提供直达入口（现在只有"关联账号"按钮） |
-| 多语言 | CPOAuth 支持 en / zh / ja | `card.svg` 有 `lang` 参数 |
-
-**小结 —— 未使用的能力占比：约 80%。**
+### 2.3 产品设想（按能力）
+1. **战绩概览卡片**（cp:summary）：个人主页顶部展示洛谷/CF/AtCoder 的 rating、最高分、参赛场次；无数据时优雅降级为「去绑定 Clist.by 解锁战绩」。
+2. **Rating 成长曲线**（cp:details）：Chart.js 折线图，按平台分色；缓存到 D1，每日增量刷新。
+3. **竞赛名片**（card.svg）：个人主页 / 公开主页嵌入 `<img src="cpoauth card.svg">`，社交分享用。
+4. **邮箱体系**：绑定邮箱后开放「邮箱找回 / 重要通知 / 周报」。
+5. **2FA（远期）**：管理员账号强制 TOTP。
 
 ---
 
-## 三、第一部分：引导接入方案
+## 三、站点功能升级规划（参考 Discourse）
 
-### 3.1 为什么参考 Discourse
+> Discourse 核心理念：**信任等级（Trust Levels）+ 徽章（Badges）+ 用户卡片（User Card）+ 自动化引导（Discobot/Onboarding）+ 节点式系统私信**。mdqp 是工具站，无「发帖阅读」，故把触发条件映射为自身行为事件。
 
-Discourse 是论坛软件里把"新用户引导"做得最彻底的一个。它的核心思想是：
+### P0（立即做，无外部依赖）
+- **P0-A 退出撤销令牌** ✅ 已完成
+- **P0-B 宕机三步自救** ✅ 已完成
+- **P0-C 登录弹窗 + 关联账号卡片** ✅ 已完成
+- **P0-D 低版本浏览器引导** ✅ 已完成
+- **P0-E 战绩名片 card.svg**：个人主页加 `<img>` 嵌入竞赛名片（零后端改动）。
 
-> **登录不是终点，是起点。** 用户登录后的前 10 分钟，决定了他会不会留下。
+### P1（需后端小改 / 用户重授权）
+- **P1-A 邮箱验证体系**：`users.email` + `email_verified`；注册/绑定邮箱、验证链接、密码找回入口。目标：降低密码丢失导致的账号死锁。验收：`/api/auth/email/verify` 可校验、未验证账号标「未验证」徽章。埋点：验证转化率。
+- **P1-B 账号关联端点（关键，解头条需求）**：新增 `POST /api/auth/link-cpoauth`（已登录密码用户发起，用 PKCE 流程回调后**把 cpoauth sub 写回当前账号**，而非新建）。目标：让「仅密码用户」安全绑定 cpoauth，不 orphan。技术要点：回调需携带「当前用户 session」标识，upsert 时 `WHERE id=?` 而非 `WHERE sub=?`。验收：绑定后 `sub` 非空、`has_password` 仍 true（双登录并存）。⚠️ 这是原需求头条「每次打开弹窗引导注册 cpoauth」的前置依赖。
+- **P1-C CPOAuth 绑定引导弹窗**：依赖 P1-B，实现 §1 全部逻辑。
+- **P1-D 战绩概览 + 曲线**：依赖上游放行 `cp:summary`/`cp:details`；D1 缓存表 `user_stats`。埋点：战绩卡片曝光率。
 
-Discourse 具体用了五招，我逐条对照 mdqp 已有的基础：
+### P2（想象力，远期）
+- **P2-A 信任等级**：按剪贴板数/登录天数/邀请数/被收藏数算 TL0–TL3，逐级解锁高级功能（自定义短链、置顶、批量导出）。参考 Discourse TL 自动晋升。
+- **P2-B 徽章系统**：首次绑定 cpoauth、连续登录 30 天、分享被收藏 10 次等发徽章，个人主页展示。
+- **P2-C 通知与消息**：站内信（被 @、剪贴板被收藏、邀请成功）、邮件周报（依赖 P1-A）。
+- **P2-D 搜索与组织**：全站剪贴板/用户搜索（标题+内容），标签（#算法 #模板）聚合页。
+- **P2-E 后台数据看板**：DAU/留存/各登录方式占比/战绩覆盖率，admin 页图表。
+- **P2-F OI 垂直化**：基于战绩的「同水平对手」「近期赛事日历」「模板推荐」，把 mdqp 从剪贴板工具升级为 OI 选手工作台（对齐你「OI 风格算法」主线）。
 
-| Discourse 做法 | 机制 | mdqp 现状 | 可迁移性 |
+---
+
+## 四、优先级 / 排期（建议）
+
+| 优先级 | 项 | 估时 | 外部依赖 |
 |---|---|---|---|
-| **Discobot 交互式教程** | 新用户收到私信，通过"边做边学"掌握回复、@提及、格式化 | 无 | ⭐⭐⭐⭐ 高（改造为 checklist） |
-| **信任等级 TL0–TL4** | 沙盒：新用户受限，随行为渐进解锁权限 | 有 `feature_flags`，但是**管理员手动开关** | ⭐⭐⭐⭐⭐ 极高（改为自动解锁） |
-| **徽章 Badges** | 成就系统，可自动触发或授予 | 有 VIP / 角色徽章，无成就体系 | ⭐⭐⭐⭐ 高 |
-| **用户卡片 User Card** | 悬浮展示摘要 + 关联账号 + 徽章 | 有 `linkedAccountChips`，纯文字 | ⭐⭐⭐⭐⭐ 极高 |
-| **节点式系统私信** | TL1/TL2/TL3 晋升各触发一封祝贺+下一步引导 | 无 | ⭐⭐⭐ 中（改为条件触发引导条） |
-| **渐进式披露** | 对 TL0 隐藏高级功能，避免界面吓人 | 无，所有功能一次铺开 | ⭐⭐⭐⭐ 高 |
-| **Bootstrap 模式** | 前 50 名注册用户自动 TL1 + 每日摘要，冷启动 | 无 | ⭐⭐⭐ 中 |
+| P0 | A–D（已完成）+ E card.svg | 0.5d | 无 |
+| P1 | A 邮箱 | 1d | 无（站内邮件可选 SMTP Secret） |
+| P1 | B 账号关联端点 | 1d | 无 |
+| P1 | C 绑定引导弹窗 | 0.5d | 依赖 B |
+| P1 | D 战绩概览 | 2d | **需上游放行 scope** |
+| P2 | A/B/C/D/E/F | 各 1–3d | 部分需上游 |
 
-**关键判断**：mdqp 是工具站不是社区，没有"发帖/阅读"这类行为，**不能照搬 Discourse 的 TL 判定条件**，必须换成本站自己的行为事件（发板、设密码、绑定平台、邀请）。但"**沙盒 → 渐进解锁 → 成就激励 → 节点式触达**"这套骨架是完全可迁移的。
-
-### 3.2 引导模型：三层四态
-
-```
-┌─ L0 匿名态 ──────────── 首屏一句话价值 + 单一 CTA ──────────┐
-│                              ↓ 登录                          │
-├─ L1 首登引导 ─────────── 3 步 Onboarding Checklist ─────────┤
-│                              ↓ 完成/跳过                     │
-├─ L2 能力解锁 ─────────── 按行为解锁功能 + 成就徽章 ──────────┤
-│                              ↓ 长期                          │
-└─ L3 条件召回 ─────────── 情境触发的引导条（可关闭）──────────┘
-```
-
-### 3.3 L0：登录弹窗改造（工作量：小）
-
-**现状问题**：弹窗只给两个按钮，用户不知道为什么要选密码登录，也不知道 CPOAuth 是什么。
-
-**改造后**：
-
-```
-┌────────────────────────────────────────┐
-│  登录 mdqp                              │
-│                                         │
-│  [ 使用 CPOAuth 登录 ]        ← 主按钮  │
-│    竞赛账号一站式登录，自动同步洛谷 /    │
-│    Codeforces / AtCoder 绑定信息        │
-│                                         │
-│  ───────── 或 ─────────                │
-│                                         │
-│  [ 用户名 ] [ 密码 ] [ 登录 ]            │
-│  [ 注册新账号 ]                          │
-│                                         │
-│  ⓘ 建议两种都设置：CPOAuth 是外部服务， │
-│    设了密码等于留一把备用钥匙。          │
-└────────────────────────────────────────┘
-```
-
-- CPOAuth 按钮下方补一行**说明文字**（现在没有，用户不知道 CPOAuth 是什么）
-- 底部固定一行 ⓘ 提示，讲清"为什么要设密码"
-- 宕机时（`/cpoauth-status` 返回 false）：CPOAuth 按钮置灰 +  tooltip「服务暂时不可用」+ 顶部黄色横幅
-
-### 3.4 L1：首次登录 Onboarding Checklist（工作量：中）——对标 Discobot
-
-Discourse 用对话式教程，mdqp 更适合 **checklist**（工具站，用户要的是快，不想陪机器人聊天）。
-
-**三步，登录后立即以卡片形式出现在首页顶部：**
-
-| 步骤 | 任务 | 对应现实风险 | 完成奖励 |
-|---|---|---|---|
-| ① | **设置密码**（30 秒） | CPOAuth 宕机 = 账号锁死 | 解锁"密码登录"成就 |
-| ② | **发布第一篇剪贴板** | 用户不知道从哪开始 | 解锁"自定义短链" |
-| ③ | **完善资料 / 绑定竞赛账号** | 主页空白、无辨识度 | 解锁"@提及" + 主页展示战绩 |
-
-**规则：**
-- 进度写库（`users.onboarding_step`），**换设备/清缓存不丢**
-- 每步可单独跳过，底部有「全部跳过」（尊重用户，不强制）
-- **全部完成后自动消失**，不再打扰
-- 7 天内未完成则折叠为一行小字（不消失也不烦人）
-
-**为什么第 ① 步是设密码**：这是唯一一个"用户不设、风险由用户自己承担、且此刻正在发生"的事（CPOAuth 现在就 502）。把它放第一步是最有说服力的。
-
-### 3.5 L2：能力渐进解锁（工作量：中）——对标 Trust Levels
-
-**现状**：`feature_flags` 由管理员逐个手动开关，新用户默认全开或全关。
-
-**改造**：改为 **自动解锁 + 管理员可覆盖** 的双层模型。
-
-| 等级 | 触发条件 | 解锁内容 |
-|---|---|---|
-| **Lv0 新用户** | 刚注册 | 基础创建、编辑自己的板 |
-| **Lv1 常客** | 发布 ≥3 篇 **且** 设置密码 | 自定义短链、Markdown 高级语法 |
-| **Lv2 活跃** | 发布 ≥10 篇 **或** 绑定 ≥1 个竞赛平台 | 协作板、评论、@提及、密码保护 |
-| **Lv3 核心** | 邀请 ≥1 人 **或** 发布 ≥30 篇 | 不限字数、置顶、读者上限设置 |
-
-- 管理员的手动开关**优先级更高**（`feature_flags` 保留，作为 override）
-- 未解锁的功能**不隐藏**（避免用户困惑），而是**置灰 + 点击后提示解锁条件**（这比 Discourse 的"直接隐藏"更友好，因为工具站用户会以为功能不存在）
-
-> 这一条直接复用现有的 `feature_flags` 数据结构，改动量比想象中小。
-
-### 3.6 L3：条件触发的引导条（工作量：小）——对标节点式系统私信
-
-| 触发条件 | 引导条内容 | 优先级 |
-|---|---|---|
-| 已登录 & `has_password === false` | 「设置密码，防止 CPOAuth 宕机时进不去」 | **P0（v4.3 已实现）** |
-| CPOAuth 宕机 & 已登录无密码 | 「服务暂时不可用，现在设置密码才能保住账号」 | **P0** |
-| 未绑定任何竞赛平台 | 「绑定洛谷/CF 账号，主页展示你的战绩」 | P1 |
-| 已绑 Clist & 24h 未刷新战绩 | 「战绩数据已过期，点此刷新」 | P2 |
-| 日配额用尽 | 「今日额度用完，邀请好友可提升」 | P1 |
-| 剪贴板接近 300 字上限 | 「内容较长，VIP 不限字数」 | P2 |
-
-**通用规则**（v4.3 已建立模式，复用即可）：
-- localStorage 记录「忽略时间」，关闭后 7 天内不再出现
-- 同一时刻**最多显示一条**，按优先级排序
-- 每条都有明确 CTA 按钮 + 关闭按钮
-
-### 3.7 关联账号区块升级（工作量：小，性价比极高）
-
-**现状**：`洛谷 · xxx` 灰字 chip，不能点、无图标。
-
-**改造后**：
-
-```
-已绑定平台                          [ 管理绑定 ↗ ]
-┌──────────┬──────────┬──────────┐
-│  🟦 洛谷   │  🟧 AtCoder│  🟥 CF    │
-│  yanzien  │  yanzien  │  yanzien │
-│  UID 123  │  rating    │  rating  │
-└──────────┴──────────┴──────────┘
-        [ ＋ 绑定更多平台 ]
-```
-
-- 每个平台一个**带品牌色的卡片**，显示 handle
--整块**可点击**，跳转到该平台的个人主页（`platform` + `platformUid` 拼 URL）
-- 有 `cp_summary` 数据时，**在卡片上直接显示 rating**（这是关键增值点）
-- 未绑定任何平台时，显示引导空态：「绑定竞赛账号，让主页展示你的战绩 [去绑定]」
-- 「管理绑定 ↗」直达 `https://www.cpoauth.com/profile`
+**建议顺序**：P0-E（即做）→ P1-B（解头条）→ P1-C（头条需求闭环）→ P1-A（降死锁风险）→ P1-D（先去上游确认 scope 能否放行，能放再排期）。
 
 ---
 
-## 四、第二部分：功能升级规划
+## 五、验收标准（通用模板）
+- 功能：对照「用户故事」逐条可走通；异常分支（cpoauth 宕机 / 用户取消 / 网络超时）不白屏、不卡死。
+- 安全：令牌仅存 Worker Secret / D1，不外泄前端；撤销在退出时尽力执行；限流与长度上限在位。
+- 埋点：每个新入口埋 `event + from + uid(匿名则设备指纹)`；周维度看转化。
+- 文档：`CHANGELOG.md` + `docs/help.md` 同步更新，`sync-docs --check` 通过。
 
-按优先级排列。**P0 都是安全/稳定性项，建议优先做。**
+## 六、风险 / 灰度 / 回滚
+- **风险 R1（最高）**：cpoauth 可用性。缓解：密码兜底 + P0-B 自救 + 所有 cpoauth 功能默认降级。
+- **风险 R2**：新 scope 上游不放行 / 老用户需重授权导致绑定率骤降。缓解：先用 card.svg、关联卡片等零 scope 改动；scope 类功能灰度 10% 再全量。
+- **风险 R3**：P1-B 关联逻辑写错会 orphan 账号。缓解：回调先查 `session` 用户，再 `WHERE id` upsert；上线前用脚本模拟「已登录密码用户点绑定」回归。
+- **灰度**：前端用 `feature_flags` 按用户白名单放量；后端用 D1 列默认 NULL 兼容老数据。
+- **回滚**：Pages 每个 deploy 有版本哈希，出问题 `wrangler pages deployment tail` + 回退上一版；DB 变更均为**加法**（加列/加表），不删不改旧列，回滚代码即兼容。
 
-### P0-1 退出登录时撤销令牌（工作量：极小）
-
-**问题**：用户点"退出"，mdqp 只清了自己的 cookie，CPOAuth 侧的 token 仍然有效（refresh_token 30 天）。
-
-**做法**：存 refresh_token → 退出时调 `POST /api/oauth/revoke`。
-
-```js
-// 回调时保存
-await db.prepare('UPDATE users SET cpoauth_refresh = ?, token_expires = ? WHERE id = ?')
-        .bind(token.refresh_token, Date.now() + token.expires_in * 1000, userId).run();
-
-// 退出时撤销
-oauthRoutes.post('/logout', async (c) => {
-  const rt = /* 从 DB 取 */;
-  if (rt) await fetch('https://www.cpoauth.com/api/oauth/revoke', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      token: rt, token_type_hint: 'refresh_token',
-      client_id: c.env.CPOAUTH_CLIENT_ID, client_secret: c.env.CPOAUTH_CLIENT_SECRET
-    })
-  });
-  // 撤销失败也要清本地 cookie，不能卡住用户
-  ...
-});
-```
-
-**注意**：revoke **始终返回 200**，无法据此判断是否成功；且**撤销失败绝不能阻塞用户退出**——要 try/catch 吞掉。
-
-### P0-2 Refresh Token 存取与轮换（工作量：中）
-
-**为什么需要**：只要想做"后台定时拉竞赛数据"，就必须有它。
-
-**要点**：
-- 新表或新列存 `refresh_token` + `expires_at`
-- **强制轮换**：每次刷新后必须用返回的新 refresh_token **覆盖**旧值，否则下次刷新直接失败
-- 轮换失败（token 失效）→ 标记 `reauth_required`，前端引导用户重新授权一次
-
-### P0-3 宕机引导升级为"三步自救"（工作量：小）
-
-**现状**：横幅只说"服务不可用，请用密码登录"。但用户如果**没设密码**，这句话是把人堵死在门外。
-
-**改造**：分支处理
-
-| 用户状态 | 横幅内容 |
-|---|---|
-| 已设密码 | 「CPOAuth 暂时不可用，可用用户名+密码登录」+ [用密码登录] |
-| 未设密码 & 已登录 | 「CPOAuth 暂时不可用，现在设置密码，否则下次登录可能进不去」+ [立即设置] |
-| 未设密码 & 未登录 | 「CPOAuth 暂时不可用，且你没有设置密码。请联系站长 x 恢复账号」+ 微信二维码 |
-
-第三条很重要：**不能出现"用户彻底无法自救"的场景**。
-
-### P1-1 竞赛战绩展示（工作量：中，依赖高）
-
-**scope**：新增 `cp:summary`
-
-**展示位置**：个人主页 + `/u/:id` 公开主页
-
-```
-竞赛战绩                    （数据来自 Clist.by）
-Codeforces     3800  🔴 Legendary
-AtCoder        2290  🟨 4 kyu
-─────────────────────────────
-最高 rating  AtCoder 2290
-参赛场次     230
-```
-
-**三种状态都必须处理**：
-1. 未授权 scope → 「授权后展示战绩 [授权]」
-2. 已授权但未绑 Clist → 「战绩数据需要绑定 Clist 账号 [去绑定]」（展示引导，不报错）
-3. Clist API 故障 → `available: false` → 静默隐藏区块（不显示错误，避免吓到用户）
-
-**现实约束**：Clist 绑定门槛高，预计覆盖率 <20%。所以这块定位是"**有则展示的加分项**"，不能作为核心卖点。
-
-### P1-2 CPOAuth 资料卡嵌入（工作量：极小）
-
-`GET https://www.cpoauth.com/api/users/{username}/card.svg?theme=dark&lang=zh&width=480`
-
-**用法**：个人主页底部放一张 `<img>`，一行代码搞定，是最低成本的身份展示升级。
-
-**必须处理**：`<img>` 加载失败要 `onerror` 隐藏（CPOAuth 会宕机）。且建议**后端代理缓存**（避免暴露用户 IP、避免每次都打外部服务）。
-
-### P2-1 Rating 曲线（工作量：中大）
-
-**scope**：`cp:details` → `rating_history[]`（含 old/new rating、名次、比赛名、日期）
-
-用 Canvas 或 SVG 画折线图，放在个人主页。数据量大，建议**落库缓存**（`cp_rating_cache` 表），不要每次实时拉。
-
-### P2-2 成就 / 徽章系统（工作量：中）——对标 Discourse Badges
-
-| 徽章 | 条件 |
-|---|---|
-| 🔑 有备无患 | 设置密码 |
-| 📝 开张大吉 | 发布第一篇 |
-| 🏅 身经百战 | 发布 50 篇 |
-| 🔗 跨界达人 | 绑定 ≥3 个平台 |
-| 🎁 伯乐 | 邀请 ≥1 人 |
-| ⭐ 元老 | 注册满 1 年 |
-
-展示在用户名后面 + 个人主页徽章墙。这是**零成本提升留存**的手段。
-
-### P2-3 站内竞赛排行榜（工作量：大）
-
-有 `cp_summary` 数据的用户排个序，做 `/rank` 页面。**强依赖 Clist 绑定率**，建议等 P1-1 上线后看实际数据再决定。
-
-### P2-4 题解场景（工作量：大，脑洞）
-
-绑定洛谷后，新建剪贴板时可一键插入「题解模板」（题号、难度、思路、代码）。**这是把 mdqp 从"通用剪贴板"推向"OI 垂直工具"的关键差异化**，但需要想清楚是否要改产品定位 —— 建议单独立项讨论。
+## 七、待确认项（阻塞排期）
+1. **绑定引导头条需求**：是否推进 P1-B→P1-C？（建议推进，已设计好不 orphan 的方案）
+2. **战绩展示**：能否去 cpoauth 后台确认 `cp:summary`/`cp:details` 对你账号放行？（放行才能排 P1-D）
+3. **`/c/loginhelp` 内容**：你手写的图文 vs 我生成骨架你填图？
+4. **邮箱体系**：是否需要真实发信（需 SMTP Secret）还是仅做「验证流程占位」？
+5. **方向**：是否认可把 mdqp 往「OI 选手工作台」（P2-F）方向走，还是保持纯剪贴板工具？
 
 ---
-
-## 五、实施路线图
-
-| 阶段 | 内容 | 依赖 | 风险 |
-|---|---|---|---|
-| **第 1 批（稳）** | P0-1 revoke、P0-3 宕机引导升级、L0 登录弹窗改造、3.7 关联账号升级 | 无 | 低 |
-| **第 2 批（引导）** | L1 Onboarding Checklist、L2 渐进解锁、L3 条件引导条 | 需加 DB 字段 | 中（影响新用户路径） |
-| **第 3 批（数据）** | P0-2 refresh token、P1-1 战绩展示、P1-2 资料卡 | **CPOAuth 后台放行新 scope** | 中（依赖外部） |
-| **第 4 批（社区）** | P2-1 曲线、P2-2 徽章 | 第 3 批数据 | 中 |
-
-**建议**：第 1 批可以马上做，不依赖任何外部变更，且能立刻改善"CPOAuth 宕机"这个正在进行的问题。
-
----
-
-## 六、风险与前置条件（需要你决策）
-
-### 6.1 三个硬约束
-
-1. **新增 scope 需要 CPOAuth 后台为你的 client 放行**
-   现有 app（`f0d923cd-...`）是否已开放 `cp:summary` / `email` 未知。按以往经验，**CPOAuth 后台不能改回调 URL（改了只能新建 app）**，scope 能否后加也需要实测。
-   → **需要你去 CPOAuth 后台确认，或联系服务方。**
-
-2. **老用户需要重新授权才能拿到新 scope**
-   scope 变更不会自动生效于已有 token。做法：引导用户再点一次「CPOAuth 登录」（同一个 `sub` 会 upsert 到同一账号，不会创建新用户），走一遍增量授权。
-   → 需要一个"**重新授权以解锁战绩展示**"的引导入口。
-
-3. **CPOAuth 本身不稳定（此刻就是 502）**
-   所有新增依赖都必须：① 可降级（外部挂了不影响核心功能）② 有缓存（不实时打外部）③ 有超时（≤4s）。
-   → 这条要写进代码规范，不是可选项。
-
-### 6.2 需要你拍板的三件事
-
-| # | 决策点 | 选项 |
-|---|---|---|
-| 1 | 是否推进 `cp:summary` 战绩展示？ | A. 推进（需先确认 scope 能否放行）<br>B. 暂缓，先只做引导和安全项 |
-| 2 | Onboarding checklist 是否强制？ | A. 可跳过（尊重用户）<br>B. 强制完成前两步（转化优先） |
-| 3 | mdqp 是否要往 OI 垂直工具走（P2-4 题解模板）？ | A. 保持通用剪贴板<br>B. 试探性做 OI 垂直功能 |
-
----
-
-## 七、附：参考来源
-
-- CPOAuth 官方仓库（能力清单、scope 表、端点、token 生命周期）：<https://github.com/Ark-Aak/cp-oauth>
-- Discourse 新用户引导机制：
-  - Discobot 交互式教程：<https://blog.discourse.org/2017/08/who-is-discobot/>
-  - 信任等级体系：<https://blog.discourse.org/2018/06/understanding-discourse-trust-levels/>
-  - 用系统私信定制引导节奏：<https://meta.discourse.org/t/customizing-trust-level-promotion-messages-for-new-users/193270>
+*本方案为路线图，未实现项均待指令后分批开工。当前已停手，等待下一步。*
