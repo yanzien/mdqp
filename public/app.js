@@ -6,7 +6,18 @@
 // 更新日志：随代码发布自动同步
 const CHANGELOG_MD = `# 📝 更新日志
 
-mdqp 的主要版本变动记录。当前部署版本 **v4.3.1**。
+mdqp 的主要版本变动记录。当前部署版本 **v4.4**。
+
+---
+
+## v4.4 · 2026-09-01（账号体系完善：引导 / 邮箱 / 战绩 / 设置）
+- 🔔 **刷新引导判定**：打开网站时自动检测账号状态——未绑定 cpoauth 提示「建议绑定」、已绑但未设密码提示「设置密码」、两者皆备则不打扰；判定结果本地缓存 10 分钟 + 「稍后提醒」1 天 / 「不再提示」永久（同时写入服务端），避免重复请求浪费
+- 🔗 **账号关联端点**：已用密码登录的用户，点「绑定 cpoauth」后回调会把第三方 \`sub\` 写回**当前账号**（而非新建孤儿账号），实现密码账号与竞赛账号合一
+- 📧 **邮箱登录（P1 简化）**：绑定 cpoauth 后用户带 \`email\` scope，可直接用第三方返回的邮箱登录本站；绑定邮箱走 cpoauth，不另设独立绑定流程
+- 🏆 **战绩概览**：「我的」与个人主页新增战绩区——直接嵌入 cpoauth 竞赛名片 \`card.svg\`（随主题切换明暗），并 best-effort 代理 \`cp:summary\`（依赖用户已绑 Clist.by，缺失时优雅降级）
+- 🛡 **信任等级 L0–L3**：按剪贴板数量、邀请数、账号年龄、VIP / 管理员身份综合计算，显示在个人资料卡与 API 中
+- 🏅 **成就徽章**：派生徽章（已连 cpoauth / 双保险 / 密码 / VIP / 剪贴板达人 / 邀请达人 / 管理员），个人主页一图展示
+- ⚙️ **「我的」与个人主页重做**：资料卡升级为头像 + 信息 + 齿轮设置按钮；移除原先低劣的内联编辑与散落的安全表单；新增**设置弹窗**，分「通用」（签名 / 简介 / 主题）与「账号与安全」（密码态 / cpoauth 绑定态 / 邮箱 / 信任等级 / 登出）
 
 ---
 
@@ -301,11 +312,25 @@ function countChars(text) {
 }
 
 // ==================== 主题 ====================
+function applyTheme(mode) {
+  let dark = mode === 'dark';
+  if (mode === 'auto') dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  const tb = $('#themeBtn'); if (tb) tb.textContent = dark ? '☀️' : '🌙';
+}
 function initTheme() {
-  const saved = localStorage.getItem('mdqp_theme') || 'light';
-  document.documentElement.dataset.theme = saved;
-  $('#themeBtn').textContent = saved === 'dark' ? '☀️' : '🌙';
-  $('#themeBtn').onclick = () => { const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'; document.documentElement.dataset.theme = next; localStorage.setItem('mdqp_theme', next); $('#themeBtn').textContent = next === 'dark' ? '☀️' : '🌙'; };
+  const saved = localStorage.getItem('mdqp_theme') || 'auto';
+  applyTheme(saved);
+  $('#themeBtn').onclick = () => {
+    const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    localStorage.setItem('mdqp_theme', next); applyTheme(next);
+  };
+  // 跟随系统：系统主题变化时实时同步（仅当设置为 auto）
+  if (window.matchMedia) {
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+      if ((localStorage.getItem('mdqp_theme') || 'auto') === 'auto') applyTheme('auto');
+    });
+  }
 }
 
 // ==================== 路由 ====================
@@ -354,8 +379,8 @@ async function loadMe() {
   }
   const al = $('#navAdminLink'); if (al) al.classList.toggle('hidden', !isAdmin());
   const cl = $('#navCodeLink'); if (cl) cl.classList.toggle('hidden', !isAdmin());
-  // 已登录但未设密码 → 顶部引导（cpoauth 宕机时仍有入口）
-  checkPasswordGuide();
+  // 刷新引导：未绑 cpoauth → 建议绑定；已绑未设密码 → 建议设密码；都符合 → 不弹
+  checkRefreshGuide();
 }
 
 function avatarHtml(url, name) { if (url) return `<img class="avatar" src="${esc(url)}" alt="">`; const ch = (name || '?').trim().charAt(0).toUpperCase(); return `<span class="avatar avatar-txt">${esc(ch)}</span>`; }
@@ -745,6 +770,34 @@ function featureFlagBadges(flags) {
   }).join(' ');
 }
 
+// 信任等级徽章（Discourse 风：L0–L3）
+function trustBadge(tl) {
+  const labels = ['新手上路', '常驻用户', '活跃用户', '核心用户'];
+  const t = Math.max(0, Math.min(3, tl || 0));
+  return `<span class="badge badge-trust tl-${t}" title="信任等级 L${t}">🛡 ${labels[t]} · L${t}</span>`;
+}
+// 成就徽章（从现有数据派生，无需额外存储）
+function userBadges(u) {
+  if (!u) return '';
+  const b = [];
+  if (u.cpoauth_bound) b.push('<span class="badge badge-ach">🔗 已连 cpoauth</span>');
+  if (u.has_password && u.cpoauth_bound) b.push('<span class="badge badge-ach">🔒 双保险登录</span>');
+  else if (u.has_password) b.push('<span class="badge badge-ach">🔑 密码登录</span>');
+  if (u.is_vip) b.push('<span class="badge badge-vip">⭐ VIP</span>');
+  const clips = u.clip_count || 0;
+  if (clips >= 10) b.push('<span class="badge badge-ach">📋 剪贴板达人</span>');
+  if ((u.invite_count || 0) >= 1) b.push('<span class="badge badge-ach">🎁 邀请达人</span>');
+  if (u.role === 'admin' || u.role === 'developer') b.push('<span class="badge badge-ach">🛡 管理员</span>');
+  return b.length ? `<div class="badge-row badges-row">${b.join('')}</div>` : '';
+}
+// 战绩概览：cpoauth 竞赛名片（公开 SVG，无需 token；随站点主题切换）
+function cpCardHtml(username) {
+  if (!username) return '';
+  const dark = document.documentElement.dataset.theme === 'dark';
+  const u = encodeURIComponent(username);
+  return `<img class="cp-card-img" src="https://www.cpoauth.com/api/users/${u}/card.svg?theme=${dark ? 'dark' : 'light'}&lang=zh" alt="竞赛战绩名片" loading="lazy" onerror="this.style.display='none'">`;
+}
+
 async function renderUser(uid) {
   showView('user'); $('#profile').innerHTML = '<div class="skeleton-card"><div class="sk-line sk-title"></div><div class="sk-line sk-text"></div><div class="sk-line sk-text-short"></div></div>';
   const { ok, data } = await api('/api/users/' + encodeURIComponent(uid));
@@ -758,39 +811,31 @@ async function renderUser(uid) {
   const vipBadge = u.is_vip ? ' <span class="badge badge-vip">⭐ VIP</span>' : '';
   const flagsHtml = self || adminView ? `<div class="feature-flags-row">${featureFlagBadges(u.feature_flags)}</div>` : '';
 
+  const badgesHtml = userBadges(u);
+
   $('#profile').innerHTML = `<div class="profile-card">
-    ${avatarHtml(u.avatar, u.display_name)}
-    <div class="profile-info">
-      <h1>${esc(u.display_name)} ${roleBadge(u.role, { is_vip: u.is_vip })}${vipBadge}</h1>
-      ${sigHtml}
-      <p class="muted">@${esc(u.username)} · 加入于 ${esc((u.created_at || '').slice(0, 10))}</p>
-      ${bioHtml}
-      ${flagsHtml}
-      <div class="profile-stats"><span>📋 ${u.clip_count} 个剪贴板</span>${self ? '<span class="badge">这是你</span>' : ''}
-        ${u.invite_code ? `<span>🎁 邀请码：<code class="card-id">${esc(u.invite_code)}</code></span>` : ''}
+    <div class="profile-top">
+      ${avatarHtml(u.avatar, u.display_name)}
+      <div class="profile-info">
+        <h1 class="profile-name">${esc(u.display_name)} ${roleBadge(u.role, { is_vip: u.is_vip })}${vipBadge} ${trustBadge(u.trust_level || 0)}</h1>
+        ${sigHtml}
+        <p class="muted">@${esc(u.username)} · 加入于 ${esc((u.created_at || '').slice(0, 10))}</p>
+        ${bioHtml}
+        ${badgesHtml}
       </div>
-      ${linkedAccountChips(linked, self)}
-      ${linked.length || self ? `<div class="profile-actions">${self ? '<a class="btn btn-sm" href="https://www.cpoauth.com/profile" target="_blank" rel="noopener">🔗 关联账号管理（cpoauth）</a>' : ''}</div>` : ''}
-      <div class="profile-wechat"><h4>扫一扫，添加我为好友</h4><img src="/wechat-qr.png" alt="WeChat QR" onerror="this.style.display='none'"></div>
-      ${self ? `<div class="bio-edit"><details open><summary>✏️ 编辑个人资料</summary>
-        <label class="field-label">个性签名（200 字内）</label>
-        <textarea id="sigInput" class="input bio-input" maxlength="200" placeholder="写一句个性签名">${esc(u.signature || '')}</textarea>
-        <label class="field-label">个人简介 / 自我介绍（500 字内，展示在个人主页）</label>
-        <textarea id="bioInput" class="input bio-input" maxlength="500" placeholder="介绍一下你自己～会展示在 /u/${u.id} 主页">${esc(u.bio || '')}</textarea>
-        <button class="btn btn-sm btn-primary" id="sigSaveBtn">保存</button>
-      </details></div>` : ''}
-      ${self ? `<div class="invite-section"><details><summary>🎁 邀请好友</summary><div id="inviteInfo" class="invite-info">加载中…</div></details></div>` : ''}
-      ${self ? `<div class="security-section">
-        <div class="security-row">
-          <div class="security-info">
-            <b>🔒 登录密码</b>
-            <span class="muted">${u.has_password
-              ? '已设置 · 第三方登录不可用时，可用「' + esc(u.username) + ' + 密码」进入'
-              : '未设置 · 第三方登录（cpoauth）一旦宕机，你将无法进入账号'}</span>
-          </div>
-          <button class="btn btn-sm ${u.has_password ? '' : 'btn-primary'}" id="userSetPwBtn">${u.has_password ? '修改密码' : '设置密码'}</button>
-        </div>
-      </div>` : ''}
+      ${self ? `<button class="icon-btn profile-gear" id="userSettingsBtn" title="设置" aria-label="设置">⚙️</button>` : ''}
+    </div>
+    <div class="profile-stats"><span>📋 ${u.clip_count} 个剪贴板</span>${self ? '<span class="badge">这是你</span>' : ''}
+      ${u.invite_code ? `<span>🎁 邀请码：<code class="card-id">${esc(u.invite_code)}</code></span>` : ''}
+    </div>
+    <div class="me-section">
+      <h3 class="me-section-title">🏆 战绩概览</h3>
+      <div id="userCpCard">${u.cpoauth_bound ? cpCardHtml(u.username) : '<p class="muted">该用户暂未绑定 cpoauth，无战绩展示。</p>'}</div>
+    </div>
+    ${linkedAccountChips(linked, self)}
+    ${linked.length || self ? `<div class="profile-actions">${self ? '<a class="btn btn-sm" href="https://www.cpoauth.com/profile" target="_blank" rel="noopener">🔗 关联账号管理（cpoauth）</a>' : ''}</div>` : ''}
+    <div class="profile-wechat"><h4>扫一扫，添加我为好友</h4><img src="/wechat-qr.png" alt="WeChat QR" onerror="this.style.display='none'"></div>
+    ${self ? `<div class="invite-section"><details><summary>🎁 邀请好友</summary><div id="inviteInfo" class="invite-info">加载中…</div></details></div>` : ''}
       ${adminView && !self && u.role !== 'developer' ? `<div class="admin-user-actions">
           <b class="muted">管理操作：</b>
           ${u.role === 'admin' ? `<button class="btn btn-sm" data-role-act="user" data-uid="${u.id}">撤下管理</button>` : `<button class="btn btn-sm btn-primary" data-role-act="admin" data-uid="${u.id}">册封管理</button>`}
@@ -802,9 +847,7 @@ async function renderUser(uid) {
     </div></div>`;
 
   if (self) {
-    $('#sigSaveBtn').onclick = async () => { const sig = $('#sigInput').value; const bio = ($('#bioInput') || {}).value || ''; const r = await api('/api/me', { method: 'PATCH', body: JSON.stringify({ signature: sig, bio }) }); if (r.ok) { toast('已保存'); renderUser(uid); } else toast('保存失败：' + (r.data?.error || r.status), 'err'); };
-    // 统一走设置密码弹窗（内联表单的 #setPwInput 会与弹窗同名 ID 冲突，已移除）
-    const userSetPw = $('#userSetPwBtn'); if (userSetPw) userSetPw.onclick = () => openSetPwModal();
+    const userSettingsBtn = $('#userSettingsBtn'); if (userSettingsBtn) userSettingsBtn.onclick = openSettingsModal;
     loadInviteInfo();
   }
 
@@ -1061,7 +1104,7 @@ async function renderMe() {
   if (me.type === 'user') {
     const linked = me.linked_accounts || []; const sigHtml = me.signature ? `<p class="user-signature">「${esc(me.signature)}」</p>` : ''; const bioHtml = me.bio ? `<p class="bio">${esc(me.bio)}</p>` : '';
     const vipBadge = me.is_vip ? ' <span class="badge badge-vip">⭐ VIP</span>' : '';
-    const flagsHtml = `<div class="feature-flags-row">${featureFlagBadges(me.feature_flags)}</div>`;
+    const badgesHtml = userBadges(Object.assign({ clip_count: (me.clips || []).length, cpoauth_bound: me.cpoauth_bound, has_password: me.has_password, is_vip: me.is_vip, invite_count: me.invite_count, role: me.role }, me));
 
     // v4.0: 配额显示
     const quota = me.quota || {};
@@ -1071,45 +1114,43 @@ async function renderMe() {
     </div>`;
 
     $('#meHead').innerHTML = `<div class="profile-card">
-      ${avatarHtml(me.avatar, me.name)}
-      <div class="profile-info"><h1>${esc(me.name)} ${roleBadge(me.role, { is_vip: me.is_vip })}${vipBadge}</h1>
-      ${sigHtml}
-      <p class="muted">已登录 · 剪贴板有配额限制${me.role === 'developer' ? ' · 你是本站开发者' : me.role === 'admin' ? ' · 你是管理员' : ''}</p>
-      ${bioHtml}
-      ${flagsHtml}
+      <div class="profile-top">
+        ${avatarHtml(me.avatar, me.name)}
+        <div class="profile-info">
+          <h1 class="profile-name">${esc(me.name)} ${roleBadge(me.role, { is_vip: me.is_vip })}${vipBadge} ${trustBadge(me.trust_level || 0)}</h1>
+          ${sigHtml}
+          <p class="muted">已登录 · 剪贴板有配额限制${me.role === 'developer' ? ' · 你是本站开发者' : me.role === 'admin' ? ' · 你是管理员' : ''}</p>
+          ${bioHtml}
+          ${badgesHtml}
+        </div>
+        <button class="icon-btn profile-gear" id="meSettingsBtn" title="设置" aria-label="设置">⚙️</button>
+      </div>
       ${quotaHtml}
+      <div class="me-section">
+        <h3 class="me-section-title">🏆 战绩概览</h3>
+        <div id="meCpCard">${me.cpoauth_bound ? cpCardHtml(me.username) : '<p class="muted">绑定 cpoauth 后，这里会展示你的竞赛战绩名片。</p>'}</div>
+        <div id="meCpSummary" class="cp-summary"></div>
+      </div>
       ${linkedAccountChips(linked, true)}
       <div class="profile-stats">
         <a class="btn btn-sm" href="/u/${esc(me.userId)}" data-link>查看公开主页</a>
         <a class="btn btn-sm" href="/invite" data-link>🎁 邀请好友</a>
         <a class="btn btn-sm" href="/vip" data-link>⭐ VIP</a>
-        <a class="btn btn-sm" href="https://www.cpoauth.com/profile" target="_blank" rel="noopener">🔗 关联账号</a>
         <a class="btn btn-sm btn-primary" href="/new" data-link>＋ 新建</a>
       </div>
       <div class="profile-wechat"><h4>扫一扫，添加我为好友</h4><img src="/wechat-qr.png" alt="WeChat QR" onerror="this.style.display='none'"></div>
-      <div class="bio-edit"><details><summary>✏️ 编辑个人资料</summary>
-        <label class="field-label">个性签名（200 字内）</label>
-        <textarea id="sigInput" class="input bio-input" maxlength="200" placeholder="写一句个性签名">${esc(me.signature || '')}</textarea>
-        <label class="field-label">个人简介（500 字内，展示在个人主页）</label>
-        <textarea id="bioInput" class="input bio-input" maxlength="500" placeholder="介绍一下你自己">${esc(me.bio || '')}</textarea>
-        <button class="btn btn-sm btn-primary" id="meSaveBtn">保存</button>
-      </details></div>
-      <div class="security-section">
-        <div class="security-row">
-          <div class="security-info">
-            <b>🔒 登录密码</b>
-            <span class="muted">${me.has_password
-              ? '已设置 · 第三方登录不可用时，可用「' + esc(me.username || '你的用户名') + ' + 密码」进入'
-              : '未设置 · 第三方登录（cpoauth）一旦宕机，你将无法进入账号'}</span>
-          </div>
-          <button class="btn btn-sm ${me.has_password ? '' : 'btn-primary'}" id="meSetPwBtn">${me.has_password ? '修改密码' : '设置密码'}</button>
-        </div>
-      </div>
     </div></div>`;
 
-    // 邀请已移至独立页面 /invite
-    $('#meSaveBtn').onclick = async () => { const sig = $('#sigInput').value; const bio = ($('#bioInput') || {}).value || ''; const r = await api('/api/me', { method: 'PATCH', body: JSON.stringify({ signature: sig, bio }) }); if (r.ok) { toast('已保存'); renderMe(); } else toast('保存失败：' + (r.data?.error || r.status), 'err'); };
-    const meSetPw = $('#meSetPwBtn'); if (meSetPw) meSetPw.onclick = () => openSetPwModal();
+    // 设置弹窗入口
+    const meSettingsBtn = $('#meSettingsBtn'); if (meSettingsBtn) meSettingsBtn.onclick = openSettingsModal;
+    // 战绩概览：尝试拉取 cp:summary（best-effort + D1 缓存）
+    if (me.cpoauth_bound) {
+      api('/api/me/cp-summary').then(({ data }) => {
+        const box = $('#meCpSummary'); if (!box) return;
+        if (data && data.available && data.data) box.innerHTML = renderCpSummary(data.data);
+        else box.innerHTML = '<p class="muted cp-summary-hint">绑定 Clist.by 并在 cpoauth 授权战绩范围后，这里会显示详细战绩。</p>';
+      }).catch(() => {});
+    }
   } else {
     const left = Math.max(0, (me.limit || 5) - (me.count || 0));
     const period = me.period === 'weekly' ? '本周' : '';
@@ -2032,26 +2073,151 @@ function setupSetPwModal() {
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !modal.classList.contains('hidden')) closeSetPwModal(); });
 }
 
-// ============ 未设密码自动引导 ============
-const PW_GUIDE_KEY = 'mdqp_pw_guide_dismissed_at';
-const PW_GUIDE_SNOOZE = 7 * 86400000; // 选择"稍后"后 7 天不再打扰
+// ============ 刷新引导（统一：未绑 cpoauth → 建议绑定；已绑未设密码 → 建议设密码） ============
+const RG_SNOOZE_KEY = 'mdqp_guide_snooze_until';
+const RG_NEVER_KEY = 'mdqp_guide_never';
+const RG_SNOOZE_MS = 24 * 3600000; // "稍后"后 1 天不再打扰
+const CPOAUTH_OK_KEY = 'mdqp_cpoauth_ok';
+const CPOAUTH_OK_TTL = 10 * 60000; // 状态探测结果缓存 10 分钟，避免每次刷新都打 cpoauth
 
-function hidePwGuide() { const b = $('#pwGuideBar'); if (b) b.classList.add('hidden'); }
-
-function checkPasswordGuide() {
-  const bar = $('#pwGuideBar'); if (!bar) return;
-  const me = state.me || {};
-  // 只有"已登录且确实没设密码"才提示；has_password 为 undefined 时不误伤
-  if (me.type !== 'user' || me.has_password !== false) { hidePwGuide(); return; }
-  const dismissedAt = Number(localStorage.getItem(PW_GUIDE_KEY) || 0);
-  if (dismissedAt && Date.now() - dismissedAt < PW_GUIDE_SNOOZE) { hidePwGuide(); return; }
-  bar.classList.remove('hidden');
+/** 带本地缓存的 cpoauth 可用状态探测（防重复请求浪费） */
+async function getCpoauthStatus() {
+  try {
+    const raw = localStorage.getItem(CPOAUTH_OK_KEY);
+    if (raw) { const o = JSON.parse(raw); if (Date.now() - o.t < CPOAUTH_OK_TTL) return o.ok; }
+  } catch {}
+  try {
+    const { data } = await api('/api/auth/cpoauth-status');
+    const ok = !!(data && data.ok);
+    try { localStorage.setItem(CPOAUTH_OK_KEY, JSON.stringify({ ok, t: Date.now() })); } catch {}
+    return ok;
+  } catch { return null; }
 }
 
-function setupPwGuide() {
-  const bar = $('#pwGuideBar'); if (!bar) return;
-  $('#pwGuideSetBtn').onclick = () => openSetPwModal();
-  $('#pwGuideClose').onclick = () => { localStorage.setItem(PW_GUIDE_KEY, String(Date.now())); hidePwGuide(); };
+function hideRefreshGuide() { const m = $('#refreshGuideModal'); if (m) { m.classList.remove('show'); m.classList.add('hidden'); } }
+// 兼容旧调用（设密码成功后关闭引导）
+function hidePwGuide() { hideRefreshGuide(); }
+
+function checkRefreshGuide() {
+  const me = state.me || {};
+  if (me.type !== 'user') return;
+  if (localStorage.getItem(RG_NEVER_KEY) === '1' || me.no_cpoauth_nudge) return; // 已选"不再提示"
+  const snooze = Number(localStorage.getItem(RG_SNOOZE_KEY) || 0);
+  if (snooze && Date.now() < snooze) return; // 稍后中
+  const needBind = !me.cpoauth_bound;
+  const needPw = me.cpoauth_bound && me.has_password === false;
+  if (!needBind && !needPw) return;
+  if (needBind) {
+    // 仅当 cpoauth 确实可用才提示绑定（宕机走 P0-3 自救，不叠加打扰）
+    getCpoauthStatus().then((ok) => { if (ok === true) showRefreshGuide('bind'); });
+  } else {
+    showRefreshGuide('pw');
+  }
+}
+
+function showRefreshGuide(kind) {
+  const m = $('#refreshGuideModal'); if (!m) return;
+  const title = $('#rgTitle'), icon = $('#rgIcon'), text = $('#rgText'), primary = $('#rgPrimary'), secondary = $('#rgSecondary');
+  if (kind === 'bind') {
+    title.textContent = '绑定 cpoauth，解锁战绩同步';
+    icon.textContent = '🔑';
+    text.innerHTML = '绑定后可用竞赛账号一键登录，并自动同步你的 <b>洛谷 / Codeforces / AtCoder</b> 等战绩。';
+    primary.textContent = '立即绑定';
+    primary.onclick = () => { location.href = '/api/auth/login'; };
+    secondary.classList.remove('hidden'); secondary.href = '/c/loginhelp?from=mdqp';
+  } else {
+    title.textContent = '设置登录密码';
+    icon.textContent = '🛡️';
+    text.innerHTML = '你已绑定 cpoauth，但<b>还没设密码</b>。cpoauth 一旦宕机，密码是你唯一的备用入口。';
+    primary.textContent = '设置密码';
+    primary.onclick = () => { hideRefreshGuide(); openSetPwModal(); };
+    secondary.classList.add('hidden');
+  }
+  m.classList.remove('hidden'); m.classList.add('show');
+}
+
+function setupRefreshGuide() {
+  const m = $('#refreshGuideModal'); if (!m) return;
+  $('#rgClose').onclick = () => { localStorage.setItem(RG_SNOOZE_KEY, String(Date.now() + RG_SNOOZE_MS)); hideRefreshGuide(); };
+  m.addEventListener('click', (e) => { if (e.target === m) { localStorage.setItem(RG_SNOOZE_KEY, String(Date.now() + RG_SNOOZE_MS)); hideRefreshGuide(); } });
+  $('#rgLater').onclick = () => { localStorage.setItem(RG_SNOOZE_KEY, String(Date.now() + RG_SNOOZE_MS)); hideRefreshGuide(); };
+  $('#rgNever').onclick = async () => {
+    localStorage.setItem(RG_NEVER_KEY, '1');
+    try { await api('/api/me', { method: 'PATCH', body: JSON.stringify({ no_cpoauth_nudge: true }) }); } catch {}
+    if (state.me) state.me.no_cpoauth_nudge = true;
+    hideRefreshGuide();
+  };
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !m.classList.contains('hidden')) hideRefreshGuide(); });
+}
+
+// ============ 设置弹窗（通用 / 账号与安全） ============
+function openSettingsModal() {
+  const me = state.me; if (!me || me.type !== 'user') return;
+  const m = $('#settingsModal'); if (!m) return;
+  // 通用
+  $('#setSig').value = me.signature || '';
+  $('#setBio').value = me.bio || '';
+  $('#setTheme').value = localStorage.getItem('mdqp_theme') || 'auto';
+  // 账号与安全
+  $('#secPwText').textContent = me.has_password ? '已设置' : '未设置（cpoauth 宕机时无法进入）';
+  $('#secCpText').textContent = me.cpoauth_bound ? '已绑定' : '未绑定';
+  $('#secEmailText').textContent = me.email ? (me.email_verified ? me.email + '（已验证）' : me.email + '（未验证）') : '未提供';
+  $('#secTlText').textContent = 'L' + (me.trust_level || 0) + ' · ' + ['新手上路', '常驻用户', '活跃用户', '核心用户'][me.trust_level || 0];
+  $('#secSetPw').textContent = me.has_password ? '修改' : '设置';
+  $('#secBind').textContent = me.cpoauth_bound ? '管理' : '去绑定';
+  $('#secBind').onclick = () => {
+    if (me.cpoauth_bound) { window.open('https://www.cpoauth.com/profile', '_blank', 'noopener'); return; }
+    m.classList.remove('show'); m.classList.add('hidden');
+    location.href = '/api/auth/login?link=1';
+  };
+  m.classList.remove('hidden'); m.classList.add('show');
+  showSettingsTab('general');
+  setTimeout(() => $('#setSig')?.focus(), 50);
+}
+function showSettingsTab(which) {
+  const general = which === 'general';
+  $('#setTabGeneral').classList.toggle('active', general);
+  $('#setTabSecurity').classList.toggle('active', !general);
+  $('#setPaneGeneral').classList.toggle('hidden', !general);
+  $('#setPaneSecurity').classList.toggle('hidden', general);
+}
+function setupSettingsModal() {
+  const m = $('#settingsModal'); if (!m) return;
+  $('#settingsClose').onclick = closeSettingsModal;
+  m.addEventListener('click', (e) => { if (e.target === m) closeSettingsModal(); });
+  $('#setTabGeneral').onclick = () => showSettingsTab('general');
+  $('#setTabSecurity').onclick = () => showSettingsTab('security');
+  $('#setSaveGeneral').onclick = async () => {
+    const sig = $('#setSig').value, bio = $('#setBio').value, theme = $('#setTheme').value;
+    localStorage.setItem('mdqp_theme', theme); applyTheme(theme);
+    const r = await api('/api/me', { method: 'PATCH', body: JSON.stringify({ signature: sig, bio }) });
+    if (r.ok) { toast('已保存'); if (state.me) { state.me.signature = sig; state.me.bio = bio; } renderMe(); }
+    else toast('保存失败：' + (r.data?.error || r.status), 'err');
+  };
+  $('#secSetPw').onclick = () => { closeSettingsModal(); openSetPwModal(); };
+  $('#secLogout').onclick = async () => { await api('/api/auth/logout', { method: 'POST' }); location.href = '/'; };
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !m.classList.contains('hidden')) closeSettingsModal(); });
+}
+function closeSettingsModal() { const m = $('#settingsModal'); if (m) { m.classList.remove('show'); m.classList.add('hidden'); } }
+
+// 战绩概览：best-effort 渲染 cp:summary 数据结构（兼容多种返回形态）
+function renderCpSummary(data) {
+  if (!data) return '<p class="muted">暂无可展示的战绩数据（可能未绑定 Clist.by）。</p>';
+  let arr = Array.isArray(data.platforms) ? data.platforms
+    : Array.isArray(data) ? data : null;
+  if (!arr) {
+    const known = ['luogu', 'codeforces', 'atcoder', 'clist'];
+    arr = known.filter((p) => data[p]).map((p) => Object.assign({ platform: p }, data[p]));
+  }
+  if (!arr || !arr.length) return '<p class="muted">暂无可展示的战绩数据（可能未绑定 Clist.by）。</p>';
+  return `<div class="cp-summary-grid">${arr.map((p) => {
+    const meta = PLATFORM_META[p.platform] || { name: p.platform, color: 'var(--primary)' };
+    return `<div class="cp-stat" style="--lc:${meta.color}">
+      <span class="cp-stat-name">${esc(meta.name)}</span>
+      <span class="cp-stat-rating">${p.rating != null ? esc(String(p.rating)) : '—'}</span>
+      <span class="cp-stat-sub">最高 ${p.max_rating != null ? esc(String(p.max_rating)) : '—'} · ${p.contests != null ? esc(String(p.contests)) : '?'} 场</span>
+    </div>`;
+  }).join('')}</div>`;
 }
 
 // ==================== 启动 ====================
@@ -2064,7 +2230,7 @@ window.addEventListener('popstate', render);
   initTheme(); const mt = $('#menuToggle'); if (mt) mt.onclick = () => document.body.classList.toggle('nav-open');
   const ov = $('#navOverlay'); if (ov) ov.onclick = closeNav; setupCmdk();
   setupAuthModal(); loadAuthMethods();
-  setupSetPwModal(); setupPwGuide();
+  setupSetPwModal(); setupRefreshGuide(); setupSettingsModal();
   // 侧边栏折叠（仅桌面生效，状态持久化）
   const st = $('#sidebarToggle');
   if (st) {
