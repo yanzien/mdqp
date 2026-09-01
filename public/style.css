@@ -795,5 +795,26 @@ main { max-width: 960px; width: 100%; margin: 0 auto; padding: 26px 22px 60px; f
 .auth-form { display: flex; flex-direction: column; gap: 8px; }
 .auth-error { color: var(--danger); font-size: 13px; background: var(--danger-soft); border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border)); border-radius: 8px; padding: 7px 10px; }
 .auth-hint { color: var(--muted); font-size: 12px; line-height: 1.5; margin: 0; }
-.setpw-row { display: flex; gap: 8px; align-items: center; margin-top: 6px; }
-.setpw-row .input { flex: 1; }
+.auth-field-label { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.auth-form .input[readonly] { opacity: .75; cursor: default; }
+
+/* ========== 账号安全区块（/me 与 /u/:id 共用） ========== */
+.security-section { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+.security-row { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.security-info { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.security-info b { font-size: 14px; }
+.security-info .muted { font-size: 12.5px; line-height: 1.5; }
+
+/* ========== 未设密码引导条（全局，顶栏下方） ========== */
+.pw-guide {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin: 12px 20px 0; padding: 10px 14px;
+  background: var(--warn-bg); border: 1px solid var(--warn-border);
+  border-radius: var(--radius); font-size: 13px;
+}
+.pw-guide-icon { font-size: 18px; line-height: 1; }
+.pw-guide-text { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 200px; }
+.pw-guide-text b { font-size: 13.5px; }
+.pw-guide-text span { color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+.pw-guide .icon-btn { padding: 2px 6px; font-size: 13px; color: var(--muted); }
+.pw-guide .icon-btn:hover { color: var(--text); }
