@@ -23,9 +23,16 @@ mkdirSync(out, { recursive: true });
 cpSync(resolve(root, 'public'), out, { recursive: true });
 
 // esbuild 打包 worker → _worker.js（单 Worker 模式，最后写避免被清空）
+// 直接用本地二进制，不依赖 PATH 里有没有 esbuild（只有 `npm run` 才会注入）
+const esbuildBin = resolve(
+  root,
+  'node_modules',
+  '.bin',
+  process.platform === 'win32' ? 'esbuild.cmd' : 'esbuild'
+);
 execSync(
-  'esbuild src/worker.js --bundle --platform=neutral --format=esm --outfile=pages-build/_worker.js --external:cloudflare:* --banner:js="export const env=globalThis;"',
-  { cwd: root, stdio: 'inherit' }
+  `"${esbuildBin}" src/worker.js --bundle --platform=neutral --format=esm --outfile=pages-build/_worker.js --external:cloudflare:* --banner:js="export const env=globalThis;"`,
+  { cwd: root, stdio: 'inherit', shell: process.platform === 'win32' ? 'cmd.exe' : undefined }
 );
 
 console.log('✅ pages-build 已就绪（含 vendor/）：', out);
