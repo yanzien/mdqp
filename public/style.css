@@ -818,3 +818,33 @@ main { max-width: 960px; width: 100%; margin: 0 auto; padding: 26px 22px 60px; f
 .pw-guide-text span { color: var(--muted); font-size: 12.5px; line-height: 1.5; }
 .pw-guide .icon-btn { padding: 2px 6px; font-size: 13px; color: var(--muted); }
 .pw-guide .icon-btn:hover { color: var(--text); }
+
+/* ========== cpoauth 按钮描述 + 宕机置灰 ========== */
+.auth-cpoauth-desc { color: var(--muted); font-size: 12px; line-height: 1.55; margin: -4px 0 0; }
+.auth-cpoauth-desc b { color: var(--text); font-weight: 600; }
+.btn.is-disabled {
+  opacity: .5; cursor: not-allowed; filter: grayscale(.5);
+  pointer-events: auto; /* 仍响应 click 以拦截并提示，但不跳转 */
+  text-decoration: line-through;
+}
+.banner-link { color: var(--primary); font-weight: 600; cursor: pointer; background: none; border: none; padding: 0 2px; font-size: inherit; text-decoration: underline; }
+.banner-link:hover { opacity: .85; }
+
+/* ========== 关联账号：品牌卡片网格 ========== */
+.linked-cards { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.linked-card {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 7px 12px; border-radius: 10px;
+  background: color-mix(in srgb, var(--lc, var(--primary)) 8%, var(--surface));
+  border: 1px solid color-mix(in srgb, var(--lc, var(--primary)) 35%, var(--border));
+  text-decoration: none; transition: transform .12s ease, box-shadow .12s ease;
+}
+a.linked-card:hover { transform: translateY(-1px); box-shadow: 0 3px 10px rgba(0,0,0,.12); }
+.lc-name { font-weight: 700; font-size: 13px; }
+.lc-handle { font-size: 12px; color: var(--muted); }
+.linked-empty { margin-top: 8px; font-size: 13px; color: var(--muted); }
+
+/* ========== 低版本浏览器引导弹窗 ========== */
+.legacy-modal { width: min(440px, 100%); }
+.legacy-modal .btn-block { margin-top: 4px; }
+
