@@ -132,6 +132,12 @@ oauthRoutes.get('/callback', async (c) => {
       return redirectWithCookies('/?error=' + encodeURIComponent(token.error || 'token_failed'), clearCookies);
     }
 
+    // 保存 refresh_token 与 access_token 过期时间，供退出登录时撤销
+    const refreshToken = typeof token.refresh_token === 'string' ? token.refresh_token : '';
+    const tokenExp = token.expires_in
+      ? Math.floor(Date.now() / 1000) + Number(token.expires_in)
+      : 0;
+
     const userRes = await fetch(CPOAUTH.userinfoUrl, {
       headers: { Authorization: 'Bearer ' + token.access_token, Accept: 'application/json' }
     });
@@ -152,8 +158,8 @@ oauthRoutes.get('/callback', async (c) => {
     let userId;
     if (existing) {
       await db
-        .prepare("UPDATE users SET username = ?, display_name = ?, avatar = ?, linked_accounts = ?, bio = ?, last_login = datetime('now') WHERE sub = ?")
-        .bind(user.username || name, name, avatar, linked, bio, user.sub)
+        .prepare("UPDATE users SET username = ?, display_name = ?, avatar = ?, linked_accounts = ?, bio = ?, cpoauth_refresh = ?, cpoauth_token_exp = ?, last_login = datetime('now') WHERE sub = ?")
+        .bind(user.username || name, name, avatar, linked, bio, refreshToken, tokenExp, user.sub)
         .run();
       userId = existing.id;
       // 同步该用户历史剪贴板的冗余显示名
@@ -161,8 +167,8 @@ oauthRoutes.get('/callback', async (c) => {
         .bind(name, String(userId)).run();
     } else {
       const r = await db
-        .prepare("INSERT INTO users (sub, username, display_name, avatar, linked_accounts, bio, invite_code, last_login) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))")
-        .bind(user.sub, user.username || name, name, avatar, linked, bio, genInviteCode())
+        .prepare("INSERT INTO users (sub, username, display_name, avatar, linked_accounts, bio, cpoauth_refresh, cpoauth_token_exp, invite_code, last_login) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))")
+        .bind(user.sub, user.username || name, name, avatar, linked, bio, refreshToken, tokenExp, genInviteCode())
         .run();
       userId = r.meta.last_row_id;
       // 站点首位用户 = 开发者（全新部署时自动册封）
@@ -192,8 +198,45 @@ oauthRoutes.get('/callback', async (c) => {
   }
 });
 
-// 退出
-oauthRoutes.post('/logout', () => {
+// 退出：清会话 Cookie，并尽力撤销 cpoauth 的 refresh_token（失败不能阻塞退出）
+oauthRoutes.post('/logout', async (c) => {
+  try {
+    const cookieHeader = c.req.header('Cookie') || '';
+    const m = cookieHeader.match(/mdqp_session=([^;]+)/);
+    if (m) {
+      const payload = verifyJWT(decodeURIComponent(m[1]), c.env.CPOAUTH_CLIENT_SECRET);
+      if (payload && payload.userId) {
+        const row = await c.env.db
+          .prepare('SELECT cpoauth_refresh FROM users WHERE id = ?')
+          .bind(payload.userId)
+          .first();
+        const rt = row && row.cpoauth_refresh;
+        if (rt && c.env.CPOAUTH_CLIENT_ID) {
+          // 尽力而为：撤销失败（cpoauth 宕机等）不阻塞退出
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => ctrl.abort(), 4000);
+          try {
+            await fetch('https://www.cpoauth.com/api/oauth/revoke', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                token: rt,
+                token_type_hint: 'refresh_token',
+                client_id: c.env.CPOAUTH_CLIENT_ID,
+                client_secret: c.env.CPOAUTH_CLIENT_SECRET
+              })
+            });
+          } catch {
+            /* 忽略撤销失败 */
+          } finally {
+            clearTimeout(timer);
+          }
+        }
+      }
+    }
+  } catch {
+    /* 任何异常都不影响退出 */
+  }
   const headers = new Headers({ 'Content-Type': 'application/json' });
   headers.append('Set-Cookie', 'mdqp_session=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0');
   return new Response(JSON.stringify({ ok: true }), { headers });
