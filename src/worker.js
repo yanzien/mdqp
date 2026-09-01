@@ -19,7 +19,7 @@ const app = new Hono();
 
 const GUEST_LIMIT = 5;
 const PAGE_SIZE = 20;
-const VERSION = '4.3.1';
+const VERSION = '4.4';
 const SEARCH_MAX = 100;
 const RESERVED = new Set([
   'api', 'raw', 'new', 'edit', 'u', 'user', 'users', 'admin', 'login', 'logout',
@@ -184,6 +184,22 @@ function parseJSON(s) {
   if (!s) return null;
   try { return JSON.parse(s); } catch { return null; }
 }
+
+/** 信任等级（Discourse 风，按本站自身行为事件映射，无需发帖阅读）
+ *  0 新手上路 · 1 常驻用户 · 2 活跃用户 · 3 核心用户 */
+function computeTrustLevel(u) {
+  const clips = u.clip_count || 0;
+  const invites = u.invite_count || 0;
+  const ageDays = u.created_at ? Math.max(0, (Date.now() - new Date(u.created_at.replace(' ', 'T') + 'Z').getTime()) / 86400000) : 0;
+  const isVip = !!u.is_vip;
+  const isStaff = u.role === 'admin' || u.role === 'developer';
+  let tl = 0;
+  if (clips >= 1 || ageDays >= 1) tl = 1;
+  if (clips >= 5 || invites >= 1 || isVip) tl = 2;
+  if (clips >= 20 || isStaff) tl = 3;
+  return tl;
+}
+const TRUST_LABELS = ['新手上路', '常驻用户', '活跃用户', '核心用户'];
 
 const ALL_PERMS = ['delete_user', 'set_clip_limit', 'edit_pages', 'edit_public_clips', 'edit_private_clips', 'view_code'];
 
@@ -856,6 +872,9 @@ app.get('/api/users/:userId', async (c) => {
       invite_code: u.invite_code || '',
       invite_count: u.invite_count || 0,
       feature_flags: parseFeatureFlags(u.feature_flags),
+      // v4.4: 公开字段
+      cpoauth_bound: !!u.sub,
+      trust_level: computeTrustLevel({ clip_count: totalRow?.cnt || 0, created_at: u.created_at, invite_count: u.invite_count || 0, is_vip: !!u.is_vip, role: u.role }),
       // v4.3: 仅本人 / 管理员可见，用于提示"尚未设置密码"
       has_password: (isSelf || adminViewer) ? !!u.has_pw : undefined
     },
@@ -880,7 +899,8 @@ app.get('/api/me', async (c) => {
   if (identity.type === 'user') {
     const uRow = await db.prepare(
       `SELECT username, role, bio, signature, linked_accounts, is_vip, vip_until,
-              invite_code, invite_count, feature_flags, password_hash
+              invite_code, invite_count, feature_flags, password_hash,
+              email, email_verified, no_cpoauth_nudge
        FROM users WHERE id = ?`
     ).bind(String(identity.userId)).first();
     const clips = await db.prepare(
@@ -911,6 +931,11 @@ app.get('/api/me', async (c) => {
       linked_accounts: parseLinkedAccounts(uRow?.linked_accounts),
       is_vip: !!uRow?.is_vip, vip_until: uRow?.vip_until || null,
       has_password: !!uRow?.password_hash,
+      // v4.4: cpoauth 绑定态（用于刷新引导）、邮箱（来自 cpoauth）、信任等级
+      cpoauth_bound: !!identity.sub,
+      email: uRow?.email || '', email_verified: !!uRow?.email_verified,
+      trust_level: computeTrustLevel({ clip_count: clips.results.length, created_at: uRow?.created_at, invite_count: uRow?.invite_count || 0, is_vip: !!uRow?.is_vip, role: uRow?.role }),
+      no_cpoauth_nudge: !!uRow?.no_cpoauth_nudge,
       invite_code: uRow?.invite_code || '', invite_count: uRow?.invite_count || 0,
       feature_flags: parseFeatureFlags(uRow?.feature_flags),
       quota: { daily_used: dayCnt?.cnt || 0, daily_limit: dailyLimit, monthly_used: monthCnt?.cnt || 0, monthly_limit: monthlyLimit },
@@ -950,11 +975,57 @@ app.patch('/api/me', async (c) => {
   const fields = {};
   if (body.signature !== undefined) fields.signature = String(body.signature).slice(0, 200);
   if (body.bio !== undefined) fields.bio = String(body.bio).slice(0, 500);
+  // v4.4: 「不再提示绑定 cpoauth」持久化（跨设备一致）
+  if (body.no_cpoauth_nudge !== undefined) fields.no_cpoauth_nudge = body.no_cpoauth_nudge ? 1 : 0;
   if (Object.keys(fields).length === 0) return c.json({ error: 'nothing_to_update' }, 400);
   const cols = Object.keys(fields).map((k) => `${k} = ?`).join(', ');
   const vals = Object.values(fields);
   await db.prepare(`UPDATE users SET ${cols} WHERE id = ?`).bind(...vals, String(identity.userId)).run();
   return c.json({ ok: true, ...fields });
+});
+
+// ========== 战绩概览（cp:summary 代理，best-effort + D1 缓存） ==========
+// 仅本人可调（需自己的 refresh_token）。CPOAUTH_SUMMARY_URL 未配置或上游未放行 scope 时优雅降级。
+app.get('/api/me/cp-summary', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'unauthorized' }, 401);
+  if (!identity.sub) return c.json({ available: false, reason: 'not_bound' });
+
+  // 缓存：10 分钟内直接返回，避免每次刷新打 cpoauth
+  const cached = await db.prepare('SELECT summary_json, fetched_at FROM user_stats WHERE user_id = ?').bind(identity.userId).first();
+  if (cached && cached.fetched_at) {
+    const age = Date.now() - new Date(cached.fetched_at.replace(' ', 'T') + 'Z').getTime();
+    if (age < 10 * 60000) return c.json({ available: true, cached: true, data: parseJSON(cached.summary_json) || {} });
+  }
+
+  const row = await db.prepare('SELECT cpoauth_refresh FROM users WHERE id = ?').bind(String(identity.userId)).first();
+  const rt = row && row.cpoauth_refresh;
+  const summaryUrl = c.env.CPOAUTH_SUMMARY_URL;
+  if (!summaryUrl) return c.json({ available: false, reason: 'no_summary_url' });
+  if (!rt) return c.json({ available: false, reason: 'no_refresh' });
+
+  try {
+    // refresh_token 换 access_token（cpoauth 强制轮换：新 refresh 写回）
+    const tokRes = await fetch('https://www.cpoauth.com/api/oauth/token', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ grant_type: 'refresh_token', refresh_token: rt, client_id: c.env.CPOAUTH_CLIENT_ID, client_secret: c.env.CPOAUTH_CLIENT_SECRET })
+    });
+    const tok = await tokRes.json().catch(() => ({}));
+    if (!tok.access_token) return c.json({ available: false, reason: 'token_failed' });
+    if (tok.refresh_token && tok.refresh_token !== rt) {
+      await db.prepare('UPDATE users SET cpoauth_refresh = ? WHERE id = ?').bind(tok.refresh_token, String(identity.userId)).run();
+    }
+    const sumRes = await fetch(summaryUrl, { headers: { Authorization: 'Bearer ' + tok.access_token, Accept: 'application/json' } });
+    if (!sumRes.ok) return c.json({ available: false, reason: 'summary_http_' + sumRes.status });
+    const data = await sumRes.json().catch(() => ({}));
+    await db.prepare(
+      "INSERT INTO user_stats (user_id, summary_json, fetched_at) VALUES (?, ?, datetime('now')) ON CONFLICT(user_id) DO UPDATE SET summary_json = excluded.summary_json, fetched_at = excluded.fetched_at"
+    ).bind(identity.userId, JSON.stringify(data)).run();
+    return c.json({ available: true, cached: false, data });
+  } catch {
+    return c.json({ available: false, reason: 'network' });
+  }
 });
 
 // ========== 评论 API ==========
