@@ -83,6 +83,17 @@
     </div>
   </header>
 
+  <!-- ========== 未设置密码引导条（仅「已登录 + 未设密码」时显示） ========== -->
+  <div id="pwGuideBar" class="pw-guide hidden">
+    <span class="pw-guide-icon">🛡️</span>
+    <div class="pw-guide-text">
+      <b>还没设置登录密码</b>
+      <span>第三方登录（cpoauth）一旦宕机，你将无法进入自己的账号。花 10 秒设一个密码作为备用入口。</span>
+    </div>
+    <button class="btn btn-sm btn-primary" id="pwGuideSetBtn">立即设置</button>
+    <button class="icon-btn" id="pwGuideClose" title="7 天内不再提醒" aria-label="关闭">✕</button>
+  </div>
+
   <!-- ========== 通知条 ========== -->
   <div id="toast" class="toast"></div>
 
@@ -356,6 +367,30 @@
         <button class="btn btn-primary btn-block" id="authSubmit" type="submit">登录</button>
       </form>
       <p class="auth-hint">密码登录是 <b>cpoauth 的备用方案</b>：即使第三方登录服务器宕机，你也能凭账号密码进入。</p>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 设置 / 修改登录密码（统一弹窗，/me、/u/:id、全局引导共用） ============ -->
+<div class="modal-overlay hidden" id="setPwModal">
+  <div class="modal auth-modal" role="dialog" aria-modal="true" aria-label="设置登录密码">
+    <div class="modal-head">
+      <h3>🔒 设置登录密码</h3>
+      <button class="modal-close" id="setPwClose" aria-label="关闭">✕</button>
+    </div>
+    <div class="modal-body auth-body">
+      <p class="auth-hint" id="setPwDesc"></p>
+      <form id="setPwForm" class="auth-form">
+        <label class="auth-field-label" for="setPwUsername">登录用户名</label>
+        <input class="input" id="setPwUsername" type="text" readonly tabindex="-1">
+        <label class="auth-field-label" for="setPwInput">新密码</label>
+        <input class="input" id="setPwInput" type="password" placeholder="至少 6 位" autocomplete="new-password" maxlength="128">
+        <label class="auth-field-label" for="setPwInput2">确认新密码</label>
+        <input class="input" id="setPwInput2" type="password" placeholder="再输入一次" autocomplete="new-password" maxlength="128">
+        <div id="setPwError" class="auth-error hidden"></div>
+        <button class="btn btn-primary btn-block" id="setPwSubmit" type="submit">保存密码</button>
+      </form>
+      <p class="auth-hint" id="setPwSuccess"></p>
     </div>
   </div>
 </div>
