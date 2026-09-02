@@ -19,7 +19,7 @@ const app = new Hono();
 
 const GUEST_LIMIT = 5;
 const PAGE_SIZE = 20;
-const VERSION = '4.5.1';
+const VERSION = '4.5.2';
 const SEARCH_MAX = 100;
 const RESERVED = new Set([
   'api', 'raw', 'new', 'edit', 'u', 'user', 'users', 'admin', 'login', 'logout',
@@ -185,21 +185,84 @@ function parseJSON(s) {
   try { return JSON.parse(s); } catch { return null; }
 }
 
-/** 信任等级（Discourse 风，按本站自身行为事件映射，无需发帖阅读）
- *  0 新手上路 · 1 常驻用户 · 2 活跃用户 · 3 核心用户 */
+/** 信任等级（v4.5.2 起为「维持制」：高等级需持续活跃，不达标会自动回落，但不发降级通知）
+ *  0 新手上路 · 1 常驻用户 · 2 活跃用户 · 3 核心用户
+ *  入参：clip_count 总板数 / clips_14d 近 14 天新建 / clips_5d 近 5 天新建 / invite_count / created_at / role */
 function computeTrustLevel(u) {
   const clips = u.clip_count || 0;
+  const c14 = u.clips_14d || 0;
+  const c5 = u.clips_5d || 0;
   const invites = u.invite_count || 0;
   const ageDays = u.created_at ? Math.max(0, (Date.now() - new Date(u.created_at.replace(' ', 'T') + 'Z').getTime()) / 86400000) : 0;
-  const isVip = !!u.is_vip;
   const isStaff = u.role === 'admin' || u.role === 'developer';
   let tl = 0;
+  // L1 常驻：有过产出，或注册满 1 天
   if (clips >= 1 || ageDays >= 1) tl = 1;
-  if (clips >= 5 || invites >= 1 || isVip) tl = 2;
-  if (clips >= 20 || isStaff) tl = 3;
+  // L2 活跃：每 2 周 ≥5 个剪贴板 + 至少邀请 1 位好友
+  if (c14 >= TRUST_REQ.L2.clips_14d && invites >= TRUST_REQ.L2.invites) tl = 2;
+  // L3 核心：满足 L2 全部条件 + 每 5 天 ≥1 个剪贴板 + 邀请 ≥3 人
+  if (c14 >= TRUST_REQ.L2.clips_14d && c5 >= TRUST_REQ.L3.clips_5d && invites >= TRUST_REQ.L3.invites) tl = 3;
+  // 站长 / 开发者角色恒为核心
+  if (isStaff) tl = Math.max(tl, 3);
   return tl;
 }
 const TRUST_LABELS = ['新手上路', '常驻用户', '活跃用户', '核心用户'];
+/** 各等级硬指标（调规则只改这里） */
+const TRUST_REQ = {
+  L2: { clips_14d: 5, invites: 1 },
+  L3: { clips_5d: 1, invites: 3 }
+};
+const TRUST_RULE_TEXT = [
+  '默认等级，无需任何条件',
+  '创建过 1 个剪贴板，或注册满 1 天',
+  '每 2 周创建 ≥5 个剪贴板，且邀请 ≥1 位好友',
+  '满足活跃用户全部条件，且每 5 天创建 ≥1 个剪贴板、邀请 ≥3 位好友'
+];
+
+/** 统计窗口期内的剪贴板数（created_at 存 UTC 'YYYY-MM-DD HH:MM:SS'） */
+async function getTrustStats(db, userId) {
+  const now = Date.now();
+  const d14 = new Date(now - 14 * 86400000).toISOString().slice(0, 19).replace('T', ' ');
+  const d5 = new Date(now - 5 * 86400000).toISOString().slice(0, 19).replace('T', ' ');
+  try {
+    const r = await db.prepare(
+      `SELECT COUNT(*) AS total,
+              COALESCE(SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END), 0) AS c14,
+              COALESCE(SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END), 0) AS c5
+       FROM clipboards WHERE owner_type='user' AND owner_id=?`
+    ).bind(d14, d5, String(userId)).first();
+    return { total: Number(r?.total || 0), c14: Number(r?.c14 || 0), c5: Number(r?.c5 || 0) };
+  } catch {
+    return { total: 0, c14: 0, c5: 0 };
+  }
+}
+
+/** 距离下一等级还差什么（前端展示进度用） */
+function trustNextMissing(u, level) {
+  if (level >= 3) return [];
+  const c14 = u.clips_14d || 0, c5 = u.clips_5d || 0, inv = u.invite_count || 0;
+  const m = [];
+  if (c14 < TRUST_REQ.L2.clips_14d) m.push(`近 14 天还需创建 ${TRUST_REQ.L2.clips_14d - c14} 个剪贴板（${c14}/${TRUST_REQ.L2.clips_14d}）`);
+  if (inv < TRUST_REQ.L2.invites) m.push(`还需邀请 ${TRUST_REQ.L2.invites - inv} 位好友（${inv}/${TRUST_REQ.L2.invites}）`);
+  if (level < 2) return m; // L0/L1 先看 L2
+  if (c5 < TRUST_REQ.L3.clips_5d) m.push(`近 5 天还需创建 ${TRUST_REQ.L3.clips_5d - c5} 个剪贴板（${c5}/${TRUST_REQ.L3.clips_5d}）`);
+  if (inv < TRUST_REQ.L3.invites) m.push(`还需再邀请 ${TRUST_REQ.L3.invites - inv} 位好友（${inv}/${TRUST_REQ.L3.invites}）`);
+  return m;
+}
+
+/** 组装前端用的信任等级进度对象 */
+function trustProgress(u, level) {
+  return {
+    level,
+    label: TRUST_LABELS[level] || ('L' + level),
+    rule: TRUST_RULE_TEXT[level] || '',
+    next_rule: level < 3 ? (TRUST_RULE_TEXT[level + 1] || '') : '',
+    clips_14d: u.clips_14d || 0,
+    clips_5d: u.clips_5d || 0,
+    invite_count: u.invite_count || 0,
+    missing: trustNextMissing(u, level)
+  };
+}
 
 /** 写入一条通知（失败不应阻断主流程） */
 async function createNotification(db, userId, category, title, body = '', link = '') {
@@ -215,8 +278,9 @@ async function notifyTrustUpgrade(db, userId) {
   try {
     const u = await db.prepare('SELECT created_at, invite_count, is_vip, role, last_trust_level FROM users WHERE id = ?').bind(String(userId)).first();
     if (!u) return;
-    const clipRow = await db.prepare("SELECT COUNT(*) as cnt FROM clipboards WHERE owner_type='user' AND owner_id=?").bind(String(userId)).first();
-    const tl = computeTrustLevel({ clip_count: clipRow?.cnt || 0, created_at: u.created_at, invite_count: u.invite_count || 0, is_vip: !!u.is_vip, role: u.role });
+    const st = await getTrustStats(db, userId);
+    const base = { clip_count: st.total, clips_14d: st.c14, clips_5d: st.c5, created_at: u.created_at, invite_count: u.invite_count || 0, is_vip: !!u.is_vip, role: u.role };
+    const tl = computeTrustLevel(base);
     const prev = u.last_trust_level || 0;
     if (tl > prev) {
       await createNotification(db, userId, 'trust', '🎉 信用等级提升至 ' + (TRUST_LABELS[tl] || ('L' + tl)), '你在 mdqp 的贡献获得了更高信任等级，解锁更多权益。', '/me');
@@ -890,6 +954,9 @@ app.get('/api/users/:userId', async (c) => {
   ).bind(String(u.id)).all();
 
   const totalRow = await db.prepare("SELECT COUNT(*) as cnt FROM clipboards WHERE owner_type = 'user' AND owner_id = ?").bind(String(u.id)).first();
+  const st = await getTrustStats(db, u.id);
+  const trustBase = { clip_count: st.total, clips_14d: st.c14, clips_5d: st.c5, created_at: u.created_at, invite_count: u.invite_count || 0, is_vip: !!u.is_vip, role: u.role };
+  const trustLv = computeTrustLevel(trustBase);
 
   return c.json({
     user: {
@@ -905,7 +972,9 @@ app.get('/api/users/:userId', async (c) => {
       feature_flags: parseFeatureFlags(u.feature_flags),
       // v4.4: 公开字段
       cpoauth_bound: !!u.sub,
-      trust_level: computeTrustLevel({ clip_count: totalRow?.cnt || 0, created_at: u.created_at, invite_count: u.invite_count || 0, is_vip: !!u.is_vip, role: u.role }),
+      trust_level: trustLv,
+      // v4.5.2: 维持制进度（仅本人 / 管理员可见，避免对外暴露行为细节）
+      trust_progress: (isSelf || adminViewer) ? trustProgress(trustBase, trustLv) : undefined,
       // v4.3: 仅本人 / 管理员可见，用于提示"尚未设置密码"
       has_password: (isSelf || adminViewer) ? !!u.has_pw : undefined
     },
@@ -951,6 +1020,13 @@ app.get('/api/me', async (c) => {
     const dailyLimit = parseInt(await getSiteSetting(db, 'user_daily_limit', '5')) || 5;
     const monthlyLimit = parseInt(await getSiteSetting(db, 'user_monthly_limit', '50')) || 50;
     const charLimit = parseInt(await getSiteSetting(db, 'global_char_limit', '300')) || 300;
+    // v4.5.2: 信任等级维持制所需的窗口统计
+    const trustSt = await getTrustStats(db, identity.userId);
+    const trustBase = {
+      clip_count: trustSt.total, clips_14d: trustSt.c14, clips_5d: trustSt.c5,
+      created_at: uRow?.created_at, invite_count: uRow?.invite_count || 0,
+      is_vip: !!uRow?.is_vip, role: uRow?.role
+    };
 
     return c.json({
       authenticated: true, type: 'user', userId: identity.userId, name: identity.name,
@@ -965,7 +1041,8 @@ app.get('/api/me', async (c) => {
       // v4.4: cpoauth 绑定态（用于刷新引导）、邮箱（来自 cpoauth）、信任等级
       cpoauth_bound: !!identity.sub,
       email: uRow?.email || '', email_verified: !!uRow?.email_verified,
-      trust_level: computeTrustLevel({ clip_count: clips.results.length, created_at: uRow?.created_at, invite_count: uRow?.invite_count || 0, is_vip: !!uRow?.is_vip, role: uRow?.role }),
+      trust_level: computeTrustLevel(trustBase),
+      trust_progress: trustProgress(trustBase, computeTrustLevel(trustBase)),
       no_cpoauth_nudge: !!uRow?.no_cpoauth_nudge,
       invite_code: uRow?.invite_code || '', invite_count: uRow?.invite_count || 0,
       feature_flags: parseFeatureFlags(uRow?.feature_flags),
