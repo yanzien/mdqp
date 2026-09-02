@@ -6,7 +6,15 @@
 // 更新日志：随代码发布自动同步
 const CHANGELOG_MD = `# 📝 更新日志
 
-mdqp 的主要版本变动记录。当前部署版本 **v4.5**。
+mdqp 的主要版本变动记录。当前部署版本 **v4.5.1**。
+
+---
+
+## v4.5.1 · 2026-09-02（v4.5 热修复 + 体验优化）
+- 🛠 **修复通知「加载失败」**：根因是 v4.5 数据库迁移未实际落库（远程 D1 缺 \`notifications\` 表与 \`last_trust_level\` 等三列），通知接口读新列时报 500。已补执行迁移；同时后端通知懒生成逻辑全部加故障隔离——通知系统自身出错不再拖垮接口
+- 🛠 **修复「首次打开剪贴板报找不到、刷新又好」**：同一根因——首次访问走「访客通知」代码路径时 \`visit_notified\` 列不存在导致 500，而刷新时读者已入库、跳过该路径故恢复正常。已补迁移 + 给该路径加故障隔离（通知失败不再影响阅读）
+- 🖥 **加载失败不再伪装成「找不到」**：剪贴板详情页区分「真不存在（404）」与「服务器/网络出错」——后者显示明确报错页 + 一键重试按钮；通知面板「加载失败」支持点击重试
+- 📖 **帮助页扩充信任系统说明**：新增 L0–L3 各等级判定规则表（剪贴板数 / 注册时长 / 邀请 / VIP / 管理员）、等级回落行为、通知触发时机等详细说明
 
 ---
 
@@ -461,7 +469,9 @@ async function renderClip(clipId, pwd = '') {
   $('#commentSection').innerHTML = '';
 
   const q = pwd ? `?pwd=${encodeURIComponent(pwd)}` : '';
-  const { ok, status, data } = await api(`/api/clips/${encodeURIComponent(clipId)}${q}`);
+  let ok, status, data;
+  try { ({ ok, status, data } = await api(`/api/clips/${encodeURIComponent(clipId)}${q}`)); }
+  catch { ok = false; status = 0; data = null; } // 网络异常
 
   if (status === 404) return showView('404');
   if (status === 410) {
@@ -480,7 +490,15 @@ async function renderClip(clipId, pwd = '') {
   }
   if (status === 401 && data?.error === 'password_required') return passwordGate(clipId, data.title, '');
   if (status === 403 && data?.error === 'password_wrong') return passwordGate(clipId, '', '密码不对，再试一次');
-  if (!ok || !data) return showView('404');
+  // 服务器错误 / 网络异常：明确区分于「找不到」，提供重试
+  if (!ok || !data) {
+    if (status === 0 || status >= 500) {
+      $('#clipGate').innerHTML = `<div class="empty big"><h2>⚠️ 加载出错</h2><p class="muted">服务器开小差了，不是内容不存在，请重试。</p><button class="btn btn-primary" id="clipRetryBtn">重试</button></div>`;
+      const rb = $('#clipRetryBtn'); if (rb) rb.onclick = () => renderClip(clipId, pwd);
+      return;
+    }
+    return showView('404');
+  }
 
   $('#clipGate').innerHTML = ''; $('#clipArticle').classList.remove('hidden');
   $('#clipTitle').textContent = data.title || '无标题'; renderMd($('#clipContent'), data.content);
@@ -2260,7 +2278,11 @@ async function refreshNotifBadge() {
 async function loadNotifList() {
   const list = $('#notifList'); if (!list) return;
   const { data } = await api('/api/notifications' + (notifCat ? '?category=' + encodeURIComponent(notifCat) : ''));
-  if (!data) { list.innerHTML = '<div class="notif-empty">加载失败</div>'; return; }
+  if (!data) {
+    list.innerHTML = '<div class="notif-empty" id="notifRetry" style="cursor:pointer">加载失败，点击重试</div>';
+    const rt = $('#notifRetry'); if (rt) rt.onclick = () => loadNotifList();
+    return;
+  }
   const ns = data.notifications || [];
   if (!ns.length) { list.innerHTML = '<div class="notif-empty">暂无通知</div>'; return; }
   list.innerHTML = ns.map((n) => `
