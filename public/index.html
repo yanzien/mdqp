@@ -462,11 +462,37 @@
           <div class="sec-info"><b>📧 邮箱</b><span class="muted" id="secEmailText"></span></div>
           <span class="muted">来自 cpoauth</span>
         </div>
-        <div class="sec-row">
+        <div class="sec-row sec-row-col">
           <div class="sec-info"><b>🛡 信任等级</b><span class="muted" id="secTlText"></span></div>
+          <div class="sec-tl-progress" id="secTlProgress"></div>
         </div>
         <button class="btn btn-ghost btn-block" id="secLogout">退出登录</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 报错提示弹窗（自动捕获，无需 F12） ============ -->
+<div class="modal-overlay hidden" id="errModal">
+  <div class="modal err-modal" role="dialog" aria-modal="true" aria-label="发生错误">
+    <div class="modal-head">
+      <h3>⚠️ 出错了</h3>
+      <button class="modal-close" id="errClose" aria-label="关闭">✕</button>
+    </div>
+    <div class="modal-body err-body">
+      <p class="err-msg" id="errMsg"></p>
+      <div class="err-meta" id="errMeta"></div>
+      <details class="err-detail-wrap" id="errDetailWrap">
+        <summary class="err-summary">查看技术详情（报错堆栈）</summary>
+        <pre class="err-detail" id="errDetail"></pre>
+      </details>
+      <p class="muted err-tip">这些都是本地可读的技术信息，<b>只有你点「反馈给站长」并确认后才会提交</b>。</p>
+    </div>
+    <div class="modal-foot err-foot">
+      <button class="btn btn-ghost" id="errCopy">📋 复制详情</button>
+      <span class="err-foot-spacer"></span>
+      <button class="btn" id="errDismiss">知道了</button>
+      <button class="btn btn-primary" id="errReport">🐞 反馈给站长</button>
     </div>
   </div>
 </div>
