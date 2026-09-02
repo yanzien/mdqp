@@ -927,3 +927,25 @@ a.linked-card:hover { transform: translateY(-1px); box-shadow: 0 3px 10px rgba(0
 .notif-cat-visited { background: color-mix(in srgb, #0e7490 12%, var(--surface)); color: #0e7490; border-color: color-mix(in srgb, #0e7490 35%, var(--border)); }
 .notif-cat-admin { background: color-mix(in srgb, #be123c 12%, var(--surface)); color: #be123c; border-color: color-mix(in srgb, #be123c 35%, var(--border)); }
 
+
+/* ============ v4.5.2 报错提示弹窗（自动捕获，无需 F12） ============ */
+.err-modal { width: min(620px, 100%); }
+.err-body { display: flex; flex-direction: column; gap: 12px; }
+.err-msg { margin: 0; font-size: 15px; font-weight: 600; color: var(--danger); line-height: 1.55; word-break: break-word; }
+.err-meta { font-size: 12.5px; color: var(--muted); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px 10px; line-height: 1.7; word-break: break-word; }
+.err-detail-wrap { border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--code-bg); }
+.err-summary { cursor: pointer; padding: 8px 12px; font-size: 13px; color: var(--text-2); user-select: none; }
+.err-summary:hover { color: var(--text); }
+.err-detail { margin: 0; padding: 10px 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; line-height: 1.6; color: var(--text-2); white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow: auto; }
+.err-tip { margin: 0; font-size: 12.5px; line-height: 1.6; }
+.err-foot { flex-wrap: wrap; gap: 8px; }
+.err-foot-spacer { flex: 1; }
+@media (max-width: 520px) { .err-foot { flex-direction: column-reverse; } .err-foot-spacer { display: none; } .err-foot .btn { width: 100%; } }
+
+/* ============ v4.5.2 信任等级进度（设置 → 账号与安全） ============ */
+.sec-row-col { flex-direction: column; align-items: stretch !important; gap: 8px; }
+.sec-tl-progress { font-size: 12.5px; color: var(--text-2); line-height: 1.65; }
+.sec-tl-progress .tl-ok { color: #0e7490; font-weight: 600; }
+.sec-tl-progress .tl-next { margin-top: 4px; color: var(--muted); }
+.sec-tl-progress ul { margin: 4px 0 0; padding-left: 18px; }
+.sec-tl-progress li { margin: 2px 0; }
