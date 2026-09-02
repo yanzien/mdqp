@@ -6,7 +6,15 @@
 // 更新日志：随代码发布自动同步
 const CHANGELOG_MD = `# 📝 更新日志
 
-mdqp 的主要版本变动记录。当前部署版本 **v4.4**。
+mdqp 的主要版本变动记录。当前部署版本 **v4.5**。
+
+---
+
+## v4.5 · 2026-09-02（通知系统 + 战绩区修正）
+- 🔔 **通知系统（全新）**：导航栏新增铃铛，按**类别**自动归集通知——🎉 信用等级提升、⏳ 剪贴板到期、👀 剪贴板被访问、🛡 后台管理操作。支持未读红点角标、单条已读、全部已读、分类筛选；通知存于 D1 \`notifications\` 表，随登录态拉取
+- 🖼 **微信名片修正**：「扫一扫添加我为好友」二维码**仅在本人主页**显示，不再出现在他人主页（之前站点级二维码被误认为「我的名片」贴到每个主页）
+- 🏆 **竞赛名片显示优化**：个人主页的竞赛名片（\`card.svg\`）改为**仅当用户已关联竞赛账号**时才渲染，未关联者显示中性说明文字，避免空占位卡满天飞
+- ⚠️ **详细战绩（cp:summary）暂无法使用**：因上游调整，详细战绩数据暂不可获取，战绩区仅保留竞赛名片并标注「详细战绩暂无法使用，等待更新」；一旦上游恢复即自动可用
 
 ---
 
@@ -381,6 +389,7 @@ async function loadMe() {
   const cl = $('#navCodeLink'); if (cl) cl.classList.toggle('hidden', !isAdmin());
   // 刷新引导：未绑 cpoauth → 建议绑定；已绑未设密码 → 建议设密码；都符合 → 不弹
   checkRefreshGuide();
+  refreshNotifBadge();
 }
 
 function avatarHtml(url, name) { if (url) return `<img class="avatar" src="${esc(url)}" alt="">`; const ch = (name || '?').trim().charAt(0).toUpperCase(); return `<span class="avatar avatar-txt">${esc(ch)}</span>`; }
@@ -790,6 +799,10 @@ function userBadges(u) {
   if (u.role === 'admin' || u.role === 'developer') b.push('<span class="badge badge-ach">🛡 管理员</span>');
   return b.length ? `<div class="badge-row badges-row">${b.join('')}</div>` : '';
 }
+// 是否应展示竞赛名片：已绑 cpoauth 且有关联的竞赛账号（避免空占位卡满天飞）
+function hasCpCard(u) {
+  return !!(u && u.cpoauth_bound && Array.isArray(u.linked_accounts) && u.linked_accounts.length);
+}
 // 战绩概览：cpoauth 竞赛名片（公开 SVG，无需 token；随站点主题切换）
 function cpCardHtml(username) {
   if (!username) return '';
@@ -830,11 +843,11 @@ async function renderUser(uid) {
     </div>
     <div class="me-section">
       <h3 class="me-section-title">🏆 战绩概览</h3>
-      <div id="userCpCard">${u.cpoauth_bound ? cpCardHtml(u.username) : '<p class="muted">该用户暂未绑定 cpoauth，无战绩展示。</p>'}</div>
+      <div id="userCpCard">${hasCpCard(u) ? cpCardHtml(u.username) : '<p class="muted">该用户暂未关联竞赛账号，无战绩展示。</p>'}</div>
     </div>
     ${linkedAccountChips(linked, self)}
     ${linked.length || self ? `<div class="profile-actions">${self ? '<a class="btn btn-sm" href="https://www.cpoauth.com/profile" target="_blank" rel="noopener">🔗 关联账号管理（cpoauth）</a>' : ''}</div>` : ''}
-    <div class="profile-wechat"><h4>扫一扫，添加我为好友</h4><img src="/wechat-qr.png" alt="WeChat QR" onerror="this.style.display='none'"></div>
+    ${self ? `<div class="profile-wechat"><h4>扫一扫，添加我为好友</h4><img src="/wechat-qr.png" alt="WeChat QR" onerror="this.style.display='none'"></div>` : ''}
     ${self ? `<div class="invite-section"><details><summary>🎁 邀请好友</summary><div id="inviteInfo" class="invite-info">加载中…</div></details></div>` : ''}
       ${adminView && !self && u.role !== 'developer' ? `<div class="admin-user-actions">
           <b class="muted">管理操作：</b>
@@ -1128,7 +1141,7 @@ async function renderMe() {
       ${quotaHtml}
       <div class="me-section">
         <h3 class="me-section-title">🏆 战绩概览</h3>
-        <div id="meCpCard">${me.cpoauth_bound ? cpCardHtml(me.username) : '<p class="muted">绑定 cpoauth 后，这里会展示你的竞赛战绩名片。</p>'}</div>
+        <div id="meCpCard">${hasCpCard(me) ? cpCardHtml(me.username) : '<p class="muted">绑定 cpoauth 并关联竞赛账号后，这里会展示你的竞赛战绩名片。</p>'}</div>
         <div id="meCpSummary" class="cp-summary"></div>
       </div>
       ${linkedAccountChips(linked, true)}
@@ -1143,12 +1156,12 @@ async function renderMe() {
 
     // 设置弹窗入口
     const meSettingsBtn = $('#meSettingsBtn'); if (meSettingsBtn) meSettingsBtn.onclick = openSettingsModal;
-    // 战绩概览：尝试拉取 cp:summary（best-effort + D1 缓存）
+    // 战绩概览：详细战绩（cp:summary）暂无法使用，仅保留竞赛名片（card.svg）
     if (me.cpoauth_bound) {
       api('/api/me/cp-summary').then(({ data }) => {
         const box = $('#meCpSummary'); if (!box) return;
         if (data && data.available && data.data) box.innerHTML = renderCpSummary(data.data);
-        else box.innerHTML = '<p class="muted cp-summary-hint">绑定 Clist.by 并在 cpoauth 授权战绩范围后，这里会显示详细战绩。</p>';
+        else box.innerHTML = '<p class="muted cp-summary-hint">⚠️ 详细战绩（cp:summary）暂无法使用，等待更新。</p>';
       }).catch(() => {});
     }
   } else {
@@ -2220,6 +2233,81 @@ function renderCpSummary(data) {
   }).join('')}</div>`;
 }
 
+// ==================== 通知系统 ====================
+let notifCat = '';
+const NOTIF_CATS = {
+  trust: { label: '信用', cls: 'notif-cat-trust' },
+  clip_expiry: { label: '到期', cls: 'notif-cat-expiry' },
+  clip_visited: { label: '访问', cls: 'notif-cat-visited' },
+  admin: { label: '管理', cls: 'notif-cat-admin' }
+};
+function notifCatTag(cat) {
+  const m = NOTIF_CATS[cat] || { label: cat || '其它', cls: '' };
+  return `<span class="notif-tag ${m.cls}">${esc(m.label)}</span>`;
+}
+
+async function refreshNotifBadge() {
+  const bell = $('#notifBell'); if (!bell) return;
+  if (!state.me || state.me.type !== 'user') { bell.classList.add('hidden'); return; }
+  bell.classList.remove('hidden');
+  const { data } = await api('/api/notifications');
+  if (!data) return;
+  const badge = $('#notifBadge'); const n = data.unread || 0;
+  if (n > 0) { badge.textContent = n > 99 ? '99+' : String(n); badge.classList.remove('hidden'); }
+  else badge.classList.add('hidden');
+}
+
+async function loadNotifList() {
+  const list = $('#notifList'); if (!list) return;
+  const { data } = await api('/api/notifications' + (notifCat ? '?category=' + encodeURIComponent(notifCat) : ''));
+  if (!data) { list.innerHTML = '<div class="notif-empty">加载失败</div>'; return; }
+  const ns = data.notifications || [];
+  if (!ns.length) { list.innerHTML = '<div class="notif-empty">暂无通知</div>'; return; }
+  list.innerHTML = ns.map((n) => `
+    <div class="notif-item ${n.is_read ? '' : 'unread'}" data-id="${n.id}" data-link="${n.link || ''}">
+      <div class="notif-item-top">${notifCatTag(n.category)}<span class="notif-time">${timeAgo(n.created_at)}</span></div>
+      <div class="notif-item-title">${esc(n.title)}</div>
+      ${n.body ? `<div class="notif-item-body">${esc(n.body)}</div>` : ''}
+    </div>`).join('');
+  list.querySelectorAll('.notif-item').forEach((el) => {
+    el.onclick = async () => {
+      const id = el.dataset.id, link = el.dataset.link;
+      if (el.classList.contains('unread')) {
+        await api('/api/notifications/' + id + '/read', { method: 'POST' });
+        el.classList.remove('unread');
+      }
+      if (link) { closeNotifPanel(); go(link); }
+      refreshNotifBadge();
+    };
+  });
+}
+
+function toggleNotifPanel() {
+  const panel = $('#notifPanel'); if (!panel) return;
+  if (panel.classList.contains('hidden')) { panel.classList.remove('hidden'); loadNotifList(); }
+  else panel.classList.add('hidden');
+}
+function closeNotifPanel() { const p = $('#notifPanel'); if (p) p.classList.add('hidden'); }
+
+function setupNotifBell() {
+  const bell = $('#notifBell'); if (!bell) return;
+  bell.onclick = (e) => { e.stopPropagation(); toggleNotifPanel(); };
+  const panel = $('#notifPanel');
+  document.addEventListener('click', (e) => {
+    if (panel && !panel.classList.contains('hidden') && !panel.contains(e.target) && e.target !== bell && !bell.contains(e.target)) closeNotifPanel();
+  });
+  const readAll = $('#notifReadAll');
+  if (readAll) readAll.onclick = async (e) => { e.stopPropagation(); await api('/api/notifications/read-all', { method: 'POST' }); loadNotifList(); refreshNotifBadge(); };
+  const filters = $('#notifFilters');
+  if (filters) filters.querySelectorAll('.notif-filter').forEach((b) => {
+    b.onclick = (e) => {
+      e.stopPropagation();
+      filters.querySelectorAll('.notif-filter').forEach((x) => x.classList.remove('active'));
+      b.classList.add('active'); notifCat = b.dataset.cat || ''; loadNotifList();
+    };
+  });
+}
+
 // ==================== 启动 ====================
 document.addEventListener('click', (e) => { const a = e.target.closest('a[data-link]'); if (a && a.getAttribute('href')?.startsWith('/')) { e.preventDefault(); go(a.getAttribute('href')); } });
 window.addEventListener('popstate', render);
@@ -2230,7 +2318,7 @@ window.addEventListener('popstate', render);
   initTheme(); const mt = $('#menuToggle'); if (mt) mt.onclick = () => document.body.classList.toggle('nav-open');
   const ov = $('#navOverlay'); if (ov) ov.onclick = closeNav; setupCmdk();
   setupAuthModal(); loadAuthMethods();
-  setupSetPwModal(); setupRefreshGuide(); setupSettingsModal();
+  setupSetPwModal(); setupRefreshGuide(); setupSettingsModal(); setupNotifBell();
   // 侧边栏折叠（仅桌面生效，状态持久化）
   const st = $('#sidebarToggle');
   if (st) {
