@@ -19,7 +19,7 @@ const app = new Hono();
 
 const GUEST_LIMIT = 5;
 const PAGE_SIZE = 20;
-const VERSION = '4.5';
+const VERSION = '4.5.1';
 const SEARCH_MAX = 100;
 const RESERVED = new Set([
   'api', 'raw', 'new', 'edit', 'u', 'user', 'users', 'admin', 'login', 'logout',
@@ -210,17 +210,19 @@ async function createNotification(db, userId, category, title, body = '', link =
   } catch (e) { /* 通知写入失败不影响主流程 */ }
 }
 
-/** 懒检测信任等级提升并通知（仅在提升时写，避免重复） */
+/** 懒检测信任等级提升并通知（仅在提升时写，避免重复；失败不影响调用方） */
 async function notifyTrustUpgrade(db, userId) {
-  const u = await db.prepare('SELECT created_at, invite_count, is_vip, role, last_trust_level FROM users WHERE id = ?').bind(String(userId)).first();
-  if (!u) return;
-  const clipRow = await db.prepare("SELECT COUNT(*) as cnt FROM clipboards WHERE owner_type='user' AND owner_id=?").bind(String(userId)).first();
-  const tl = computeTrustLevel({ clip_count: clipRow?.cnt || 0, created_at: u.created_at, invite_count: u.invite_count || 0, is_vip: !!u.is_vip, role: u.role });
-  const prev = u.last_trust_level || 0;
-  if (tl > prev) {
-    await createNotification(db, userId, 'trust', '🎉 信用等级提升至 ' + (TRUST_LABELS[tl] || ('L' + tl)), '你在 mdqp 的贡献获得了更高信任等级，解锁更多权益。', '/me');
-    await db.prepare('UPDATE users SET last_trust_level = ? WHERE id = ?').bind(tl, String(userId)).run();
-  }
+  try {
+    const u = await db.prepare('SELECT created_at, invite_count, is_vip, role, last_trust_level FROM users WHERE id = ?').bind(String(userId)).first();
+    if (!u) return;
+    const clipRow = await db.prepare("SELECT COUNT(*) as cnt FROM clipboards WHERE owner_type='user' AND owner_id=?").bind(String(userId)).first();
+    const tl = computeTrustLevel({ clip_count: clipRow?.cnt || 0, created_at: u.created_at, invite_count: u.invite_count || 0, is_vip: !!u.is_vip, role: u.role });
+    const prev = u.last_trust_level || 0;
+    if (tl > prev) {
+      await createNotification(db, userId, 'trust', '🎉 信用等级提升至 ' + (TRUST_LABELS[tl] || ('L' + tl)), '你在 mdqp 的贡献获得了更高信任等级，解锁更多权益。', '/me');
+      await db.prepare('UPDATE users SET last_trust_level = ? WHERE id = ?').bind(tl, String(userId)).run();
+    }
+  } catch (e) { /* 通知系统故障不阻断主流程 */ }
 }
 
 const ALL_PERMS = ['delete_user', 'set_clip_limit', 'edit_pages', 'edit_public_clips', 'edit_private_clips', 'view_code'];
@@ -592,10 +594,12 @@ app.get('/api/clips/:clipId', async (c) => {
       // 真实写入 DB 计数，否则 isExpired 永远判不满员（P0 修复）
       await db.prepare('UPDATE clipboards SET reader_count = reader_count + 1 WHERE clip_id = ?').bind(clipId).run();
       readerCount = (r.reader_count || 0) + 1;
-      // 剪贴板被外部访客首次访问 → 通知 owner（去重：每张仅提示一次）
+      // 剪贴板被外部访客首次访问 → 通知 owner（去重：每张仅提示一次；通知失败不影响阅读）
       if (r.owner_type === 'user' && !r.visit_notified) {
-        await createNotification(db, r.owner_id, 'clip_visited', '👀 你的剪贴板被访问了', `《${r.title || '无标题'}》有新的访客查看。`, '/c/' + clipId);
-        await db.prepare('UPDATE clipboards SET visit_notified = 1 WHERE clip_id = ?').bind(clipId).run();
+        try {
+          await createNotification(db, r.owner_id, 'clip_visited', '👀 你的剪贴板被访问了', `《${r.title || '无标题'}》有新的访客查看。`, '/c/' + clipId);
+          await db.prepare('UPDATE clipboards SET visit_notified = 1 WHERE clip_id = ?').bind(clipId).run();
+        } catch (e) { /* 通知失败不影响访问 */ }
       }
     }
     // 兼容旧版 views 计数
@@ -1064,16 +1068,18 @@ app.get('/api/notifications', async (c) => {
   // 懒生成：信用等级提升
   await notifyTrustUpgrade(db, uid);
   // 懒生成：剪贴板到期提醒（24h 内或已过期，每张仅提示一次）
-  const exp = await db.prepare(
-    "SELECT clip_id, title, expires_at FROM clipboards WHERE owner_type='user' AND owner_id=? AND expires_at IS NOT NULL AND expiry_notified=0 AND datetime(expires_at) <= datetime('now','+1 day')"
-  ).bind(uid).all();
-  for (const row of (exp.results || [])) {
-    const expDate = new Date((row.expires_at || '').replace(' ', 'T') + 'Z');
-    const expired = expDate < new Date();
-    const when = expired ? '已过期' : '即将在 24 小时内过期';
-    await createNotification(db, uid, 'clip_expiry', '⏳ 剪贴板' + when, `《${row.title || '无标题'}》${when}，请及时查看或延长有效期。`, '/c/' + row.clip_id);
-    await db.prepare('UPDATE clipboards SET expiry_notified = 1 WHERE clip_id = ?').bind(row.clip_id).run();
-  }
+  try {
+    const exp = await db.prepare(
+      "SELECT clip_id, title, expires_at FROM clipboards WHERE owner_type='user' AND owner_id=? AND expires_at IS NOT NULL AND expiry_notified=0 AND datetime(expires_at) <= datetime('now','+1 day')"
+    ).bind(uid).all();
+    for (const row of (exp.results || [])) {
+      const expDate = new Date((row.expires_at || '').replace(' ', 'T') + 'Z');
+      const expired = expDate < new Date();
+      const when = expired ? '已过期' : '即将在 24 小时内过期';
+      await createNotification(db, uid, 'clip_expiry', '⏳ 剪贴板' + when, `《${row.title || '无标题'}》${when}，请及时查看或延长有效期。`, '/c/' + row.clip_id);
+      await db.prepare('UPDATE clipboards SET expiry_notified = 1 WHERE clip_id = ?').bind(row.clip_id).run();
+    }
+  } catch (e) { /* 通知懒生成失败不影响列表返回 */ }
   // 列表
   const cat = c.req.query('category');
   const unreadOnly = c.req.query('unread') === '1';
