@@ -19,7 +19,7 @@ const app = new Hono();
 
 const GUEST_LIMIT = 5;
 const PAGE_SIZE = 20;
-const VERSION = '4.4';
+const VERSION = '4.5';
 const SEARCH_MAX = 100;
 const RESERVED = new Set([
   'api', 'raw', 'new', 'edit', 'u', 'user', 'users', 'admin', 'login', 'logout',
@@ -200,6 +200,28 @@ function computeTrustLevel(u) {
   return tl;
 }
 const TRUST_LABELS = ['新手上路', '常驻用户', '活跃用户', '核心用户'];
+
+/** 写入一条通知（失败不应阻断主流程） */
+async function createNotification(db, userId, category, title, body = '', link = '') {
+  try {
+    await db.prepare(
+      'INSERT INTO notifications (user_id, category, title, body, link) VALUES (?, ?, ?, ?, ?)'
+    ).bind(Number(userId), category, String(title).slice(0, 200), String(body || '').slice(0, 500), String(link || '').slice(0, 300)).run();
+  } catch (e) { /* 通知写入失败不影响主流程 */ }
+}
+
+/** 懒检测信任等级提升并通知（仅在提升时写，避免重复） */
+async function notifyTrustUpgrade(db, userId) {
+  const u = await db.prepare('SELECT created_at, invite_count, is_vip, role, last_trust_level FROM users WHERE id = ?').bind(String(userId)).first();
+  if (!u) return;
+  const clipRow = await db.prepare("SELECT COUNT(*) as cnt FROM clipboards WHERE owner_type='user' AND owner_id=?").bind(String(userId)).first();
+  const tl = computeTrustLevel({ clip_count: clipRow?.cnt || 0, created_at: u.created_at, invite_count: u.invite_count || 0, is_vip: !!u.is_vip, role: u.role });
+  const prev = u.last_trust_level || 0;
+  if (tl > prev) {
+    await createNotification(db, userId, 'trust', '🎉 信用等级提升至 ' + (TRUST_LABELS[tl] || ('L' + tl)), '你在 mdqp 的贡献获得了更高信任等级，解锁更多权益。', '/me');
+    await db.prepare('UPDATE users SET last_trust_level = ? WHERE id = ?').bind(tl, String(userId)).run();
+  }
+}
 
 const ALL_PERMS = ['delete_user', 'set_clip_limit', 'edit_pages', 'edit_public_clips', 'edit_private_clips', 'view_code'];
 
@@ -570,6 +592,11 @@ app.get('/api/clips/:clipId', async (c) => {
       // 真实写入 DB 计数，否则 isExpired 永远判不满员（P0 修复）
       await db.prepare('UPDATE clipboards SET reader_count = reader_count + 1 WHERE clip_id = ?').bind(clipId).run();
       readerCount = (r.reader_count || 0) + 1;
+      // 剪贴板被外部访客首次访问 → 通知 owner（去重：每张仅提示一次）
+      if (r.owner_type === 'user' && !r.visit_notified) {
+        await createNotification(db, r.owner_id, 'clip_visited', '👀 你的剪贴板被访问了', `《${r.title || '无标题'}》有新的访客查看。`, '/c/' + clipId);
+        await db.prepare('UPDATE clipboards SET visit_notified = 1 WHERE clip_id = ?').bind(clipId).run();
+      }
     }
     // 兼容旧版 views 计数
     await db.prepare('UPDATE clipboards SET views = views + 1 WHERE clip_id = ?').bind(clipId).run();
@@ -1028,6 +1055,68 @@ app.get('/api/me/cp-summary', async (c) => {
   }
 });
 
+// ========== 通知系统（分类：trust / clip_expiry / clip_visited / admin） ==========
+app.get('/api/notifications', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'unauthorized' }, 401);
+  const uid = String(identity.userId);
+  // 懒生成：信用等级提升
+  await notifyTrustUpgrade(db, uid);
+  // 懒生成：剪贴板到期提醒（24h 内或已过期，每张仅提示一次）
+  const exp = await db.prepare(
+    "SELECT clip_id, title, expires_at FROM clipboards WHERE owner_type='user' AND owner_id=? AND expires_at IS NOT NULL AND expiry_notified=0 AND datetime(expires_at) <= datetime('now','+1 day')"
+  ).bind(uid).all();
+  for (const row of (exp.results || [])) {
+    const expDate = new Date((row.expires_at || '').replace(' ', 'T') + 'Z');
+    const expired = expDate < new Date();
+    const when = expired ? '已过期' : '即将在 24 小时内过期';
+    await createNotification(db, uid, 'clip_expiry', '⏳ 剪贴板' + when, `《${row.title || '无标题'}》${when}，请及时查看或延长有效期。`, '/c/' + row.clip_id);
+    await db.prepare('UPDATE clipboards SET expiry_notified = 1 WHERE clip_id = ?').bind(row.clip_id).run();
+  }
+  // 列表
+  const cat = c.req.query('category');
+  const unreadOnly = c.req.query('unread') === '1';
+  let sql = 'SELECT id, category, title, body, link, is_read, created_at FROM notifications WHERE user_id = ?';
+  const params = [uid];
+  if (cat) { sql += ' AND category = ?'; params.push(cat); }
+  if (unreadOnly) { sql += ' AND is_read = 0'; }
+  sql += ' ORDER BY created_at DESC, id DESC LIMIT 50';
+  const rows = await db.prepare(sql).bind(...params).all();
+  const unreadRow = await db.prepare('SELECT COUNT(*) as cnt FROM notifications WHERE user_id = ? AND is_read = 0').bind(uid).first();
+  return c.json({
+    notifications: (rows.results || []).map((n) => ({
+      id: n.id, category: n.category, title: n.title, body: n.body, link: n.link,
+      is_read: !!n.is_read, created_at: n.created_at
+    })),
+    unread: unreadRow?.cnt || 0
+  });
+});
+
+app.post('/api/notifications/:id/read', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'unauthorized' }, 401);
+  const id = c.req.param('id');
+  const n = await db.prepare('SELECT id, user_id FROM notifications WHERE id = ?').bind(id).first();
+  if (!n || String(n.user_id) !== String(identity.userId)) return c.json({ error: 'not_found' }, 404);
+  await db.prepare('UPDATE notifications SET is_read = 1 WHERE id = ?').bind(id).run();
+  return c.json({ ok: true });
+});
+
+app.post('/api/notifications/read-all', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'unauthorized' }, 401);
+  const uid = String(identity.userId);
+  const cat = c.req.query('category');
+  let sql = 'UPDATE notifications SET is_read = 1 WHERE user_id = ?';
+  const params = [uid];
+  if (cat) { sql += ' AND category = ?'; params.push(cat); }
+  await db.prepare(sql).bind(...params).run();
+  return c.json({ ok: true });
+});
+
 // ========== 评论 API ==========
 
 /** 获取剪贴板的评论列表 */
@@ -1341,18 +1430,20 @@ app.patch('/api/admin/users/:id', async (c) => {
   if (!(await isAdminIdentity(db, identity))) return c.json({ error: 'forbidden' }, 403);
 
   const targetId = c.req.param('id');
-  const target = await db.prepare('SELECT id, role FROM users WHERE id = ?').bind(targetId).first();
+  const target = await db.prepare('SELECT id, role, username, display_name FROM users WHERE id = ?').bind(targetId).first();
   if (!target) return c.json({ error: 'not_found' }, 404);
   if (target.role === 'developer') return c.json({ error: 'forbidden', message: '开发者身份不可更改' }, 403);
 
   let body;
   try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
+  const changes = [];
 
   // 角色变更
   if (body.role !== undefined) {
     const role = String(body.role);
     if (!['user', 'admin'].includes(role)) return c.json({ error: 'bad_role' }, 400);
     await db.prepare('UPDATE users SET role = ? WHERE id = ?').bind(role, targetId).run();
+    changes.push(role === 'admin' ? '被设为管理员' : '管理员权限被撤销');
   }
 
   // 剪贴板数量限制
@@ -1363,6 +1454,7 @@ app.patch('/api/admin/users/:id', async (c) => {
       return c.json({ error: 'bad_period' }, 400);
     await db.prepare('UPDATE users SET clip_limit = ?, limit_period = ?, limit_start = datetime(\'now\') WHERE id = ?')
       .bind(limit, period, targetId).run();
+    changes.push('剪贴板数量限制被调整');
   }
 
   // 管理员权限
@@ -1371,6 +1463,7 @@ app.patch('/api/admin/users/:id', async (c) => {
     const clean = {};
     for (const p of ALL_PERMS) { if (perms[p]) clean[p] = true; }
     await db.prepare('UPDATE users SET admin_permissions = ? WHERE id = ?').bind(JSON.stringify(clean), targetId).run();
+    changes.push('管理权限被更新');
   }
 
   // === v4.0: VIP 设置 ===
@@ -1378,6 +1471,7 @@ app.patch('/api/admin/users/:id', async (c) => {
     const isVip = body.is_vip ? 1 : 0;
     const vipUntil = body.vip_until || null;
     await db.prepare('UPDATE users SET is_vip = ?, vip_until = ? WHERE id = ?').bind(isVip, vipUntil, targetId).run();
+    changes.push(isVip ? 'VIP 已开通' : 'VIP 已被撤销');
   }
 
   // === v4.0: 功能开关 ===
@@ -1387,6 +1481,13 @@ app.patch('/api/admin/users/:id', async (c) => {
     const clean = {};
     for (const k of FEATURE_KEYS) { if (ff[k] !== undefined) clean[k] = ff[k]; }
     await db.prepare('UPDATE users SET feature_flags = ? WHERE id = ?').bind(JSON.stringify(clean), targetId).run();
+    changes.push('功能开关被更新');
+  }
+
+  // 后台管理操作 → 通知目标用户（操作者本人除外）
+  if (changes.length && String(identity.userId) !== String(targetId)) {
+    const whom = target.display_name || target.username || ('用户#' + targetId);
+    await createNotification(db, targetId, 'admin', '🛡 账号变动通知', `你的账号（${whom}）${changes.join('；')}。`, '/me');
   }
 
   return c.json({ ok: true, id: Number(targetId) });
