@@ -6,7 +6,20 @@
 // 更新日志：随代码发布自动同步
 const CHANGELOG_MD = `# 📝 更新日志
 
-mdqp 的主要版本变动记录。当前部署版本 **v4.5.1**。
+mdqp 的主要版本变动记录。当前部署版本 **v4.5.2**。
+
+---
+
+## v4.5.2 · 2026-09-02（信任等级维持制 + 报错自动提示）
+- 🛡 **信任等级改为「维持制」**：高等级不再一劳永逸，必须持续活跃才能保住
+  - **L2 活跃用户**：近 **14 天**新建 **≥ 5 个**剪贴板 **且** 邀请 **≥ 1 位**好友（两条都要满足，不再看 VIP 豁免）
+  - **L3 核心用户**：满足 L2 全部条件 **且** 近 **5 天**新建 **≥ 1 个**剪贴板 **且** 累计邀请 **≥ 3 位**好友；管理员 / 开发者恒为 L3
+  - 窗口按剪贴板创建时间滚动统计，**删掉的板不再计入**，不达标等级会实时回落（回落不发通知，避免打扰）
+- 📊 **信任进度可视化**：「我的」新增 🛡 信任等级区块，设置 → 账号与安全同步展示「近 14 天 X 个 · 近 5 天 Y 个 · 已邀请 Z 人」以及升到下一级还差什么
+- ⚠️ **报错自动提示，无需 F12**：自动捕获 JS 脚本错误、未处理的 Promise 异常、关键资源加载失败、接口 5xx 与网络请求失败，弹出可读提示（错误类型 / 时间 / 页面 / 完整调用堆栈 / 运行环境 / 最近控制台日志），支持一键复制
+- 🐞 **报错一键反馈**：弹窗内点「🐞 反馈给站长」（用户同意后）自动跳转反馈页，并预填环境信息、报错堆栈、控制台日志与发生页面，补充具体情况即可提交；同一错误 30 秒内只弹一次
+- ⌨️ **命令面板新增「上报最近一次报错」**（\`Ctrl / Cmd + K\`），可主动带上下文上报
+- 📖 帮助页同步：信任等级判定规则表重写（含维持制细则）、新增「出错自动提示（不用开 F12）」章节
 
 ---
 
@@ -191,8 +204,19 @@ function guestId() {
 async function api(path, opts = {}) {
   const headers = Object.assign({ 'X-Guest-Id': guestId() }, opts.headers || {});
   if (opts.body) headers['Content-Type'] = 'application/json';
-  const res = await fetch(path, Object.assign({ credentials: 'same-origin' }, opts, { headers }));
+  let res;
+  try {
+    res = await fetch(path, Object.assign({ credentials: 'same-origin' }, opts, { headers }));
+  } catch (e) {
+    // v4.5.2：网络层失败（断网 / DNS / 被拦截）自动上报，用户不用开 F12
+    reportError({ kind: 'api', message: '网络请求失败：' + path, stack: (e && e.stack) || '', extra: String((e && e.message) || '') });
+    return { ok: false, status: 0, data: null };
+  }
   let data = null; try { data = await res.json(); } catch { /* 非 JSON */ }
+  // v4.5.2：服务端 5xx 也上报（4xx 属业务预期，不打扰用户）
+  if (res.status >= 500) {
+    reportError({ kind: 'api', message: '接口 ' + res.status + ' 错误：' + path, extra: (data && (data.error || data.message)) || '' });
+  }
   return { ok: res.ok, status: res.status, data };
 }
 
@@ -1158,6 +1182,10 @@ async function renderMe() {
       </div>
       ${quotaHtml}
       <div class="me-section">
+        <h3 class="me-section-title">🛡 信任等级</h3>
+        <div id="meTrustProgress" class="sec-tl-progress"></div>
+      </div>
+      <div class="me-section">
         <h3 class="me-section-title">🏆 战绩概览</h3>
         <div id="meCpCard">${hasCpCard(me) ? cpCardHtml(me.username) : '<p class="muted">绑定 cpoauth 并关联竞赛账号后，这里会展示你的竞赛战绩名片。</p>'}</div>
         <div id="meCpSummary" class="cp-summary"></div>
@@ -1174,6 +1202,8 @@ async function renderMe() {
 
     // 设置弹窗入口
     const meSettingsBtn = $('#meSettingsBtn'); if (meSettingsBtn) meSettingsBtn.onclick = openSettingsModal;
+    // 信任等级进度（v4.5.2 维持制）
+    renderTrustProgress($('#meTrustProgress'), me.trust_progress);
     // 战绩概览：详细战绩（cp:summary）暂无法使用，仅保留竞赛名片（card.svg）
     if (me.cpoauth_bound) {
       api('/api/me/cp-summary').then(({ data }) => {
@@ -1525,6 +1555,180 @@ async function saveClip() {
   }
 }
 
+// ==================== 报错自动捕获与一键反馈（v4.5.2） ====================
+// 目标：出错时直接在页面上弹出可读的技术详情（不用 F12），
+// 并且只有用户点「反馈给站长」同意后，才把信息带去 /feedback 预填。
+const ERR_LOG = [];
+let lastErrShown = { key: '', at: 0 };
+let lastErr = null;      // 最近一次捕获到的错误（命令面板手动上报用）
+let pendingBug = null;   // 待预填到反馈表单的内容
+
+const ERR_KIND_LABEL = {
+  js: '页面脚本错误',
+  promise: '未处理的异步异常',
+  resource: '资源加载失败',
+  api: '接口请求失败',
+  manual: '手动上报'
+};
+
+function pushErrLog(level, text) {
+  try {
+    ERR_LOG.push(`[${new Date().toLocaleTimeString('zh-CN')}] ${level} ${text}`);
+    if (ERR_LOG.length > 80) ERR_LOG.shift();
+  } catch (e) { /* 日志收集失败不影响主流程 */ }
+}
+
+/** 采集运行环境（浏览器 / 系统 / 屏幕 / 页面 / 版本） */
+function collectEnv() {
+  try {
+    const n = navigator, s = screen;
+    return [
+      'UA：' + (n.userAgent || '未知'),
+      '平台：' + (n.platform || '未知') + '｜语言：' + (n.language || '未知'),
+      '屏幕：' + s.width + '×' + s.height + '｜DPR：' + (window.devicePixelRatio || 1) + '｜触屏：' + ('ontouchstart' in window ? '是' : '否'),
+      '页面：' + location.pathname + location.search,
+      '版本：' + (window.__MDQP_VERSION || '未知'),
+      '网络：' + (n.onLine ? '在线' : '离线'),
+      '时间：' + new Date().toLocaleString('zh-CN')
+    ].join('\n');
+  } catch (e) { return '环境采集失败：' + (e && e.message); }
+}
+
+/** 组装完整的技术详情（弹窗展示 + 反馈预填共用） */
+function buildReportText(err) {
+  const parts = [
+    '【错误类型】' + (err.kindLabel || '未知'),
+    '【发生时间】' + (err.time || ''),
+    '【发生页面】' + (err.url || ''),
+    '【错误信息】' + (err.message || '')
+  ];
+  if (err.extra) parts.push('【附加信息】' + err.extra);
+  if (err.stack) parts.push('\n【调用堆栈】\n' + err.stack);
+  parts.push('\n【运行环境】\n' + (err.env || collectEnv()));
+  if (ERR_LOG.length) parts.push('\n【最近控制台日志（' + ERR_LOG.length + ' 条）】\n' + ERR_LOG.join('\n'));
+  return parts.join('\n');
+}
+
+function closeErrModal() {
+  const m = $('#errModal'); if (!m) return;
+  m.classList.remove('show'); m.classList.add('hidden');
+}
+
+function showErrModal(err) {
+  const m = $('#errModal'); if (!m) return;
+  const full = buildReportText(err);
+  const msgEl = $('#errMsg'), metaEl = $('#errMeta'), detEl = $('#errDetail'), wrapEl = $('#errDetailWrap');
+  if (msgEl) msgEl.textContent = err.title || err.message || '发生未知错误';
+  if (metaEl) metaEl.textContent = [err.kindLabel, err.time, err.url].filter(Boolean).join('　·　');
+  if (detEl) detEl.textContent = full;
+  if (wrapEl) wrapEl.open = false;
+  m._err = err; m._full = full;
+  m.classList.remove('hidden'); m.classList.add('show');
+}
+
+/** 统一上报入口。silent=true 只记日志不弹窗 */
+function reportError(info) {
+  const err = {
+    kind: info.kind || 'js',
+    kindLabel: ERR_KIND_LABEL[info.kind] || '未知错误',
+    title: info.title || '',
+    message: String(info.message || '未知错误').slice(0, 500),
+    stack: String(info.stack || '').slice(0, 3000),
+    extra: String(info.extra || '').slice(0, 500),
+    url: info.url || (location.pathname + location.search),
+    time: new Date().toLocaleString('zh-CN')
+  };
+  lastErr = err;
+  pushErrLog('ERROR', err.kindLabel + '｜' + err.message + (err.extra ? '｜' + err.extra : ''));
+  if (info.silent) return;
+  // 30 秒内同样的错误只弹一次，避免刷屏
+  const key = err.kind + '|' + err.message;
+  const now = Date.now();
+  if (lastErrShown.key === key && now - lastErrShown.at < 30000) return;
+  lastErrShown = { key, at: now };
+  showErrModal(err);
+}
+
+/** 把当前错误打包成反馈草稿，跳转 /feedback（等于用户同意后再提交） */
+function goReportError(err) {
+  const full = buildReportText(err || lastErr || { kind: 'manual', kindLabel: '手动上报', message: '（无自动捕获到的报错，请手动描述）', time: new Date().toLocaleString('zh-CN'), url: location.pathname + location.search });
+  pendingBug = {
+    env: collectEnv(),
+    situation: `【自动上报】${(err || lastErr || {}).kindLabel || '问题反馈'}\n错误：${(err || lastErr || {}).message || '（未捕获到具体错误）'}\n页面：${(err || lastErr || {}).url || location.pathname}\n时间：${(err || lastErr || {}).time || new Date().toLocaleString('zh-CN')}\n\n我当时的操作：（请补充）\n期望结果：（请补充）`,
+    console_log: full
+  };
+  closeErrModal();
+  go('/feedback');
+}
+
+function installErrorReporter() {
+  const m = $('#errModal'); if (!m) return;
+  const closeBtn = $('#errClose'), dismissBtn = $('#errDismiss'), copyBtn = $('#errCopy'), reportBtn = $('#errReport');
+  if (closeBtn) closeBtn.onclick = closeErrModal;
+  if (dismissBtn) dismissBtn.onclick = closeErrModal;
+  m.onclick = (e) => { if (e.target === m) closeErrModal(); };
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && m.classList.contains('show')) closeErrModal(); });
+  if (copyBtn) copyBtn.onclick = async () => {
+    const text = m._full || '';
+    try {
+      await navigator.clipboard.writeText(text);
+      toast('已复制报错详情', 'ok');
+    } catch (e) {
+      const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); toast('已复制报错详情', 'ok'); } catch (e2) { toast('复制失败，请手动选择文本', 'err'); }
+      ta.remove();
+    }
+  };
+  if (reportBtn) reportBtn.onclick = () => goReportError(m._err || null);
+
+  // ① 未捕获的 JS 运行时错误
+  window.addEventListener('error', (e) => {
+    const t = e.target;
+    if (t && t !== window && t.tagName) {
+      // 资源加载失败：脚本/样式会真影响功能，弹窗；图片只静默记录（二维码、名片图挂了不该打扰）
+      const src = t.src || t.href || t.tagName;
+      const critical = t.tagName === 'SCRIPT' || t.tagName === 'LINK';
+      reportError({ kind: 'resource', message: '资源加载失败：' + src, extra: t.tagName, silent: !critical });
+      return;
+    }
+    reportError({
+      kind: 'js',
+      message: e.message || '脚本执行错误',
+      stack: (e.error && e.error.stack) || '',
+      extra: e.filename ? e.filename + ':' + e.lineno + ':' + e.colno : ''
+    });
+  }, true);
+
+  // ② 未处理的 Promise 异常
+  window.addEventListener('unhandledrejection', (e) => {
+    const r = e.reason;
+    reportError({
+      kind: 'promise',
+      message: (r && (r.message || String(r))) || '未处理的 Promise 异常',
+      stack: (r && r.stack) || ''
+    });
+  });
+
+  // ③ 控制台环形缓冲：反馈时自动附带最近日志，用户不用再开 F12 复制
+  ['error', 'warn'].forEach((lv) => {
+    const orig = console[lv] ? console[lv].bind(console) : null;
+    console[lv] = function (...args) {
+      try {
+        pushErrLog(lv.toUpperCase(), args.map((a) => {
+          if (a && a.stack) return a.stack;
+          if (a instanceof Error) return a.message;
+          if (typeof a === 'object') { try { return JSON.stringify(a); } catch (e2) { return String(a); } }
+          return String(a);
+        }).join(' ').slice(0, 800));
+      } catch (e3) { /* 忽略 */ }
+      if (orig) orig(...args);
+    };
+  });
+
+  // ④ 版本号（反馈环境信息用）
+  fetch('/api/health').then((r) => r.json()).then((d) => { if (d && d.version) window.__MDQP_VERSION = d.version; }).catch(() => {});
+}
+
 // ==================== 官方反馈贴 ====================
 async function renderFeedback() {
   showView('feedback');
@@ -1591,6 +1795,18 @@ async function renderFeedback() {
       if (isAdmin()) loadFeedbackAdmin();
     } else toast(data?.message || data?.error || '提交失败', 'err');
   };
+  // v4.5.2：从报错弹窗跳转过来时自动预填环境 / 报错 / 控制台日志
+  if (pendingBug) {
+    const p = pendingBug; pendingBug = null;
+    curType = 'bug';
+    $$('#fbType .fb-type-btn').forEach((x) => x.classList.toggle('active', x.dataset.type === 'bug'));
+    $('#fbBugFields').classList.remove('hidden'); $('#fbSuggestFields').classList.add('hidden');
+    const envEl = $('#fbEnv'), sitEl = $('#fbSituation'), logEl = $('#fbConsole'), hintEl = $('#fbHint');
+    if (envEl) envEl.value = (p.env || '').slice(0, 500);
+    if (sitEl) sitEl.value = (p.situation || '').slice(0, 2000);
+    if (logEl) logEl.value = (p.console_log || '').slice(0, 4000);
+    if (hintEl) { hintEl.textContent = '已自动填入报错信息与运行环境，补充「具体情况」后提交即可'; hintEl.style.color = ''; }
+  }
   if (isAdmin()) loadFeedbackAdmin();
 }
 
@@ -1839,6 +2055,7 @@ function buildCmds() {
     { icon: '👤', label: '我的', hint: 'Me', run: () => go('/me') },
     { icon: '❓', label: '帮助', hint: 'Help', run: () => go('/help') },
     { icon: '💬', label: '反馈', hint: 'Feedback', run: () => go('/feedback') },
+    { icon: '🐞', label: '上报最近一次报错', hint: 'Bug', run: () => goReportError(lastErr) },
     { icon: 'ℹ️', label: '关于', hint: 'About', run: () => go('/about') },
     { icon: '📝', label: '更新日志', hint: 'Log', run: () => go('/changelog') },
     { icon: '🌙', label: '切换主题', hint: 'Theme', run: () => $('#themeBtn').click() },
@@ -2194,6 +2411,7 @@ function openSettingsModal() {
   $('#secCpText').textContent = me.cpoauth_bound ? '已绑定' : '未绑定';
   $('#secEmailText').textContent = me.email ? (me.email_verified ? me.email + '（已验证）' : me.email + '（未验证）') : '未提供';
   $('#secTlText').textContent = 'L' + (me.trust_level || 0) + ' · ' + ['新手上路', '常驻用户', '活跃用户', '核心用户'][me.trust_level || 0];
+  renderTrustProgress($('#secTlProgress'), me.trust_progress);
   $('#secSetPw').textContent = me.has_password ? '修改' : '设置';
   $('#secBind').textContent = me.cpoauth_bound ? '管理' : '去绑定';
   $('#secBind').onclick = () => {
@@ -2205,6 +2423,19 @@ function openSettingsModal() {
   showSettingsTab('general');
   setTimeout(() => $('#setSig')?.focus(), 50);
 }
+/** 信任等级进度（v4.5.2 维持制：不达标会自动回落） */
+function renderTrustProgress(el, tp) {
+  if (!el) return;
+  if (!tp) { el.innerHTML = '<span class="muted">刷新后可见进度</span>'; return; }
+  const stat = `近 14 天新建 ${tp.clips_14d} 个 · 近 5 天新建 ${tp.clips_5d} 个 · 已邀请 ${tp.invite_count} 人`;
+  if (!tp.missing || !tp.missing.length) {
+    el.innerHTML = `<div class="tl-ok">已达最高等级 L3 核心用户 🎉</div><div class="tl-next">${esc(stat)}</div>`;
+    return;
+  }
+  el.innerHTML = `<div>${esc(stat)}</div><div class="tl-next">升到 L${tp.level + 1}（${esc(tp.next_rule || '')}）还需：<ul>${tp.missing.map((x) => `<li>${esc(x)}</li>`).join('')}</ul></div>`
+    + '<div class="tl-next">等级为维持制：不达标会自动回落（不会发降级通知）。</div>';
+}
+
 function showSettingsTab(which) {
   const general = which === 'general';
   $('#setTabGeneral').classList.toggle('active', general);
@@ -2341,6 +2572,7 @@ window.addEventListener('popstate', render);
   const ov = $('#navOverlay'); if (ov) ov.onclick = closeNav; setupCmdk();
   setupAuthModal(); loadAuthMethods();
   setupSetPwModal(); setupRefreshGuide(); setupSettingsModal(); setupNotifBell();
+  installErrorReporter(); // v4.5.2：报错自动捕获 + 一键反馈
   // 侧边栏折叠（仅桌面生效，状态持久化）
   const st = $('#sidebarToggle');
   if (st) {
