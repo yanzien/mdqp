@@ -16,7 +16,6 @@ binding = "ASSETS"
 not_found_handling = "single-page-application"
 
 # === cpoauth 凭据 ===
-# ⚠️ 绝不写在这里！用 secret 注入：
 #   npx wrangler pages secret put CPOAUTH_CLIENT_ID
 #   npx wrangler pages secret put CPOAUTH_CLIENT_SECRET
 
