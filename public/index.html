@@ -119,7 +119,11 @@
       <div id="announcementBanner" class="announcement-banner hidden"></div>
 
       <div class="list-head">
-        <h2>🌐 公开剪贴板</h2>
+        <h2 id="homeListTitle">🌐 公开剪贴板</h2>
+        <div class="home-scope hidden" id="homeScope">
+          <button class="scope-btn on" data-scope="public" type="button">🌐 公开</button>
+          <button class="scope-btn" data-scope="mine" type="button">⭐ 我的</button>
+        </div>
         <input id="searchInput" class="input input-sm" placeholder="🔍 搜索标题 / 内容 / 作者">
       </div>
       <div id="clipList" class="clip-grid"><div class="skeleton-row"></div><div class="skeleton-row"></div></div>
@@ -176,6 +180,7 @@
       </div>
 
       <div id="guestNotice" class="notice hidden"></div>
+      <div id="draftBar" class="notice notice-info hidden"></div>
 
       <input id="edTitle" class="input title-input" placeholder="标题（可留空）" maxlength="200">
 
@@ -227,6 +232,9 @@
           <label>自定义短链
             <input id="edSlug" class="input input-sm" placeholder="3-32 位，如 my-notes">
           </label>
+          <label>标签（用逗号分隔，如：算法,模板,dp）
+            <input id="edTags" class="input input-sm" placeholder="算法,模板" autocomplete="off">
+          </label>
           <label class="check"><input type="checkbox" id="edPublic" checked> 出现在公开列表（取消则仅凭链接访问）</label>
           <label class="check" id="edCollabWrap"><input type="checkbox" id="edCollab"> 允许任何人编辑（协作剪贴板）</label>
           <label class="check"><input type="checkbox" id="edLoginRequired"> 仅登录用户可查看（登录门禁）</label>
@@ -261,6 +269,20 @@
     <section class="view" id="view-me">
       <div class="crumb"><a href="/" data-link>← 全部剪贴板</a></div>
       <div id="meHead"></div>
+      <div id="meClipsTools" class="meclips-tools hidden">
+        <div class="meclips-search-row">
+          <input id="myClipsQ" class="input input-sm" placeholder="🔍 搜索我的全部剪贴板（含私有板）…" autocomplete="off">
+          <select id="myClipsSort" class="input input-sm">
+            <option value="updated">最近更新</option>
+            <option value="created">最近创建</option>
+            <option value="views">最多浏览</option>
+            <option value="title">标题 A–Z</option>
+          </select>
+          <label class="check myclips-pin-filter"><input type="checkbox" id="myClipsPinned"> ⭐ 只看置顶</label>
+        </div>
+        <div id="myClipsTagCloud" class="tagcloud hidden"></div>
+        <div class="muted" id="myClipsMeta"></div>
+      </div>
       <div id="meClips" class="clip-grid"></div>
     </section>
 
@@ -306,7 +328,7 @@
 
   <footer class="footer">
     <span>mdqp · Markdown quickly paste</span>
-    <span class="muted"><a href="/help" data-link>使用帮助</a> · <a href="/about" data-link>关于</a> · <a href="/changelog" data-link>更新日志</a> · 登录由 <a href="https://www.cpoauth.com/" target="_blank">cpoauth</a> 提供</span>
+    <span class="muted"><a href="/help" data-link>使用帮助</a> · <a href="/about" data-link>关于</a> · <a href="/changelog" data-link>更新日志</a> · <a href="#" id="compatLink">浏览器兼容性</a> · 登录由 <a href="https://www.cpoauth.com/" target="_blank">cpoauth</a> 提供</span>
   </footer>
 </div>
 
@@ -374,6 +396,7 @@
         <button class="btn btn-primary btn-block" id="authSubmit" type="submit">登录</button>
       </form>
       <p class="auth-hint">密码登录是 <b>cpoauth 的备用方案</b>：即使第三方登录服务器宕机，你也能凭账号密码进入。</p>
+      <p class="auth-hint">第一次用？查看 <a href="/c/loginhelp" target="_blank" rel="noopener">📖 图文注册 / 登录指南</a>（cpoauth 绑定步骤、常见问题）。</p>
     </div>
   </div>
 </div>
@@ -515,27 +538,58 @@
     if ((m = ua.match(/Version\/(\d+).*Safari/)) && +m[1] < 11) return 'safari<11';
     return false;
   }
+  /** 识别浏览器名称 + 版本（仅用于展示） */
+  function browserName() {
+    var ua = navigator.userAgent, m;
+    if (/MSIE |Trident\//.test(ua)) return 'Internet Explorer（已停止支持）';
+    if ((m = ua.match(/Edg\/(\d+)/))) return 'Edge ' + m[1];
+    if (/Edge\//.test(ua)) return '旧版 Edge（EdgeHTML）';
+    if ((m = ua.match(/Firefox\/(\d+)/))) return 'Firefox ' + m[1];
+    if ((m = ua.match(/Version\/(\d+[\d.]*) .*Safari/))) return 'Safari ' + m[1];
+    if ((m = ua.match(/Chrome\/(\d+)/))) return 'Chrome ' + m[1];
+    return '未知浏览器';
+  }
+  var BAD_HTML = '<p>当前浏览器可能无法正常显示本站功能（如剪贴板、登录等）。建议下载新版浏览器，以获得完整体验：</p>'
+    + '<a class="btn btn-primary btn-block" href="https://www.firefox.com/zh-CN/download/all/desktop-release/win64/zh-CN/" target="_blank" rel="noopener">⬇ 下载 Firefox 新版</a>'
+    + '<p class="auth-hint">若暂时无法更新，基础浏览仍可使用，但部分高级功能可能受限。本站适配的最低版本参考：Chrome 60+ / Firefox 55+ / Safari 11+ / Edge（Chromium 版）。</p>';
+  var OK_HTML = '<p>✅ <b>当前浏览器兼容良好</b>，本站全部功能均可正常使用。</p>'
+    + '<p class="auth-hint">检测到的环境：<span id="compatUa"></span><br>本站适配的最低版本参考：Chrome 60+ / Firefox 55+ / Safari 11+ / Edge（Chromium 版）。</p>';
+  /** 填充弹窗并显示（旧浏览器警告 / 兼容良好 两种状态） */
+  function showCompat() {
+    var r = legacy();
+    var t = document.getElementById('legacyTitle'), b = document.getElementById('legacyBody');
+    if (!t || !b) return;
+    if (r) { t.textContent = '⚠️ 你的浏览器版本过低'; b.innerHTML = BAD_HTML; }
+    else { t.textContent = '🧭 浏览器兼容性'; b.innerHTML = OK_HTML; var u = document.getElementById('compatUa'); if (u) u.textContent = browserName(); }
+    var o = document.getElementById('legacyOverlay');
+    if (o) { o.classList.remove('hidden'); o.classList.add('show'); }
+  }
   var r = legacy();
   if (r) {
     window.__MDQP_LEGACY = r;
     document.addEventListener('DOMContentLoaded', function () {
       var o = document.getElementById('legacyOverlay');
-      if (o) o.classList.remove('hidden');
+      if (o) { showCompat(); }
     });
   }
+  // 页脚「浏览器兼容性」主动入口：任何用户随时可查看自己环境的兼容状态
+  document.addEventListener('DOMContentLoaded', function () {
+    var link = document.getElementById('compatLink');
+    if (link) link.addEventListener('click', function (e) { e.preventDefault(); showCompat(); });
+    var o = document.getElementById('legacyOverlay');
+    if (o) o.addEventListener('click', function (e) { if (e.target === o) { o.classList.add('hidden'); o.classList.remove('show'); } });
+  });
 })();
 </script>
 
-<!-- ============ 低版本浏览器引导弹窗 ============ -->
+<!-- ============ 低版本浏览器引导弹窗（自动触发 + 页脚「浏览器兼容性」主动入口共用） ============ -->
 <div class="modal-overlay hidden" id="legacyOverlay">
-  <div class="modal legacy-modal" role="dialog" aria-modal="true" aria-label="浏览器版本过低提示">
+  <div class="modal legacy-modal" role="dialog" aria-modal="true" aria-label="浏览器兼容性">
     <div class="modal-head">
-      <h3>⚠️ 你的浏览器版本过低</h3>
+      <h3 id="legacyTitle">⚠️ 你的浏览器版本过低</h3>
     </div>
-    <div class="modal-body auth-body">
-      <p>当前浏览器可能无法正常显示本站功能（如剪贴板、登录等）。建议下载新版浏览器，以获得完整体验：</p>
-      <a class="btn btn-primary btn-block" href="https://www.firefox.com/zh-CN/download/all/desktop-release/win64/zh-CN/" target="_blank" rel="noopener">⬇ 下载 Firefox 新版</a>
-      <p class="auth-hint">若暂时无法更新，基础浏览仍可使用，但部分高级功能可能受限。本站适配的最低版本参考：Chrome 60+ / Firefox 55+ / Safari 11+ / Edge（Chromium 版）。</p>
+    <div class="modal-body auth-body" id="legacyBody">
+      <!-- 内容由检测脚本按结果填充 -->
     </div>
   </div>
 </div>
