@@ -1,5 +1,7 @@
 # mdqp 竞争分析与提升方案（v1）
 
+> **⚠️ 2026-09-04 更新**：站长已拍板「oiwb 是主产品、mdqp 为附庸」的定位反转。oiwb 优化与两站整合排期由 **`strategy-oiwb.md`（v2）** 接管；本文继续管 mdqp 自身（片段库）的 P1/P2 未完成项，其中 P1-2 开放 API / P2-1 OI 垂直化 / P2-2 埋点的优先级已在 v2 §四重排。
+
 > 生成日期：2026-09-03 · 当前版本 v4.5.2
 > 本文回答三个问题：**我们比竞品强在哪 / 差在哪 / 用户凭什么用我们**，并给出与 `docs/plan-cpoauth.md` 未完成项对齐的落地路线图。
 
@@ -199,7 +201,7 @@ CREATE INDEX IF NOT EXISTS idx_clipboards_owner_pinned ON clipboards(owner_type,
 | **P1-3** | **移动端写作** | 编辑器底部「编辑 / 预览」Tab 切换（不再堆叠）；工具栏横向滚动；PWA manifest + 可安装到桌面 | 新增 |
 | **P1-4** | **发现广场 + SEO** | `/tag/:tag` 标签聚合页；公开板允许 index（og:title/description + sitemap.xml）；热门 / 精选榜 | **= P2-D 搜索与组织**（必做部分） |
 | **P1-5** | **收藏 / Fork** | 看到好板一键"存到我的库"（新表 `clip_forks`），形成内容沉淀与网络效应 | 新增（低成本高回报） |
-| **P1-6** | **补 `/c/loginhelp`** | 图文注册绑定指南（什么是 cpoauth、支持哪些平台、绑定步骤、常见问题）。**已被多处引用但内容从未创建** | **= 1.3 待补项** |
+| **P1-6** | ~~补 `/c/loginhelp`~~ ✅ 已存在 | 站长已自建公开板 `loginhelp`（「注册/登录指南」），`/c/loginhelp` 可正常访问——此前"从未创建"结论有误（当时只查了 pages 表没查 clipboards）。剩余建议：给它加防误删保护（官方板标记），并把内容同步一份进帮助页 | 已闭环 |
 | **P1-7** | **refresh_token 自动续期** | access 1h 过期 → 用已存的 refresh 静默续期，避免反复重定向。注意**强制轮换**（覆盖存储） | = 2.2 refresh_token |
 
 ---
@@ -269,7 +271,7 @@ CREATE INDEX IF NOT EXISTS idx_clipboards_owner_pinned ON clipboards(owner_type,
 
 | plan-cpoauth.md 项 | 状态 | 归入本方案 |
 |---|---|---|
-| 1.3 `/c/loginhelp` 内容 | ⛔ 从未创建，已被多处引用 | **P1-6** |
+| 1.3 `/c/loginhelp` 内容 | ✅ 已存在（站长自建公开板 `loginhelp`「注册/登录指南」；此前"从未创建"结论有误） | **P1-6**（已闭环，剩防误删保护） |
 | 2.2 refresh_token 续期 | 未做 | **P1-7** |
 | 2.2 email 体系 | 简化版已上，真实发信未做 | **P2-4**（阻塞：SMTP） |
 | 2.2 cp:summary / cp:details | ⛔ 上游未放行 | **P2-3**（阻塞，不排期） |
@@ -278,7 +280,7 @@ CREATE INDEX IF NOT EXISTS idx_clipboards_owner_pinned ON clipboards(owner_type,
 | P2-D 搜索与组织 | 未做 | **P0-4**（私有搜索）+ **P1-4**（标签聚合/广场） |
 | P2-E 后台看板 | 未做 | **P2-2** |
 | P2-F OI 垂直化 | 未做 | **P2-1**（护城河终点，但等用户量） |
-| 待确认项 3（loginhelp 谁产出） | 未决 | 由我生成骨架 + 你补截图 |
+| 待确认项 3（loginhelp 谁产出） | 已解决 | 你已自行产出（`loginhelp` 板） |
 | 待确认项 4（真实发信） | 未决 | 等有真实通知需求再说 |
 | 待确认项 5（方向：工具站 vs OI 工作台） | 未决 | **本文 §4.2 给出建议：OI 选手的 Markdown 代码片段库。需要你拍板** |
 
