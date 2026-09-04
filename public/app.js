@@ -6,7 +6,33 @@
 // 更新日志：随代码发布自动同步
 const CHANGELOG_MD = `# 📝 更新日志
 
-mdqp 的主要版本变动记录。当前部署版本 **v4.5.2**。
+mdqp 的主要版本变动记录。当前部署版本 **v4.6.2**。
+
+---
+
+## v4.6.2 · 2026-09-04（主页也能搜私有 + 一波可见性修复）
+- 🏠 **主页搜索我的剪贴板**：主页新增「🌐 公开 / ⭐ 我的」范围切换（登录用户可见）。切到「⭐ 我的」后直接搜**自己的全部剪贴板（含私有）**，支持置顶
+- 🧭 **修复「浏览器兼容性」点击无效**：弹窗打开漏加 show 类导致永远不显示，已修复
+- 🎨 **v4.6 功能样式补齐**：权益矩阵 / 我的剪贴板工具条 / 标签云 / 置顶 / 草稿恢复条 / 配额条 / 版本弹窗等样式此前缺失，现在「看得见」了
+- ✨ **版本更新弹窗重做**：展示完整更新日志 +「更多日志 / 确定」按钮
+
+---
+
+## v4.6 · 2026-09-03（让信任等级「有赏有罚」+ 我的剪贴板 2.0）
+- 🎁 **权益矩阵（核心）**：L0–L3 / VIP / 管理员各档位首次有**真实福利**——单篇字数上限、日/月配额、标签数、私有剪贴板数、版本回退次数、自定义短链、批量导出、徽章、专属标识，按等级阶梯解锁。高等级不再只是「限制少」，而是「能做的事更多」
+  - L0: 1500字 / 日5 / 月50 / 3标签 / 50私有板
+  - L1: 1500字 / 日10 / 月100 / 10标签 / 200私有板 / 3版本回退 / 批量导出 ✅
+  - L2: 5000字 / 日20 / 月300 / 30标签 / 1000私有板 / 10版本回退 / 自定义短链 ✅ / 批量导出 ✅ / 成就徽章 ✅
+  - L3 / VIP / 管理员: 全部**不限**（硬上限 20000 字防滥用）
+- 📏 **字数分级**：默认 300 → 1500；L2 5000；L3 / VIP / 管理员不限。游客板从 300 提到 1500。「我的」顶部按权益实时显示「字数 N / 不限」
+- ✏️ **草稿自动保存**：编辑页 500ms 防抖写入 \`localStorage\`（键 \`mdqp_draft_<id>\` / \`mdqp_draft_new\`），刷新 / 重开页面自动提示恢复，关闭页面 \`beforeunload\` 二次确认防误丢；保存成功后清理草稿
+- 🔍 **我的剪贴板 2.0**：登录态独立工具条——搜索框（含私有板）、4 种排序（最近更新 / 创建 / 浏览 / 标题）、⭐ 只看置顶、🏷 标签云筛选（按 \`tags\` 字段，逗号分隔）；空状态自动生成「清除筛选 / 新建」按钮
+- ⭐ **置顶 + 改标签**：剪贴板卡片新增 ⭐ 按钮，调用 \`PATCH /api/clips/:id/meta\` 切换置顶；标签数按权益截断（L1+ 才能加，超限返回 422 + 提示下一级权益）
+- 🛡 **数据层 BUG 修复**：远程 D1 缺 \`reader_count\` 列导致部分剪贴板首次访问 500（刷新后好），已补迁移并按 \`clip_readers\` 反向回填 12 行；新建表 \`CREATE TABLE\` 也补上该列避免再次掉坑
+- 🌐 **低版本浏览器提示页脚入口**：底部新增「「浏览器兼容性」链接，任何用户都能手动查看当前环境是否兼容（之前只对太旧的浏览器自动弹）
+- 🔗 **登录引导链**：登录弹窗与未绑定 cpoauth 引导弹窗都加上「📖 图文注册 / 登录指南」链接（指向 \`/c/loginhelp\`），帮助新用户自助注册
+- 📋 **更新日志变可见**：站点当前版本与用户上次访问版本对比，首次见到新版弹一次性「✨ v4.6 来了，5 大新功能」提示
+- 📖 帮助页同步扩充：权益矩阵表、字数分级表、我的剪贴板 2.0 操作步骤
 
 ---
 
@@ -195,6 +221,58 @@ function toast(msg, type = 'ok') {
   clearTimeout(t._t); t._t = setTimeout(() => (t.className = 'toast'), 2600);
 }
 
+// v4.6: 新版本提示（首次见到新版本时一次性横幅，展示本次完整更新日志 + 两个按钮）
+function maybeShowVersionToast(oldVer, newVer) {
+  // 已经看过的就别再弹
+  try { if (localStorage.getItem('mdqp_version_announced') === newVer) return; } catch (_) {}
+  // 距离上次访问 < 30 秒（刚刷新自己）也跳过
+  try {
+    const last = +localStorage.getItem('mdqp_last_seen_version_ts') || 0;
+    if (Date.now() - last < 30000) { localStorage.setItem('mdqp_version_announced', newVer); return; }
+  } catch (_) {}
+
+  // 从 CHANGELOG_MD 抽取本次版本段落（## v{ver} 起到下一个 --- 或下一个 ## 前）
+  let bodyHtml = '';
+  try {
+    const vEsc = String(newVer).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp('##\\s+v' + vEsc + '\\b[\\s\\S]+?(?=\\n---|\\n##\\s|v$)');
+    const m = CHANGELOG_MD.match(re);
+    if (m) {
+      // 去掉标题行（## v4.6 · 2026-09-03（...）），留下 bullet 列表本体
+      const mdBody = m[0].replace(/^##\s+v[\d.]+.*\n/, '');
+      // marked.parse 转 HTML：CHANGELOG_MD 是站内常量，无 XSS 风险
+      bodyHtml = typeof marked !== 'undefined' && marked.parse ? marked.parse(mdBody, { breaks: false, gfm: true }) : esc(mdBody).replace(/\n/g, '<br>');
+    }
+  } catch (_) {}
+  if (!bodyHtml) bodyHtml = '<p class="muted" style="margin:4px 0">本次更新日志内容暂不可用，<a href="/changelog" data-link>查看完整更新日志 →</a></p>';
+
+  const banner = document.createElement('div');
+  banner.className = 'version-toast';
+  banner.innerHTML = `
+    <div class="vt-icon">✨</div>
+    <div class="vt-body">
+      <div class="vt-title">v${esc(newVer)} 已发布 · 本次更新日志</div>
+      <div class="vt-content">${bodyHtml}</div>
+    </div>
+    <div class="vt-acts">
+      <a class="btn btn-sm btn-ghost" href="/changelog" data-link id="vtMore">更多日志</a>
+      <button class="btn btn-sm btn-primary" id="vtOk">确定</button>
+    </div>`;
+  // 横向偏宽（520 → 580）+ 垂直布局：图标 / 内容 / 按钮三段垂直堆叠，避免横向挤压内容
+  banner.style.cssText = 'position:fixed;left:50%;top:18px;transform:translateX(-50%);z-index:9999;background:var(--card);border:1px solid var(--primary);border-radius:14px;box-shadow:0 12px 40px rgba(15,23,48,.18);padding:16px 18px;display:flex;flex-direction:column;gap:10px;width:min(580px,calc(100vw - 24px));max-height:80vh;animation:vtIn .35s ease';
+  const close = () => { banner.style.animation = 'vtOut .25s ease'; setTimeout(() => banner.remove(), 240); localStorage.setItem('mdqp_version_announced', newVer); localStorage.setItem('mdqp_last_seen_version_ts', String(Date.now())); };
+  banner.querySelector('#vtOk').onclick = close;
+  // 点击「更多日志」也要关掉 + 跳 /changelog
+  banner.querySelector('#vtMore').onclick = () => close();
+  document.body.appendChild(banner);
+  // 一次性注入动画 CSS
+  if (!document.getElementById('vt-css')) {
+    const s = document.createElement('style'); s.id = 'vt-css';
+    s.textContent = '@keyframes vtIn{from{opacity:0;transform:translateX(-50%) translateY(-12px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}@keyframes vtOut{from{opacity:1;transform:translateX(-50%) translateY(0)}to{opacity:0;transform:translateX(-50%) translateY(-12px)}}';
+    document.head.appendChild(s);
+  }
+}
+
 function guestId() {
   let g = localStorage.getItem('mdqp_guest');
   if (!g) { g = (crypto.randomUUID ? crypto.randomUUID() : 'g-' + Date.now() + '-' + Math.random().toString(36).slice(2)).replace(/[^a-zA-Z0-9-]/g, ''); localStorage.setItem('mdqp_guest', g); }
@@ -375,7 +453,7 @@ function initTheme() {
 
 // ==================== 路由 ====================
 function go(path, replace = false) { if (replace) history.replaceState({}, '', path); else history.pushState({}, '', path); render(); }
-function showView(id) { $$('.view').forEach((v) => v.classList.remove('active')); $('#view-' + id).classList.add('active'); window.scrollTo(0, 0); }
+function showView(id) { state._view = id; $$('.view').forEach((v) => v.classList.remove('active')); $('#view-' + id).classList.add('active'); window.scrollTo(0, 0); }
 function closeNav() { document.body.classList.remove('nav-open'); }
 function updateNav() {
   const p = location.pathname.replace(/\/+$/, '') || '/'; const seg = p.split('/').filter(Boolean);
@@ -436,7 +514,11 @@ function clipCard(c) {
   if (c.login_required) badges.push('<span class="badge badge-login">🔒 登录可见</span>');
   if (c.is_public === false) badges.push('<span class="badge">🙈 仅链接可见</span>');
   const authorHtml = c.owner_type === 'user' ? `<a class="card-author" href="/u/${esc(c.owner_id)}" data-link>${esc(c.owner_name)}</a>` : `<span class="card-author guest">${esc(c.owner_name || '游客')}</span>`;
-  return `<article class="clip-card"><a class="card-main" href="/c/${esc(c.clip_id)}" data-link><h3>${esc(c.title || '无标题')}</h3><p class="card-preview">${esc(c.preview || '')}</p></a><div class="card-foot">${authorHtml}<span class="muted">· ${esc(timeAgo(c.created_at))}</span><code class="card-id">${esc(c.clip_id)}</code></div>${badges.length ? `<div class="badge-row">${badges.join('')}</div>` : ''}</article>`;
+  // v4.6: 标签 + 置顶按钮（仅在我的剪贴板渲染时显示）
+  const tagsArr = Array.isArray(c.tags) ? c.tags : [];
+  const tagHtml = tagsArr.length ? `<div class="card-tags">${tagsArr.map((t) => `<a class="tag-chip" href="#" data-mytag="${esc(t)}" onclick="event.preventDefault();window.__myTagFilter&&window.__myTagFilter('${esc(t)}')">#${esc(t)}</a>`).join('')}</div>` : '';
+  const pinBtn = c.__canPin ? `<button class="card-pin ${c.pinned ? 'on' : ''}" data-pin="${esc(c.clip_id)}" data-pin-state="${c.pinned ? 1 : 0}" title="${c.pinned ? '取消置顶' : '置顶'}" onclick="event.preventDefault();event.stopPropagation();window.__togglePin && window.__togglePin('${esc(c.clip_id)}', ${c.pinned ? 0 : 1})">${c.pinned ? '⭐' : '☆'}</button>` : '';
+  return `<article class="clip-card ${c.pinned ? 'is-pinned' : ''}"><a class="card-main" href="/c/${esc(c.clip_id)}" data-link><h3>${esc(c.title || '无标题')}</h3><p class="card-preview">${esc(c.preview || '')}</p></a><div class="card-foot">${authorHtml}<span class="muted">· ${esc(timeAgo(c.created_at))}</span><code class="card-id">${esc(c.clip_id)}</code>${pinBtn}</div>${badges.length ? `<div class="badge-row">${badges.join('')}</div>` : ''}${tagHtml}</article>`;
 }
 
 // ==================== 首页（含公告横幅） ====================
@@ -449,10 +531,39 @@ async function renderHome() {
   // v4.0: 加载公告
   loadAnnouncements();
 
+  // v4.6.2: 主页范围切换 — 登录用户可切到「我的」，直接搜自己的（含私有）剪贴板
+  const scopeBox = $('#homeScope');
+  const isUser = !!(state.me && (state.me.userId || state.me.id) && state.me.type !== 'guest' && state.me.type !== 'none');
+  if (scopeBox) {
+    scopeBox.classList.toggle('hidden', !isUser);
+    if (isUser) {
+      if (!state.homeScope) state.homeScope = 'public';
+      $$('#homeScope .scope-btn').forEach((b) => {
+        b.classList.toggle('on', b.dataset.scope === state.homeScope);
+        b.onclick = () => {
+          if (state.homeScope === b.dataset.scope) return;
+          state.homeScope = b.dataset.scope; state.page = 1;
+          $$('#homeScope .scope-btn').forEach((x) => x.classList.toggle('on', x.dataset.scope === state.homeScope));
+          renderHomeListHead(); loadList();
+        };
+      });
+    }
+  }
+  renderHomeListHead();
+
   $('#jumpBtn').onclick = jump;
   $('#jumpInput').onkeydown = (e) => { if (e.isComposing || e.key !== 'Enter') return; jump(); };
   $('#searchInput').oninput = (e) => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { state.q = e.target.value.trim(); state.page = 1; loadList(); }, 300); };
   $('#searchInput').value = state.q; loadList();
+}
+
+/** v4.6.2: 主页列表标题 / 搜索框占位随范围切换 */
+function renderHomeListHead() {
+  const t = $('#homeListTitle'); if (!t) return;
+  const mine = state.homeScope === 'mine';
+  t.textContent = mine ? '⭐ 我的剪贴板（含私有）' : '🌐 公开剪贴板';
+  const si = $('#searchInput');
+  if (si) si.placeholder = mine ? '🔍 搜索我的剪贴板（标题 / 内容 / 标签）' : '🔍 搜索标题 / 内容 / 作者';
 }
 
 /** v4.0: 加载并渲染公告横幅 */
@@ -470,6 +581,8 @@ async function loadAnnouncements() {
 function jump() { const v = $('#jumpInput').value.trim().replace(/^.*\/(c\/)?/, ''); if (v) go('/c/' + encodeURIComponent(v)); }
 
 async function loadList() {
+  // v4.6.2: 主页「我的」范围 — 搜自己的（含私有）
+  if (state.homeScope === 'mine') return loadHomeMine();
   const box = $('#clipList');
   box.innerHTML = '<div class="skeleton-card"><div class="sk-line sk-title"></div><div class="sk-line sk-text"></div><div class="sk-line sk-text-short"></div><div class="sk-line sk-meta"></div></div><div class="skeleton-card"><div class="sk-line sk-title"></div><div class="sk-line sk-text"></div><div class="sk-line sk-text-short"></div><div class="sk-line sk-meta"></div></div>';
   const { data } = await api(`/api/clips?page=${state.page}&q=${encodeURIComponent(state.q)}`);
@@ -483,6 +596,28 @@ async function loadList() {
   if (data.totalPages > 1) { pg.push(`<button class="btn btn-sm" ${data.page <= 1 ? 'disabled' : ''} data-p="${data.page - 1}">上一页</button>`); pg.push(`<span class="muted">${data.page} / ${data.totalPages}（共 ${data.total}）</span>`); pg.push(`<button class="btn btn-sm" ${data.page >= data.totalPages ? 'disabled' : ''} data-p="${data.page + 1}">下一页</button>`); }
   $('#pager').innerHTML = pg.join('');
   $$('#pager button[data-p]').forEach((b) => (b.onclick = () => { state.page = +b.dataset.p; loadList(); }));
+}
+
+/** v4.6.2: 主页「我的」范围 — 复用 /api/me/clips，含私有，支持置顶 */
+async function loadHomeMine() {
+  const box = $('#clipList');
+  box.innerHTML = '<div class="skeleton-card"><div class="sk-line sk-title"></div><div class="sk-line sk-text"></div><div class="sk-line sk-text-short"></div></div>';
+  const params = new URLSearchParams();
+  if (state.q) params.set('q', state.q);
+  params.set('sort', 'updated');
+  params.set('limit', '200');
+  const { ok, data } = await api('/api/me/clips?' + params.toString());
+  if (!ok || !data) { box.innerHTML = emptyHTML('clips', '加载失败', '<button class="btn btn-sm" onclick="loadList()">重试</button>'); $('#pager').innerHTML = ''; return; }
+  const me = state.me || {};
+  const clips = (data.clips || []).map((c) => Object.assign({ __canPin: true, owner_type: 'user', owner_id: me.userId || me.id, owner_name: me.name }, c));
+  if (!clips.length) {
+    box.innerHTML = state.q
+      ? emptyHTML('search', `没有匹配「${esc(state.q)}」的剪贴板`, '<button class="btn btn-sm" onclick="document.getElementById(\'searchInput\').value=\'\';state.q=\'\';loadList()">清除搜索</button>')
+      : emptyHTML('clips', '你还没有剪贴板', '<a class="btn btn-primary btn-sm" href="/new" data-link>＋ 创建第一个</a>');
+    $('#pager').innerHTML = ''; return;
+  }
+  box.innerHTML = clips.map(clipCard).join('');
+  $('#pager').innerHTML = `<span class="muted">共 ${data.total || clips.length} 条（含私有）</span>`;
 }
 
 // ==================== 详情（含评论 + 登录门禁） ====================
@@ -1161,12 +1296,19 @@ async function renderMe() {
     const vipBadge = me.is_vip ? ' <span class="badge badge-vip">⭐ VIP</span>' : '';
     const badgesHtml = userBadges(Object.assign({ clip_count: (me.clips || []).length, cpoauth_bound: me.cpoauth_bound, has_password: me.has_password, is_vip: me.is_vip, invite_count: me.invite_count, role: me.role }, me));
 
-    // v4.0: 配额显示
+    // v4.6: 配额显示（按权益分级，含「不限」）
     const quota = me.quota || {};
+    const qFmt = (label, lim) => {
+        if (lim === -1) return `<span>${label} <b>${quota.daily_used || 0}</b><span class="muted"> / 不限</span></span>`;
+        return `<span>${label} <b>${quota.daily_used || 0}/${lim}</b></span>`;
+      };
     const quotaHtml = `<div class="quota-bar">
-      <span>今日 <b>${quota.daily_used || 0}/${quota.daily_limit || 5}</b></span>
-      <span>本月 <b>${quota.monthly_used || 0}/${quota.monthly_limit || 50}</b></span>
+      ${qFmt('今日', quota.daily_limit)}
+      ${quota.monthly_limit === -1 ? `<span>本月 <b>${quota.monthly_used || 0}</b><span class="muted"> / 不限</span></span>` : `<span>本月 <b>${quota.monthly_used || 0}/${quota.monthly_limit}</b></span>`}
     </div>`;
+
+    // v4.6: 权益矩阵小卡片（嵌在信任等级下方）
+    const benefitsHtml = meBenefits(me);
 
     $('#meHead').innerHTML = `<div class="profile-card">
       <div class="profile-top">
@@ -1181,6 +1323,7 @@ async function renderMe() {
         <button class="icon-btn profile-gear" id="meSettingsBtn" title="设置" aria-label="设置">⚙️</button>
       </div>
       ${quotaHtml}
+      ${benefitsHtml}
       <div class="me-section">
         <h3 class="me-section-title">🛡 信任等级</h3>
         <div id="meTrustProgress" class="sec-tl-progress"></div>
@@ -1212,6 +1355,10 @@ async function renderMe() {
         else box.innerHTML = '<p class="muted cp-summary-hint">⚠️ 详细战绩（cp:summary）暂无法使用，等待更新。</p>';
       }).catch(() => {});
     }
+
+    // v4.6: 我的剪贴板 2.0 — 搜索/排序/置顶/标签筛选（私有板也能搜到）
+    initMyClipsTools();
+    loadMyClips();
   } else {
     const left = Math.max(0, (me.limit || 5) - (me.count || 0));
     const period = me.period === 'weekly' ? '本周' : '';
@@ -1221,9 +1368,102 @@ async function renderMe() {
       <p><button class="btn btn-sm btn-primary" id="meGuestLoginBtn">🔑 登录 / 注册</button> 后日限 5 / 月限 50，且仅你可改自己的内容。</p></div>`;
     // 走统一弹窗而非直跳 cpoauth：第三方登录宕机时仍有密码入口
     const guestLogin = $('#meGuestLoginBtn'); if (guestLogin) guestLogin.onclick = () => openAuthModal('login');
+    // 游客模式：不显示 2.0 工具条，按老逻辑渲染全部剪贴板
+    const box = $('#meClipsTools'); if (box) box.classList.add('hidden');
+    const clips = me.clips || [];
+    $('#meClips').innerHTML = clips.length ? clips.map((c) => clipCard(Object.assign({ owner_type: me.type, owner_id: me.guestId, owner_name: '游客' }, c))).join('') : emptyHTML('me', '还没有剪贴板', '<a class="btn btn-primary btn-sm" href="/new" data-link>＋ 新建一个</a>');
   }
-  const clips = me.clips || [];
-  $('#meClips').innerHTML = clips.length ? clips.map((c) => clipCard(Object.assign({ owner_type: me.type, owner_id: me.type === 'user' ? me.userId : me.guestId, owner_name: me.type === 'user' ? me.name : '游客' }, c))).join('') : emptyHTML('me', '还没有剪贴板', '<a class="btn btn-primary btn-sm" href="/new" data-link>＋ 新建一个</a>');
+}
+
+// v4.6: 「我的」权益矩阵展示
+function meBenefits(me) {
+  const list = me.benefits || [];
+  if (!list.length) return '';
+  const unlocks = me.next_level_unlock || [];
+  const unlocksHtml = unlocks.length ? `<div class="me-unlocks muted">${esc(unlocks.join(' · '))}</div>` : '';
+  const rows = list.map((b) => `<tr><td>${esc(b.label)}</td><td>${esc(String(b.value))}</td></tr>`).join('');
+  return `<div class="me-section">
+    <h3 class="me-section-title">🎁 当前权益（L${me.trust_level || 0}${me.is_vip ? ' + VIP' : ''}）</h3>
+    <table class="me-benefits"><tbody>${rows}</tbody></table>
+    ${unlocksHtml}
+  </div>`;
+}
+
+// v4.6: 我的剪贴板 2.0 — 工具条初始化（搜索 / 排序 / 置顶筛选 / 标签云）
+function initMyClipsTools() {
+  const tools = $('#meClipsTools'); if (!tools) return;
+  tools.classList.remove('hidden');
+  let qTimer = null;
+  const qInput = $('#myClipsQ'); if (qInput && !qInput.dataset.bound) {
+    qInput.dataset.bound = '1';
+    qInput.oninput = (e) => { clearTimeout(qTimer); qTimer = setTimeout(() => loadMyClips(), 250); };
+  }
+  const sortSel = $('#myClipsSort'); if (sortSel && !sortSel.dataset.bound) {
+    sortSel.dataset.bound = '1';
+    sortSel.onchange = () => loadMyClips();
+  }
+  const pinChk = $('#myClipsPinned'); if (pinChk && !pinChk.dataset.bound) {
+    pinChk.dataset.bound = '1';
+    pinChk.onchange = () => loadMyClips();
+  }
+  // 标签云点击筛选（由 clipCard 的 data-mytag 触发）
+  window.__myTagFilter = (tag) => {
+    state._myTag = tag;
+    loadMyClips();
+  };
+  // 置顶按钮（PATCH /api/clips/:id/meta）
+  window.__togglePin = async (clipId, nextState) => {
+    try {
+      const r = await api(`/api/clips/${encodeURIComponent(clipId)}/meta`, { method: 'PATCH', body: JSON.stringify({ pinned: nextState }) });
+      if (!r.ok) return toast(r.data?.message || '操作失败', 'err');
+      toast(nextState ? '已置顶' : '已取消置顶');
+      // 在主页「我的」范围点置顶 → 刷主页列表；在 /me 页 → 刷我的列表
+      if (state._view === 'home') loadList(); else loadMyClips();
+    } catch { toast('网络错误，请重试', 'err'); }
+  };
+}
+
+// v4.6: 我的剪贴板 2.0 — 拉取并渲染
+async function loadMyClips() {
+  const box = $('#meClips'); if (!box) return;
+  const me = state.me || {};
+  const params = new URLSearchParams();
+  const q = $('#myClipsQ')?.value?.trim(); if (q) params.set('q', q);
+  const sort = $('#myClipsSort')?.value || 'updated'; params.set('sort', sort);
+  if ($('#myClipsPinned')?.checked) params.set('pinned', '1');
+  if (state._myTag) params.set('tag', state._myTag);
+  params.set('limit', '200');
+  box.innerHTML = '<div class="skeleton-card"><div class="sk-line sk-title"></div><div class="sk-line sk-text"></div><div class="sk-line sk-text-short"></div></div>';
+  let data;
+  try {
+    const r = await api('/api/me/clips?' + params.toString());
+    if (!r.ok || !r.data) throw new Error(r.data?.message || '加载失败');
+    data = r.data;
+  } catch (e) { box.innerHTML = emptyHTML('me', '加载失败：' + esc(e.message), '<button class="btn btn-sm" onclick="loadMyClips()">重试</button>'); return; }
+  const clips = (data.clips || []).map((c) => Object.assign({ __canPin: true, owner_type: 'user', owner_id: me.userId, owner_name: me.name }, c));
+  if (!clips.length) {
+    const empty = state._myTag ? `没有标签为「${esc(state._myTag)}」的剪贴板` : (q ? `没有匹配「${esc(q)}」的剪贴板` : '还没有剪贴板');
+    const act = (q || state._myTag) ? '<button class="btn btn-sm" onclick="document.getElementById(\'myClipsQ\').value=\'\';state._myTag=null;loadMyClips()">清除筛选</button>' : '<a class="btn btn-primary btn-sm" href="/new" data-link>＋ 新建一个</a>';
+    box.innerHTML = emptyHTML('me', empty, act);
+  } else {
+    box.innerHTML = clips.map(clipCard).join('');
+  }
+  // 元信息（总数 / 已匹配 / 当前标签）
+  const meta = $('#myClipsMeta');
+  if (meta) {
+    const parts = [`共 ${data.total || clips.length} 条`, data.matched != null && data.matched !== data.total ? `（匹配 ${data.matched}）` : ''];
+    if (state._myTag) parts.push(`<span>标签：<b>#${esc(state._myTag)}</b> <button class="btn-link" onclick="state._myTag=null;loadMyClips()">清除</button></span>`);
+    meta.innerHTML = parts.filter(Boolean).join(' · ');
+  }
+  // 标签云
+  const cloud = $('#myClipsTagCloud');
+  if (cloud) {
+    const tags = data.tags || [];
+    if (tags.length) {
+      cloud.classList.remove('hidden');
+      cloud.innerHTML = tags.map((t) => `<a class="tag-chip ${state._myTag === t.name ? 'on' : ''}" href="#" onclick="event.preventDefault();window.__myTagFilter('${esc(t.name)}')">#${esc(t.name)} <span class="muted">${t.count}</span></a>`).join('');
+    } else cloud.classList.add('hidden');
+  }
 }
 
 // ==================== 站点页面 ====================
@@ -1461,20 +1701,56 @@ async function renderEditor(clipId) {
     // v4.0: 预填登录门禁 / 读者上限
     $('#edLoginRequired').checked = !!data.login_required;
     $('#edMaxReaders').value = data.max_readers || 0;
-  } else { $('#edTitle').value = ''; $('#edContent').value = ''; $('#edPublic').checked = true; $('#edCollab').checked = false; $('#edMaxViews').value = 0; $('#edPassword').value = ''; $('#edSlug').value = ''; $('#edSlug').disabled = !(me.feature_flags?.custom_slug || isAdmin()); $('#edExpiry').value = 'never'; $('#saveBtn').textContent = '🚀 发布'; }
+    // v4.6: 标签回填
+    if ($('#edTags')) $('#edTags').value = (data.tags || []).join(',');
+  } else { $('#edTitle').value = ''; $('#edContent').value = ''; $('#edPublic').checked = true; $('#edCollab').checked = false; $('#edMaxViews').value = 0; $('#edPassword').value = ''; $('#edSlug').value = ''; $('#edSlug').disabled = !(me.feature_flags?.custom_slug || isAdmin()); $('#edExpiry').value = 'never'; $('#saveBtn').textContent = '🚀 发布'; if ($('#edTags')) $('#edTags').value = ''; }
 
   const ed = $('#edContent');
   updatePreview(); autoGrow(ed);
   ed.oninput = () => { updatePreview(); autoGrow(ed); };
   $('#saveBtn').onclick = saveClip; bindToolbar(); attachMention(ed); setupEditorShortcuts(ed); setupScrollSync(); setupToc($('#tocToggle'), $('#edToc'), $('#edPreview'));
+  // v4.6: 草稿自动保存
+  setupDraft(clipId || null);
+}
+
+// ==================== 草稿自动保存（v4.6） ====================
+// 写一半关标签页 / 断网 / 发布失败都不丢内容：500ms 防抖写 localStorage，
+// 重新进入编辑器时检测到草稿与当前内容不同则提示恢复。
+let draftTimer = null;
+function draftKey(clipId) { return clipId ? 'mdqp_draft_' + clipId : 'mdqp_draft_new'; }
+function readDraft(clipId) { try { return JSON.parse(localStorage.getItem(draftKey(clipId)) || 'null'); } catch { return null; } }
+function writeDraft(clipId) {
+  try {
+    const title = $('#edTitle')?.value || '', content = $('#edContent')?.value || '';
+    if (!title && !content.trim()) { localStorage.removeItem(draftKey(clipId)); return; }
+    localStorage.setItem(draftKey(clipId), JSON.stringify({ title, content, at: Date.now() }));
+  } catch { /* 存储满 / 隐私模式：静默失败 */ }
+}
+function clearDraft(clipId) { try { localStorage.removeItem(draftKey(clipId)); } catch {} }
+function setupDraft(clipId) {
+  const bar = $('#draftBar'); if (!bar) return;
+  const saved = readDraft(clipId);
+  const curTitle = $('#edTitle').value, curContent = $('#edContent').value;
+  const differs = saved && (saved.title !== curTitle || (saved.content || '') !== curContent);
+  if (differs && (saved.title || (saved.content || '').trim())) {
+    const when = saved.at ? new Date(saved.at).toLocaleString() : '之前';
+    bar.classList.remove('hidden');
+    bar.innerHTML = `<b>📋 发现未保存的草稿</b>（${esc(when)} 自动保存） <button class="btn btn-sm btn-primary" id="draftRestore">恢复草稿</button> <button class="btn btn-sm btn-ghost" id="draftDiscard">放弃</button>`;
+    $('#draftRestore').onclick = () => { $('#edTitle').value = saved.title || ''; $('#edContent').value = saved.content || ''; updatePreview(); autoGrow($('#edContent')); bar.classList.add('hidden'); toast('草稿已恢复'); };
+    $('#draftDiscard').onclick = () => { clearDraft(clipId); bar.classList.add('hidden'); };
+  } else { bar.classList.add('hidden'); }
+  const onEdit = () => { clearTimeout(draftTimer); draftTimer = setTimeout(() => writeDraft(clipId), 500); };
+  $('#edContent').addEventListener('input', onEdit);
+  $('#edTitle').addEventListener('input', onEdit);
+  $('#edTags')?.addEventListener('input', onEdit);
 }
 
 function updatePreview() {
   const v = $('#edContent').value;
   if (v.trim()) renderMd($('#edPreview'), v); else $('#edPreview').innerHTML = '<p class="muted">预览区：左侧输入 Markdown，这里实时渲染。</p>';
-  // v4.0: 等效字数统计
-  const cc = countChars(v); const limit = state.me?.char_limit || 300; // 后端可配 global_char_limit
-  if (isVip()) { $('#charCount').textContent = `${cc} 等效字 · VIP 不限`; $('#charCount').style.color = 'var(--primary)'; }
+  // v4.6: 等效字数统计（上限按信任等级分级）
+  const cc = countChars(v); const limit = state.me?.char_limit || 1500;
+  if (state.me?.unlimited_char || isVip() || isAdmin()) { $('#charCount').textContent = `${cc} 等效字 · 不限`; $('#charCount').style.color = 'var(--primary)'; }
   else { $('#charCount').textContent = `${cc}/${limit} 等效字`; $('#charCount').style.color = cc > limit ? 'var(--danger)' : ''; }
   if (!$('#edToc').classList.contains('hidden')) $('#edToc').innerHTML = buildOutline($('#edPreview'));
 }
@@ -1526,12 +1802,17 @@ function setupScrollSync() {
 
 async function saveClip() {
   const content = $('#edContent').value; if (!content.trim()) return toast('内容不能为空', 'err');
-  // 保存前预检字数，避免白跑一次请求（后端对管理员与有效 VIP 豁免，这里保持一致）
-  if (!isAdmin() && !isVip()) {
-    const lim = state.me?.char_limit || 300; const cc = countChars(content);
-    if (cc > lim) { toast(`内容 ${cc} 等效字，超出上限 ${lim}`, 'err'); return; }
+  // 保存前预检字数，避免白跑一次请求（与后端分级上限一致）
+  const lim = state.me?.char_limit || 1500;
+  if (!state.me?.unlimited_char && !isAdmin() && !isVip()) {
+    const cc = countChars(content);
+    if (cc > lim) { toast(`内容 ${cc} 等效字，超出当前上限 ${lim}（提升信任等级可解锁更高额度）`, 'err'); return; }
   }
   const body = { title: $('#edTitle').value.trim(), content, is_public: $('#edPublic').checked, expires_in: $('#edExpiry').value, max_views: parseInt($('#edMaxViews').value) || 0 };
+  // v4.6: 标签
+  const tagsRaw = $('#edTags')?.value || '';
+  const tags = tagsRaw.split(/[,，]/).map((s) => s.trim()).filter(Boolean);
+  if (tags.length) body.tags = tags;
   const pwd = $('#edPassword').value;
   if (state.editing) { if (pwd) body.password = pwd; if (state.me.type === 'user') body.editable_by_anyone = $('#edCollab').checked;
     // v4.0: 短链修改
@@ -1547,7 +1828,7 @@ async function saveClip() {
   try {
     const r = await api(path, { method: state.editing ? 'PUT' : 'POST', body: JSON.stringify(body) });
     $('#saveBtn').disabled = false; $('#saveBtn').textContent = state.editing ? '💾 保存修改' : '🚀 发布';
-    if (r.ok) { toast(state.editing ? '已保存' : '发布成功！'); go('/c/' + (r.data.clip_id || state.editing.clip_id)); }
+    if (r.ok) { clearDraft(state.editing ? state.editing.clip_id : null); toast(state.editing ? '已保存' : '发布成功！'); go('/c/' + (r.data.clip_id || state.editing.clip_id)); }
     else { toast(r.data?.message || '失败：' + (r.data?.error || '状态码 ' + r.status), 'err'); }
   } catch (e) {
     $('#saveBtn').disabled = false; $('#saveBtn').textContent = state.editing ? '💾 保存修改' : '🚀 发布';
@@ -1726,7 +2007,16 @@ function installErrorReporter() {
   });
 
   // ④ 版本号（反馈环境信息用）
-  fetch('/api/health').then((r) => r.json()).then((d) => { if (d && d.version) window.__MDQP_VERSION = d.version; }).catch(() => {});
+  fetch('/api/health').then((r) => r.json()).then((d) => {
+    if (d && d.version) {
+      window.__MDQP_VERSION = d.version;
+      try {
+        const seen = localStorage.getItem('mdqp_last_seen_version');
+        if (seen && seen !== d.version) maybeShowVersionToast(seen, d.version);
+        localStorage.setItem('mdqp_last_seen_version', d.version);
+      } catch (_) {}
+    }
+  }).catch(() => {});
 }
 
 // ==================== 官方反馈贴 ====================
