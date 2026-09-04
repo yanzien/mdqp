@@ -11,10 +11,10 @@ mdqp 的主要版本变动记录。当前部署版本 **v4.6.2**。
 ---
 
 ## v4.6.2 · 2026-09-04（主页也能搜私有 + 一波可见性修复）
-- 🏠 **主页搜索我的剪贴板**：主页新增「🌐 公开 / ⭐ 我的」范围切换（登录用户可见）。切到「⭐ 我的」后直接搜**自己的全部剪贴板（含私有）**，支持置顶
-- 🧭 **修复「浏览器兼容性」点击无效**：弹窗打开漏加 show 类导致永远不显示，已修复
-- 🎨 **v4.6 功能样式补齐**：权益矩阵 / 我的剪贴板工具条 / 标签云 / 置顶 / 草稿恢复条 / 配额条 / 版本弹窗等样式此前缺失，现在「看得见」了
-- ✨ **版本更新弹窗重做**：展示完整更新日志 +「更多日志 / 确定」按钮
+- 🏠 **主页搜索我的剪贴板**：主页「公开剪贴板」标题旁新增「🌐 公开 / ⭐ 我的」范围切换（登录用户可见）。切到「⭐ 我的」后，主页搜索框直接搜**自己的全部剪贴板（含私有）**，支持置顶按钮，标题与搜索框占位随范围变化。游客不显示切换
+- 🧭 **修复「浏览器兼容性」点击无效**：页脚按钮弹窗打开时漏加 \`show\` 类导致弹窗永远不显示（v4.6 引入的回归），已修复
+- 🎨 **v4.6 功能样式补齐**：权益矩阵表、我的剪贴板工具条、标签云、置顶按钮、草稿恢复条、配额条、版本弹窗等 9 组样式此前完全缺失，新功能「看得见」了
+- ✨ **版本更新弹窗重做**：检测到新版本时展示**完整更新日志**（Markdown 渲染），下方「更多日志」跳 \`/changelog\` + 「确定」按钮，去掉 8 秒自动关闭
 
 ---
 
@@ -259,7 +259,7 @@ function maybeShowVersionToast(oldVer, newVer) {
       <button class="btn btn-sm btn-primary" id="vtOk">确定</button>
     </div>`;
   // 横向偏宽（520 → 580）+ 垂直布局：图标 / 内容 / 按钮三段垂直堆叠，避免横向挤压内容
-  banner.style.cssText = 'position:fixed;left:50%;top:18px;transform:translateX(-50%);z-index:9999;background:var(--card);border:1px solid var(--primary);border-radius:14px;box-shadow:0 12px 40px rgba(15,23,48,.18);padding:16px 18px;display:flex;flex-direction:column;gap:10px;width:min(580px,calc(100vw - 24px));max-height:80vh;animation:vtIn .35s ease';
+  banner.style.cssText = 'position:fixed;left:50%;top:18px;transform:translateX(-50%);z-index:9999;background:var(--surface,#fff);border:1px solid var(--primary);border-radius:14px;box-shadow:0 12px 40px rgba(15,23,48,.18);padding:16px 18px;display:flex;flex-direction:column;gap:10px;width:min(580px,calc(100vw - 24px));max-height:80vh;animation:vtIn .35s ease';
   const close = () => { banner.style.animation = 'vtOut .25s ease'; setTimeout(() => banner.remove(), 240); localStorage.setItem('mdqp_version_announced', newVer); localStorage.setItem('mdqp_last_seen_version_ts', String(Date.now())); };
   banner.querySelector('#vtOk').onclick = close;
   // 点击「更多日志」也要关掉 + 跳 /changelog
