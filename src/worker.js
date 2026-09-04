@@ -12,14 +12,14 @@
 
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
-import { verifyJWT, hashPassword } from './auth.js';
+import { verifyJWT, signJWT, hashPassword } from './auth.js';
 import { oauthRoutes } from './oauth.js';
 
 const app = new Hono();
 
 const GUEST_LIMIT = 5;
 const PAGE_SIZE = 20;
-const VERSION = '4.6.2';
+const VERSION = '4.7.1';
 const SEARCH_MAX = 100;
 const RESERVED = new Set([
   'api', 'raw', 'new', 'edit', 'u', 'user', 'users', 'admin', 'login', 'logout',
@@ -1859,6 +1859,199 @@ app.get('/api/admin/clips', async (c) => {
 
 // OAuth 子路由
 app.route('/api/auth', oauthRoutes);
+
+// ========== v4.7: 跨站账号互通 + oiwb 快照同步 ==========
+
+const OIWB_TICKET_TTL = 5 * 60;       // ticket 5 分钟
+const OIWB_TOKEN_TTL = 60 * 60;       // oiwb JWT 1 小时
+const OIWB_REFRESH_TTL = 30 * 24 * 60 * 60;  // oiwb refresh 30 天
+const OIWB_MAX_SNAPSHOT = 1024 * 1024;  // 单快照硬上限 1 MB
+
+function genJti() {
+  const buf = crypto.getRandomValues(new Uint8Array(16));
+  let s = '';
+  for (const b of buf) s += b.toString(16).padStart(2, '0');
+  return s;
+}
+
+// 1. 申请跨站 ticket（已登录用户 → 给 5 分钟短期 JWT，含 jti 用于一次性）
+app.post('/api/auth/ticket', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required' }, 401);
+
+  let body = {};
+  try { body = await c.req.json(); } catch { /* 允许空 body */ }
+  const scope = String(body.scope || 'oiwb');
+  if (!['oiwb', 'mdqp', 'app-hub'].includes(scope)) return c.json({ error: 'bad_scope' }, 400);
+
+  const jti = genJti();
+  const exp = Math.floor(Date.now() / 1000) + OIWB_TICKET_TTL;
+  const secret = c.env.CPOAUTH_CLIENT_SECRET || 'dev-secret';
+
+  await db.prepare(
+    'INSERT INTO oiwb_tickets (jti, uid, scope, exp, used_at, created_at) VALUES (?, ?, ?, ?, 0, ?)'
+  ).bind(jti, identity.userId, scope, exp, Math.floor(Date.now() / 1000)).run();
+
+  // ticket 本身签成 JWT（含 jti 一次性校验）
+  const ticket = await signJWT(
+    { jti, uid: Number(identity.userId), scope, exp, sub: identity.sub, kind: 'ticket' },
+    secret
+  );
+  return c.json({ ticket, exp, scope });
+});
+
+// 2. 用 ticket 换正式 oiwb JWT（含 refresh）
+app.post('/api/auth/exchange', async (c) => {
+  const db = c.env.db;
+  let body;
+  try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
+  const ticket = String(body.ticket || '');
+  if (!ticket) return c.json({ error: 'missing_ticket' }, 400);
+
+  const secret = c.env.CPOAUTH_CLIENT_SECRET || 'dev-secret';
+  const payload = await verifyJWT(ticket, secret);
+  if (!payload || payload.kind !== 'ticket' || !payload.jti || !payload.uid || !payload.scope) {
+    return c.json({ error: 'bad_ticket' }, 400);
+  }
+
+  // 检查 jti 一次性 + 未过期
+  const row = await db.prepare('SELECT jti, uid, scope, exp, used_at FROM oiwb_tickets WHERE jti = ?').bind(payload.jti).first();
+  if (!row) return c.json({ error: 'ticket_not_found' }, 400);
+  if (row.used_at > 0) return c.json({ error: 'ticket_used' }, 400);
+  if (row.exp < Math.floor(Date.now() / 1000)) return c.json({ error: 'ticket_expired' }, 400);
+
+  // 一次性：标记已用
+  await db.prepare('UPDATE oiwb_tickets SET used_at = ? WHERE jti = ?')
+    .bind(Math.floor(Date.now() / 1000), payload.jti).run();
+
+  // 拉用户基本信息
+  const u = await db.prepare(
+    'SELECT id, username, display_name, avatar, role, is_vip FROM users WHERE id = ?'
+  ).bind(String(payload.uid)).first();
+  if (!u) return c.json({ error: 'user_not_found' }, 404);
+
+  const nowS = Math.floor(Date.now() / 1000);
+
+  // 签 oiwb access JWT
+  const accessJti = genJti();
+  const accessExp = nowS + OIWB_TOKEN_TTL;
+  const token = await signJWT(
+    {
+      userId: Number(u.id), name: u.username, displayName: u.display_name,
+      avatar: u.avatar, scope: payload.scope, exp: accessExp,
+      jti: accessJti, kind: 'oiwb'
+    },
+    secret
+  );
+
+  // 签 oiwb refresh（jti 入表用于吊销）
+  const refreshJti = genJti();
+  const refreshExp = nowS + OIWB_REFRESH_TTL;
+  await db.prepare(
+    'INSERT INTO oiwb_tickets (jti, uid, scope, exp, used_at, created_at) VALUES (?, ?, ?, ?, 0, ?)'
+  ).bind(refreshJti, Number(u.id), 'refresh:' + payload.scope, refreshExp, nowS).run();
+  const refresh = await signJWT(
+    { userId: Number(u.id), scope: payload.scope, exp: refreshExp, jti: refreshJti, kind: 'refresh' },
+    secret
+  );
+
+  return c.json({
+    token, refresh, exp: accessExp, refreshExp,
+    uid: Number(u.id), name: u.username, display_name: u.display_name,
+    avatar: u.avatar, role: u.role, is_vip: !!u.is_vip, scope: payload.scope
+  });
+});
+
+// 3. 刷新 oiwb JWT（用 refresh 换新 token，不重发 refresh 避免无限续期）
+app.post('/api/auth/refresh', async (c) => {
+  const db = c.env.db;
+  let body;
+  try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
+  const refresh = String(body.refresh || '');
+  if (!refresh) return c.json({ error: 'missing_refresh' }, 400);
+
+  const secret = c.env.CPOAUTH_CLIENT_SECRET || 'dev-secret';
+  const payload = await verifyJWT(refresh, secret);
+  if (!payload || payload.kind !== 'refresh' || !payload.jti) return c.json({ error: 'bad_refresh' }, 400);
+
+  const row = await db.prepare('SELECT jti, exp, used_at FROM oiwb_tickets WHERE jti = ?').bind(payload.jti).first();
+  if (!row) return c.json({ error: 'refresh_not_found' }, 400);
+  if (row.used_at > 0) return c.json({ error: 'refresh_revoked' }, 400);
+  if (row.exp < Math.floor(Date.now() / 1000)) return c.json({ error: 'refresh_expired' }, 400);
+
+  const u = await db.prepare(
+    'SELECT id, username, display_name, avatar, role, is_vip FROM users WHERE id = ?'
+  ).bind(String(payload.userId)).first();
+  if (!u) return c.json({ error: 'user_not_found' }, 404);
+
+  const accessExp = Math.floor(Date.now() / 1000) + OIWB_TOKEN_TTL;
+  const token = await signJWT(
+    {
+      userId: Number(u.id), name: u.username, displayName: u.display_name,
+      avatar: u.avatar, scope: payload.scope, exp: accessExp,
+      jti: genJti(), kind: 'oiwb'
+    },
+    secret
+  );
+
+  return c.json({
+    token, exp: accessExp,
+    uid: Number(u.id), name: u.username, display_name: u.display_name,
+    avatar: u.avatar, role: u.role, is_vip: !!u.is_vip, scope: payload.scope
+  });
+});
+
+// 4. 吊销 oiwb refresh（登出用；幂等，无 refresh 也返 200）
+app.post('/api/auth/revoke-token', async (c) => {
+  const db = c.env.db;
+  let body = {};
+  try { body = await c.req.json(); } catch { /* 空 body 也返 200 */ }
+  const refresh = String(body.refresh || '');
+  if (!refresh) return c.json({ ok: true, noop: true });
+
+  const secret = c.env.CPOAUTH_CLIENT_SECRET || 'dev-secret';
+  const payload = await verifyJWT(refresh, secret);
+  if (payload && payload.jti) {
+    // used_at > 0 即视为吊销
+    await db.prepare('UPDATE oiwb_tickets SET used_at = ? WHERE jti = ? AND used_at = 0')
+      .bind(Math.floor(Date.now() / 1000), payload.jti).run();
+  }
+  return c.json({ ok: true });
+});
+
+// 5. oiwb 推快照（登录用户）
+app.post('/api/oiwb/sync', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required' }, 401);
+
+  let body;
+  try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
+  const blob = String(body.blob || '');
+  if (!blob) return c.json({ error: 'missing_blob' }, 400);
+  if (blob.length > OIWB_MAX_SNAPSHOT) return c.json({ error: 'too_large_1MB', max: OIWB_MAX_SNAPSHOT }, 413);
+
+  const now = Math.floor(Date.now() / 1000);
+  await db.prepare(
+    'INSERT INTO oiwb_snapshots (uid, size, blob, updated_at) VALUES (?, ?, ?, ?) ' +
+    'ON CONFLICT(uid) DO UPDATE SET size = excluded.size, blob = excluded.blob, updated_at = excluded.updated_at'
+  ).bind(identity.userId, blob.length, blob, now).run();
+
+  return c.json({ ok: true, size: blob.length, updated_at: now });
+});
+
+// 6. oiwb 拉快照（登录用户）
+app.get('/api/oiwb/sync', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required' }, 401);
+
+  const row = await db.prepare('SELECT blob, size, updated_at FROM oiwb_snapshots WHERE uid = ?')
+    .bind(identity.userId).first();
+  if (!row) return c.json({ blob: null, size: 0, updated_at: 0 });
+  return c.json({ blob: row.blob, size: row.size, updated_at: row.updated_at });
+});
 
 // ========== Raw 直链 ==========
 
