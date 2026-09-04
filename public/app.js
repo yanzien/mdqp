@@ -10,6 +10,25 @@ mdqp 的主要版本变动记录。当前部署版本 **v4.6.2**。
 
 ---
 
+## v4.7.1 · 2026-09-04（账号互通前端 + 一键跳 oiwb）
+- ✨ **「🚀 去 oiwb」侧边栏入口**：已登录用户点击 → 后台签 5 分钟一次性短票 → 自动跳 oiwb 并登录（零手动）；未登录则弹登录框
+- 📥 **新建页支持外部预填**：oiwb 等来源带 \`?title=&tags=&back=oiwb\` 跳 \`/new\`，自动填好标题/标签，并显示「↩ 返回 oiwb」链接
+- 🔒 全程可降级：mdqp 不可达时 oiwb 仍完全本地可用；短票一次性 + 5 分钟过期，跳错地址也不泄露账号
+
+---
+
+## v4.7.0 · 2026-09-04（账号互通后端 · O1-1 地基）
+- 🔗 **跨站账号互通后端上线**：新增 6 个 API，为 mdqp 与 oiwb 共用一套账号打地基
+  - \`POST /api/auth/ticket\`：已登录用户申请 5 分钟一次性短票（jti 入库查重）
+  - \`POST /api/auth/exchange\`：用 ticket 换 1 小时 access JWT + 30 天 refresh JWT（一次性，复用即作废）
+  - \`POST /api/auth/refresh\`：用 refresh 换新 token（不重发 refresh，防无限续期）
+  - \`POST /api/auth/revoke-token\`：吊销 jti（幂等）
+  - \`POST /api/oiwb/sync\` / \`GET /api/oiwb/sync\`：登录态下推送 / 拉取 oiwb 数据快照（≤1MB，UPSERT 入 \`oiwb_snapshots\`）
+- 🗄 新增数据表 \`oiwb_tickets\`、\`oiwb_snapshots\`（已反查验证存在）
+- ✅ 端到端验证全过（9 步 happy path + 5 个负例）
+
+---
+
 ## v4.6.2 · 2026-09-04（主页也能搜私有 + 一波可见性修复）
 - 🏠 **主页搜索我的剪贴板**：主页「公开剪贴板」标题旁新增「🌐 公开 / ⭐ 我的」范围切换（登录用户可见）。切到「⭐ 我的」后，主页搜索框直接搜**自己的全部剪贴板（含私有）**，支持置顶按钮，标题与搜索框占位随范围变化。游客不显示切换
 - 🧭 **修复「浏览器兼容性」点击无效**：页脚按钮弹窗打开时漏加 \`show\` 类导致弹窗永远不显示（v4.6 引入的回归），已修复
@@ -2499,6 +2518,18 @@ function applyCpoauthState(ok) {
   }
 }
 
+// O1-1：oiwb 跨站账号互通目标站（oiwb 部署到 Pages 后启用；改这里即可切换地址）
+const OIWB_BASE = 'https://oiwb.pages.dev';
+
+// O1-1：已登录用户点「去 oiwb」→ 后台签 5 分钟一次性短票 → 跳 oiwb 自动登录
+async function goOiwb() {
+  if (!state.me || state.me.type !== 'user') { openAuthModal('login'); toast('登录后可直接跳 oiwb 并自动登录', 'info'); return; }
+  toast('正在签发登录凭证…', 'info');
+  const { ok, data } = await api('/api/auth/ticket', { method: 'POST' });
+  if (!ok || !data || !data.ticket) { toast('签发失败，请稍后重试', 'err'); return; }
+  location.href = OIWB_BASE + '?ticket=' + encodeURIComponent(data.ticket);
+}
+
 function openAuthModal(mode = 'login') {
   authMode = mode || 'login';
   const modal = $('#authModal'); if (!modal) return;
@@ -2862,6 +2893,7 @@ window.addEventListener('popstate', render);
   const ov = $('#navOverlay'); if (ov) ov.onclick = closeNav; setupCmdk();
   setupAuthModal(); loadAuthMethods();
   setupSetPwModal(); setupRefreshGuide(); setupSettingsModal(); setupNotifBell();
+  const navOiwb = $('#navOiwb'); if (navOiwb) navOiwb.onclick = (e) => { e.preventDefault(); goOiwb(); };
   installErrorReporter(); // v4.5.2：报错自动捕获 + 一键反馈
   // 侧边栏折叠（仅桌面生效，状态持久化）
   const st = $('#sidebarToggle');
