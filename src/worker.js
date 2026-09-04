@@ -19,7 +19,7 @@ const app = new Hono();
 
 const GUEST_LIMIT = 5;
 const PAGE_SIZE = 20;
-const VERSION = '4.5.2';
+const VERSION = '4.6.2';
 const SEARCH_MAX = 100;
 const RESERVED = new Set([
   'api', 'raw', 'new', 'edit', 'u', 'user', 'users', 'admin', 'login', 'logout',
@@ -185,6 +185,22 @@ function parseJSON(s) {
   try { return JSON.parse(s); } catch { return null; }
 }
 
+/** v4.6: 标签解析（存 "a,b,c" 逗号分隔，输出去重后的小写数组） */
+function parseTags(s) {
+  if (!s) return [];
+  return String(s).split(',').map((t) => t.trim().toLowerCase()).filter(Boolean).slice(0, 30);
+}
+/** v4.6: 标签序列化（去空、去重、限长，返回 "a,b,c"） */
+function serializeTags(arr, maxTags) {
+  if (!Array.isArray(arr)) return '';
+  const clean = [];
+  for (const raw of arr) {
+    const t = String(raw || '').trim().toLowerCase().replace(/[,，\s]+/g, '-').slice(0, 20);
+    if (t && !clean.includes(t)) clean.push(t);
+  }
+  return clean.slice(0, maxTags > 0 ? maxTags : 30).join(',');
+}
+
 /** 信任等级（v4.5.2 起为「维持制」：高等级需持续活跃，不达标会自动回落，但不发降级通知）
  *  0 新手上路 · 1 常驻用户 · 2 活跃用户 · 3 核心用户
  *  入参：clip_count 总板数 / clips_14d 近 14 天新建 / clips_5d 近 5 天新建 / invite_count / created_at / role */
@@ -218,6 +234,83 @@ const TRUST_RULE_TEXT = [
   '每 2 周创建 ≥5 个剪贴板，且邀请 ≥1 位好友',
   '满足活跃用户全部条件，且每 5 天创建 ≥1 个剪贴板、邀请 ≥3 位好友'
 ];
+
+/* ============ v4.6 权益矩阵：让等级「有赏有罚」 ============
+ * 设计原则：
+ *   · L1 就有「信任类」权益（导出数据、版本历史）——门槛低，给安全感
+ *   · L2 起才有「权重类」权益（字数、日/月限额、自定义短链、标签）——活跃才配得更多
+ *   · VIP / 站长 / 开发者 = 全档拉满，且字数不受硬分级限制
+ * -1 表示「不限」。HARD_CHAR_CAP 是防滥用硬顶，任何人都不能越过。 */
+const HARD_CHAR_CAP = 20000;
+const BENEFITS = {
+  0: { char: 1500, daily: 5, monthly: 50, tags: 3, private_clips: 50, revisions: 0, custom_slug: false, export_data: false, badge: false },
+  1: { char: 1500, daily: 10, monthly: 100, tags: 10, private_clips: 200, revisions: 3, custom_slug: false, export_data: true, badge: false },
+  2: { char: 5000, daily: 20, monthly: 300, tags: 30, private_clips: 1000, revisions: 10, custom_slug: true, export_data: true, badge: true },
+  3: { char: -1, daily: 50, monthly: 800, tags: -1, private_clips: -1, revisions: 50, custom_slug: true, export_data: true, badge: true }
+};
+const BENEFIT_META = [
+  { key: 'char', label: '单篇字数', unit: ' 等效字' },
+  { key: 'daily', label: '每日新建', unit: ' 个' },
+  { key: 'monthly', label: '每月新建', unit: ' 个' },
+  { key: 'private_clips', label: '私有板容量', unit: ' 个' },
+  { key: 'tags', label: '标签数上限', unit: ' 个/篇' },
+  { key: 'revisions', label: '版本历史', unit: ' 版' },
+  { key: 'custom_slug', label: '自定义短链', unit: '' },
+  { key: 'export_data', label: '导出全部数据', unit: '' },
+  { key: 'badge', label: '专属徽章', unit: '' }
+];
+
+/** 取某身份的权益；VIP / 站长 / 开发者一律拉满 */
+function benefitsFor(level, isVip, isStaff) {
+  const lv = Math.max(0, Math.min(3, Number(level) || 0));
+  const b = Object.assign({}, BENEFITS[isStaff ? 3 : lv]);
+  if (isVip || isStaff) {
+    b.char = -1; b.daily = -1; b.monthly = -1; b.tags = -1;
+    b.private_clips = -1; b.revisions = -1;
+    b.custom_slug = true; b.export_data = true; b.badge = true;
+  }
+  return b;
+}
+/** -1 → '不限'；布尔 → ✅/❌ */
+function fmtBenefit(v, unit) {
+  if (v === -1) return '不限';
+  if (typeof v === 'boolean') return v ? '✅' : '❌';
+  return v + (unit || '');
+}
+/** 权益明细（前端直接渲染） */
+function benefitList(b) {
+  return BENEFIT_META.map((m) => ({ key: m.key, label: m.label, value: fmtBenefit(b[m.key], m.unit) }));
+}
+/** 升到下一级能解锁什么（只列有提升的项） */
+function nextLevelUnlocks(level, isVip, isStaff) {
+  if (isVip || isStaff || level >= 3) return [];
+  const cur = benefitsFor(level, false, false), nxt = benefitsFor(level + 1, false, false);
+  return BENEFIT_META.filter((m) => cur[m.key] !== nxt[m.key])
+    .map((m) => `${m.label}：${fmtBenefit(cur[m.key], m.unit)} → ${fmtBenefit(nxt[m.key], m.unit)}`);
+}
+/** 字数上限（-1 视为不限，但仍受 HARD_CHAR_CAP 硬顶约束） */
+function charLimitOf(b) { return b.char === -1 ? HARD_CHAR_CAP : b.char; }
+
+/** v4.6: 组装信任等级入参（查一次用户 + 一次窗口统计），供 computeTrustLevel 使用 */
+async function buildTrustBase(db, userId) {
+  const u = await db.prepare('SELECT created_at, invite_count, is_vip, role FROM users WHERE id = ?').bind(String(userId)).first();
+  const st = await getTrustStats(db, userId);
+  return {
+    clip_count: st.total, clips_14d: st.c14, clips_5d: st.c5,
+    created_at: u?.created_at, invite_count: u?.invite_count || 0,
+    is_vip: !!u?.is_vip, role: u?.role
+  };
+}
+
+/** v4.6: 解析身份的完整权益包（含信任等级），一处算好到处用
+ *  @returns {{level:number, isVip:boolean, isStaff:boolean, benefits:object, charLimit:number, unlimited:boolean}} */
+async function resolveBenefits(db, identity, trustBase) {
+  const isVip = await isVipIdentity(db, identity);
+  const isStaff = await isAdminIdentity(db, identity);
+  const level = trustBase ? computeTrustLevel(trustBase) : 0;
+  const benefits = benefitsFor(level, isVip, isStaff);
+  return { level, isVip, isStaff, benefits, charLimit: charLimitOf(benefits), unlimited: benefits.char === -1 };
+}
 
 /** 统计窗口期内的剪贴板数（created_at 存 UTC 'YYYY-MM-DD HH:MM:SS'） */
 async function getTrustStats(db, userId) {
@@ -688,7 +781,9 @@ app.get('/api/clips/:clipId', async (c) => {
     login_required: !!r.login_required,
     can_edit: mine,
     created_at: r.created_at,
-    updated_at: r.updated_at
+    updated_at: r.updated_at,
+    // v4.6: 标签（详情/编辑页回显用）
+    tags: parseTags(r.tags)
   });
 });
 
@@ -723,19 +818,23 @@ app.post('/api/clips', async (c) => {
   if (!content.trim()) return c.json({ error: 'empty_content', message: '内容不能为空' }, 400);
   if (content.length > 400000) return c.json({ error: 'too_large', message: '内容超过 400KB' }, 413);
 
-  // === v4.0: 字数限制 ===
-  const globalCharLimit = parseInt(await getSiteSetting(db, 'global_char_limit', '300')) || 300;
-  const charLimit = globalCharLimit; // 后续可加 per-user 覆盖
-  const charCount = countChars(content);
+  // === v4.6: 字数按信任等级 / VIP 分级（不再是全站一刀切 300） ===
   const isAdmin = await isAdminIdentity(db, identity);
-  const isVip = await isVipIdentity(db, identity); // VIP 豁免字数限制
-  if (!isAdmin && !isVip && charCount > charLimit) {
+  const isVip = await isVipIdentity(db, identity);
+  const trustBase = identity.type === 'user'
+    ? await buildTrustBase(db, identity.userId)
+    : null;
+  const ben = await resolveBenefits(db, identity, trustBase);
+  const charLimit = ben.charLimit;
+  const charCount = countChars(content);
+  if (charCount > charLimit) {
     return c.json({
       error: 'char_limit_exceeded',
-      message: `内容超过字数限制（${charCount}/${charLimit} 等效字）。注：非英文字符算 1 字，英文/标点算 0.5 字`,
+      message: `内容 ${charCount} 等效字，超出你当前的 ${charLimit} 字上限（注：非英文字符算 1 字，英文/标点算 0.5 字）。${ben.unlimited ? '' : '提升信任等级可解锁更高额度。'}`,
       char_count: charCount,
       limit: charLimit,
-      tip: isVip ? '' : 'VIP 可豁免字数限制'
+      trust_level: ben.level,
+      tip: ben.unlimited ? '' : nextLevelUnlocks(ben.level, ben.isVip, ben.isStaff).find((s) => s.startsWith('单篇字数')) || '升级信任等级可解锁更高额度'
     }, 400);
   }
 
@@ -780,18 +879,19 @@ app.post('/api/clips', async (c) => {
       const now = new Date();
       const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString().slice(0, 19).replace('T', ' ');
       const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString().slice(0, 19).replace('T', ' ');
-      const dailyLimit = parseInt(await getSiteSetting(db, 'user_daily_limit', '5')) || 5;
-      const monthlyLimit = parseInt(await getSiteSetting(db, 'user_monthly_limit', '50')) || 50;
+      // v4.6: 额度按信任等级分级（-1 = 不限）
+      const dailyLimit = ben.benefits.daily;
+      const monthlyLimit = ben.benefits.monthly;
 
       const [dayCnt, monthCnt] = await Promise.all([
         db.prepare("SELECT COUNT(*) as cnt FROM clipboards WHERE owner_type = 'user' AND owner_id = ? AND created_at >= ?").bind(ownerId, todayStart).first(),
         db.prepare("SELECT COUNT(*) as cnt FROM clipboards WHERE owner_type = 'user' AND owner_id = ? AND created_at >= ?").bind(ownerId, monthStart).first()
       ]);
 
-      if (monthCnt.cnt >= monthlyLimit) {
+      if (monthlyLimit !== -1 && monthCnt.cnt >= monthlyLimit) {
         return c.json({ error: 'monthly_limit', message: `本月剪贴板数量已达上限（${monthlyLimit} 个）`, count: monthCnt.cnt, limit: monthlyLimit, period: 'monthly' }, 403);
       }
-      if (dayCnt.cnt >= dailyLimit) {
+      if (dailyLimit !== -1 && dayCnt.cnt >= dailyLimit) {
         return c.json({ error: 'daily_limit', message: `今日剪贴板数量已达上限（${dailyLimit} 个），明天再来吧`, count: dayCnt.cnt, limit: dailyLimit, period: 'daily' }, 403);
       }
     }
@@ -829,14 +929,17 @@ app.post('/api/clips', async (c) => {
   const loginRequired = body.login_required ? 1 : 0;
   const maxReaders = Math.max(0, parseInt(body.max_readers || '0') || 0);
 
+  // v4.6: 标签（按信任等级限额截断）
+  const tagsStr = serializeTags(body.tags, ben.benefits.tags);
+
   await db.prepare(
     `INSERT INTO clipboards
       (clip_id, title, content, owner_type, owner_id, owner_name, is_public, editable_by_anyone,
-       password_hash, expires_at, max_views, login_required, max_readers)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).bind(clipId, title, content, ownerType, ownerId, ownerName, isPublic ? 1 : 0, editableByAnyone, passwordHash, expiresAt, maxViews, loginRequired, maxReaders).run();
+       password_hash, expires_at, max_views, login_required, max_readers, tags)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(clipId, title, content, ownerType, ownerId, ownerName, isPublic ? 1 : 0, editableByAnyone, passwordHash, expiresAt, maxViews, loginRequired, maxReaders, tagsStr).run();
 
-  return c.json({ ok: true, clip_id: clipId, owner_type: ownerType });
+  return c.json({ ok: true, clip_id: clipId, owner_type: ownerType, tags: parseTags(tagsStr) });
 });
 
 // ========== 修改剪贴板（支持修改短链） ==========
@@ -862,14 +965,20 @@ app.put('/api/clips/:clipId', async (c) => {
   if (!content.trim()) return c.json({ error: 'empty_content' }, 400);
   const isPublic = body.is_public !== undefined ? (body.is_public ? 1 : 0) : r.is_public;
 
-  // 字数限制检查（修改时也校验；管理员与有效 VIP 豁免）
+  // v4.6: 字数按信任等级 / VIP 分级（修改时同样校验）
   const isAdmin = admin;
   const isVip = await isVipIdentity(db, identity);
-  if (!isAdmin && !isVip) {
-    const globalCharLimit = parseInt(await getSiteSetting(db, 'global_char_limit', '300')) || 300;
-    if (countChars(content) > globalCharLimit) {
-      return c.json({ error: 'char_limit_exceeded', message: `内容超过字数限制（${globalCharLimit} 等效字）` }, 400);
-    }
+  const editTrustBase = identity.type === 'user' ? await buildTrustBase(db, identity.userId) : null;
+  const editBen = await resolveBenefits(db, identity, editTrustBase);
+  const editCharCount = countChars(content);
+  if (editCharCount > editBen.charLimit) {
+    return c.json({
+      error: 'char_limit_exceeded',
+      message: `内容 ${editCharCount} 等效字，超出你当前的 ${editBen.charLimit} 字上限`,
+      char_count: editCharCount,
+      limit: editBen.charLimit,
+      tip: editBen.unlimited ? '' : '提升信任等级可解锁更高额度'
+    }, 400);
   }
 
   let expiresAt = r.expires_at, maxViews = r.max_views, passwordHash = r.password_hash;
@@ -898,12 +1007,15 @@ app.put('/api/clips/:clipId', async (c) => {
   const loginRequired = body.login_required !== undefined ? (body.login_required ? 1 : 0) : (r.login_required || 0);
   const maxReaders = body.max_readers !== undefined ? Math.max(0, parseInt(body.max_readers) || 0) : (r.max_readers || 0);
 
+  // v4.6: 标签（未传则保持原值；传了按等级限额截断）
+  const tagsStr = body.tags !== undefined ? serializeTags(body.tags, editBen.benefits.tags) : (r.tags || '');
+
   await db.prepare(
     `UPDATE clipboards SET title = ?, content = ?, is_public = ?, expires_at = ?, max_views = ?,
-       password_hash = ?, updated_at = datetime('now'), login_required = ?, max_readers = ? WHERE clip_id = ?`
-  ).bind(title, content, isPublic, expiresAt, maxViews, passwordHash, loginRequired, maxReaders, newClipId).run();
+       password_hash = ?, updated_at = datetime('now'), login_required = ?, max_readers = ?, tags = ? WHERE clip_id = ?`
+  ).bind(title, content, isPublic, expiresAt, maxViews, passwordHash, loginRequired, maxReaders, tagsStr, newClipId).run();
 
-  return c.json({ ok: true, clip_id: newClipId });
+  return c.json({ ok: true, clip_id: newClipId, tags: parseTags(tagsStr) });
 });
 
 // ========== 删除 ==========
@@ -1000,12 +1112,13 @@ app.get('/api/me', async (c) => {
     const uRow = await db.prepare(
       `SELECT username, role, bio, signature, linked_accounts, is_vip, vip_until,
               invite_code, invite_count, feature_flags, password_hash,
-              email, email_verified, no_cpoauth_nudge
+              email, email_verified, no_cpoauth_nudge, created_at
        FROM users WHERE id = ?`
     ).bind(String(identity.userId)).first();
     const clips = await db.prepare(
       `SELECT clip_id, title, content, is_public, editable_by_anyone, password_hash, expires_at,
-              max_views, views, created_at, updated_at
+              max_views, views, created_at, updated_at,
+              COALESCE(tags, '') AS tags, COALESCE(pinned, 0) AS pinned
        FROM clipboards WHERE owner_type = 'user' AND owner_id = ? ORDER BY created_at DESC LIMIT 100`
     ).bind(String(identity.userId)).all();
 
@@ -1017,22 +1130,29 @@ app.get('/api/me', async (c) => {
       db.prepare("SELECT COUNT(*) as cnt FROM clipboards WHERE owner_type = 'user' AND owner_id = ? AND created_at >= ?").bind(String(identity.userId), todayStart).first(),
       db.prepare("SELECT COUNT(*) as cnt FROM clipboards WHERE owner_type = 'user' AND owner_id = ? AND created_at >= ?").bind(String(identity.userId), monthStart).first()
     ]);
-    const dailyLimit = parseInt(await getSiteSetting(db, 'user_daily_limit', '5')) || 5;
-    const monthlyLimit = parseInt(await getSiteSetting(db, 'user_monthly_limit', '50')) || 50;
-    const charLimit = parseInt(await getSiteSetting(db, 'global_char_limit', '300')) || 300;
-    // v4.5.2: 信任等级维持制所需的窗口统计
+    // v4.5.2: 信任等级维持制所需的窗口统计；v4.6: 一并算出权益包
     const trustSt = await getTrustStats(db, identity.userId);
     const trustBase = {
       clip_count: trustSt.total, clips_14d: trustSt.c14, clips_5d: trustSt.c5,
       created_at: uRow?.created_at, invite_count: uRow?.invite_count || 0,
       is_vip: !!uRow?.is_vip, role: uRow?.role
     };
+    const ben = await resolveBenefits(db, identity, trustBase);
+    const level = ben.level;
+    const dailyLimit = ben.benefits.daily;
+    const monthlyLimit = ben.benefits.monthly;
+    const charLimit = ben.charLimit;
 
     return c.json({
       authenticated: true, type: 'user', userId: identity.userId, name: identity.name,
       // password 登录用的账号名（引导用户设置密码时需要展示）
       username: uRow?.username || '',
       char_limit: charLimit,
+      // v4.6: 权益矩阵 —— 让等级真正「有赏有罚」
+      benefits: benefitList(ben.benefits),
+      benefits_raw: ben.benefits,
+      next_level_unlock: nextLevelUnlocks(level, ben.isVip, ben.isStaff),
+      unlimited_char: ben.unlimited,
       avatar: identity.avatar, sub: identity.sub,
       role: uRow?.role || 'user', bio: uRow?.bio || '', signature: uRow?.signature || '',
       linked_accounts: parseLinkedAccounts(uRow?.linked_accounts),
@@ -1041,8 +1161,8 @@ app.get('/api/me', async (c) => {
       // v4.4: cpoauth 绑定态（用于刷新引导）、邮箱（来自 cpoauth）、信任等级
       cpoauth_bound: !!identity.sub,
       email: uRow?.email || '', email_verified: !!uRow?.email_verified,
-      trust_level: computeTrustLevel(trustBase),
-      trust_progress: trustProgress(trustBase, computeTrustLevel(trustBase)),
+      trust_level: level,
+      trust_progress: trustProgress(trustBase, level),
       no_cpoauth_nudge: !!uRow?.no_cpoauth_nudge,
       invite_code: uRow?.invite_code || '', invite_count: uRow?.invite_count || 0,
       feature_flags: parseFeatureFlags(uRow?.feature_flags),
@@ -1051,7 +1171,8 @@ app.get('/api/me', async (c) => {
         clip_id: r.clip_id, title: r.title || '无标题', preview: makePreview(r.content),
         has_password: !!r.password_hash, is_public: !!r.is_public,
         editable_by_anyone: !!r.editable_by_anyone, expires_at: r.expires_at,
-        max_views: r.max_views, views: r.views, created_at: r.created_at
+        max_views: r.max_views, views: r.views, created_at: r.created_at,
+        tags: parseTags(r.tags), pinned: !!r.pinned
       }))
     });
   }
@@ -1060,7 +1181,7 @@ app.get('/api/me', async (c) => {
     const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 19).replace('T', ' ');
     const cnt = (await db.prepare("SELECT COUNT(*) as cnt FROM clipboards WHERE owner_type = 'guest' AND owner_id = ? AND created_at >= ?").bind(identity.guestId, weekAgo).first()).cnt;
     const guestWeeklyLimit = parseInt(await getSiteSetting(db, 'guest_weekly_limit', '5')) || 5;
-    const charLimit = parseInt(await getSiteSetting(db, 'global_char_limit', '300')) || 300;
+    const charLimit = parseInt(await getSiteSetting(db, 'global_char_limit', '1500')) || 1500;
     return c.json({
       authenticated: false, type: 'guest', guestId: identity.guestId,
       count: cnt, limit: guestWeeklyLimit, period: 'weekly',
@@ -1070,6 +1191,121 @@ app.get('/api/me', async (c) => {
   }
 
   return c.json({ authenticated: false, type: 'none' });
+});
+
+// ========== v4.6: 我的剪贴板 2.0（私有可搜 · 标签 · 置顶 · 排序） ==========
+// GET /api/me/clips?q=&tag=&sort=&pinned=1
+// 与首页 /api/clips 的区别：这里能搜到「自己的私有板」，首页只列公开板
+app.get('/api/me/clips', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'unauthorized', message: '请先登录' }, 401);
+
+  const q = (c.req.query('q') || '').trim().toLowerCase();
+  const tag = (c.req.query('tag') || '').trim().toLowerCase();
+  const sort = c.req.query('sort') || 'updated';
+  const onlyPinned = c.req.query('pinned') === '1';
+  const limit = Math.min(300, Math.max(1, parseInt(c.req.query('limit') || '200') || 200));
+  const uid = String(identity.userId);
+
+  // 白名单排序，杜绝 SQL 注入；置顶恒优先
+  const ORDER = {
+    updated: 'pinned DESC, updated_at DESC',
+    created: 'pinned DESC, created_at DESC',
+    views: 'pinned DESC, views DESC, updated_at DESC',
+    title: 'pinned DESC, title ASC'
+  };
+  const orderBy = ORDER[sort] || ORDER.updated;
+
+  let where = "WHERE owner_type = 'user' AND owner_id = ?";
+  const binds = [uid];
+  if (q) {
+    where += " AND (LOWER(COALESCE(title,'')) LIKE ? OR LOWER(content) LIKE ? OR LOWER(COALESCE(tags,'')) LIKE ?)";
+    const like = '%' + q + '%';
+    binds.push(like, like, like);
+  }
+  if (tag) {
+    // 精确匹配单个标签：tags 形如 "a,b,c"，两侧补逗号后做精确包含
+    where += " AND (',' || LOWER(COALESCE(tags,'')) || ',') LIKE ?";
+    binds.push('%,' + tag + ',%');
+  }
+  if (onlyPinned) where += ' AND pinned = 1';
+
+  const rows = await db.prepare(
+    `SELECT clip_id, title, content, is_public, editable_by_anyone, password_hash, expires_at,
+            max_views, views, created_at, updated_at,
+            COALESCE(tags,'') AS tags, COALESCE(pinned,0) AS pinned
+     FROM clipboards ${where} ORDER BY ${orderBy} LIMIT ?`
+  ).bind(...binds, limit).all();
+
+  // 标签云（基于该用户全部剪贴板统计，不受筛选影响）
+  const tagRows = await db.prepare(
+    "SELECT COALESCE(tags,'') AS tags FROM clipboards WHERE owner_type = 'user' AND owner_id = ?"
+  ).bind(uid).all();
+  const cloud = new Map();
+  for (const r of (tagRows.results || [])) {
+    for (const t of parseTags(r.tags)) cloud.set(t, (cloud.get(t) || 0) + 1);
+  }
+  const tags = [...cloud.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([name, count]) => ({ name, count }));
+
+  const totalRow = await db.prepare(
+    "SELECT COUNT(*) AS cnt FROM clipboards WHERE owner_type = 'user' AND owner_id = ?"
+  ).bind(uid).first();
+
+  return c.json({
+    clips: (rows.results || []).map((r) => ({
+      clip_id: r.clip_id, title: r.title || '无标题', preview: makePreview(r.content),
+      has_password: !!r.password_hash, is_public: !!r.is_public,
+      editable_by_anyone: !!r.editable_by_anyone, expires_at: r.expires_at,
+      max_views: r.max_views, views: r.views || 0,
+      created_at: r.created_at, updated_at: r.updated_at,
+      tags: parseTags(r.tags), pinned: !!r.pinned
+    })),
+    tags, total: Number(totalRow?.cnt || 0), matched: (rows.results || []).length
+  });
+});
+
+// ========== v4.6: 置顶 / 改标签 ==========
+// PATCH /api/clips/:id/meta  body: { pinned?: 0|1, tags?: string[] }
+app.patch('/api/clips/:id/meta', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  const clipId = c.req.param('id');
+  const r = await db.prepare(
+    "SELECT owner_type, owner_id, tags FROM clipboards WHERE clip_id = ?"
+  ).bind(clipId).first();
+  if (!r) return c.json({ error: 'not_found' }, 404);
+
+  const isOwner = identity.type === 'user' && String(identity.userId) === String(r.owner_id) && r.owner_type === 'user';
+  const admin = await isAdminIdentity(db, identity);
+  if (!isOwner && !admin) return c.json({ error: 'forbidden', message: '只能修改自己的剪贴板' }, 403);
+
+  let body;
+  try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
+
+  // 标签数上限按信任等级
+  const trustBase = identity.type === 'user' ? await buildTrustBase(db, identity.userId) : null;
+  const ben = await resolveBenefits(db, identity, trustBase);
+  const maxTags = ben.benefits.tags; // -1 = 不限
+
+  const sets = [];
+  const binds = [];
+  if (body.pinned !== undefined) {
+    sets.push('pinned = ?');
+    binds.push(body.pinned ? 1 : 0);
+  }
+  if (body.tags !== undefined) {
+    sets.push('tags = ?');
+    binds.push(serializeTags(body.tags, maxTags));
+  }
+  if (!sets.length) return c.json({ error: 'nothing_to_update' }, 400);
+  sets.push("updated_at = datetime('now')");
+  binds.push(clipId);
+
+  await db.prepare(`UPDATE clipboards SET ${sets.join(', ')} WHERE clip_id = ?`).bind(...binds).run();
+  const fresh = await db.prepare("SELECT COALESCE(tags,'') AS tags, COALESCE(pinned,0) AS pinned FROM clipboards WHERE clip_id = ?").bind(clipId).first();
+  return c.json({ ok: true, tags: parseTags(fresh?.tags), pinned: !!fresh?.pinned, max_tags: maxTags });
 });
 
 // ========== 修改资料 ==========
