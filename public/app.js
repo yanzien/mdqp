@@ -3,10 +3,130 @@
  *       评论(@mention 50字/条) + 登录门禁 + 唯一读者追踪 + 短链修改 + 公告置顶 + 管理员权限颜色梯度
  */
 
+/* 复制文本到剪贴板 —— 修复反馈 #2/#3/#8：copy() 被 6 处调用却从未定义 → ReferenceError
+ * 兼容老浏览器：优先 navigator.clipboard，不支持/失败时降级 execCommand('copy') */
+function copy(text, msg) {
+  var t = (text == null ? '' : String(text));
+  function legacy() {
+    try {
+      var ta = document.createElement('textarea');
+      ta.value = t;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.top = '-1000px';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      ta.setSelectionRange(0, t.length);
+      var ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      return ok;
+    } catch (e) { return false; }
+  }
+  function ok() { if (msg) toast(msg, 'ok'); }
+  function bad() { toast('复制失败，请手动选择复制', 'err'); }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    try { navigator.clipboard.writeText(t).then(ok, function () { legacy() ? ok() : bad(); }); return; }
+    catch (e) { /* 继续降级 */ }
+  }
+  legacy() ? ok() : bad();
+}
+
 // 更新日志：随代码发布自动同步
 const CHANGELOG_MD = `# 📝 更新日志
 
-mdqp 的主要版本变动记录。当前部署版本 **v4.6.2**。
+mdqp 的主要版本变动记录。当前部署版本 **v4.10.1**。
+
+---
+
+## v4.10.1 · 2026-09-18（补：设置页来源修改入口）
+
+- 🐞 **补做 v4.10.0 的承诺**：v4.10.0 起弹窗与帮助页都写了「来源可随时在设置里修改」，但**设置弹窗当时没有入口**——填过一次后 \`source_set_at\` 写入、\`maybeAskSource\` 永久不再弹，等于填错锁死、无处可改。现已在「我的 → ⚙️ 设置 → 账号与安全」新增「📊 我的来源」行（显示当前来源 + 补充说明）和「修改」按钮，点开后复用来源弹窗并**预选当前值**，提交即覆盖。
+  - 这跟之前「300 字」「频率限制」是同一类病：文案/注释承诺了、代码没落地。已用同一套自检思路（grep 接口 + 文档一致性）堵住。
+
+---
+
+## v4.10.0 · 2026-09-12（注册来源收集 + 埋点补全与去重）
+
+- 📊 **用户来源渠道收集**：用户首次登录后，弹窗询问「你是怎么知道 mdqp 的」，选项含线下分享 / 社交平台分享 / OJ 分享 / 其他分享 / 随便点到 / 看到广告 / 搜索引擎搜到 / 不方便说；可填补充说明（如具体平台）。已填写（或选「不方便说」）后不再提醒；关闭弹窗本会话不再问，反复跳过（≥3 次）后彻底不再打扰。
+  - 入库：\`users\` 新增 \`source\` / \`source_detail\` / \`source_set_at\` 三列；\`PATCH /api/me\` 支持上报（白名单校验，仅允许已知渠道）；\`GET /api/me\` 返回这三字段。
+  - 后台用户列表新增「来源」列（含补充说明），「📊 数据看板」新增「用户来源分布」统计（人数 + 占比）。
+  - 注册时间 \`users.created_at\` 早已入库并在个人页「加入于」展示，本次仅补全前端取数。
+- 🐞 **修 M3 埋点两处不实**：① \`/api/events\` 注释谎称「靠频率限制兜底」，实际从未实现——现已诚实标注防护组合，并**真补了 page.view 5 分钟按 uid 去重**（避免刷新刷数据，保证 DAU 真实可信）；② 新增请求体 16KB 上限 + 既有白名单 / 字段截断 / 单请求 ≤10 条。
+- ✅ **补 page.view 前端埋点**：此前全站只有 \`clip.view\` 一个调用点，DAU 完全测不出。现每次页面加载上报一次 \`page.view\`（按会话幂等），配合服务端去重，DAU 终于可统计。
+- 新增索引 \`idx_events_uid_type(uid, type, created_at)\` 加速去重查询；新增迁移脚本 \`migrate_source.sql\`。
+
+---
+
+## v4.9.0 · 2026-09-10（M3 埋点体系 + 数据看板）
+
+- **新增埋点体系（M3）**：新建 \`events\` 表（\`app\`/\`type\`/\`uid\`/\`ref\`/\`meta\`/\`created_at\`），记录剪贴板创建与查看、登录票据签发、oiwb 云端推送 / 恢复、片段库搜索与打开等关键行为。
+- **新增 \`POST /api/events\`**：公开上报端点，事件类型走**白名单**（未在名单内一律丢弃），单次最多 10 条；埋点为旁路，失败静默，绝不影响主流程。
+- **新增 \`GET /api/admin/events/summary\`**：仅管理员，返回近 N 天总事件数、活跃用户数（去重）、按事件类型聚合、按天趋势。
+- **后台新增「📊 数据看板」标签页**：支持 1/7/30/90 天切换，展示事件排行与每日趋势（此前 O1 到底有没有人用只能靠猜）。
+- 服务端在三个关键路径自动打点：剪贴板创建（\`clip.create\`）、签发跨站票据（\`auth.ticket\`）、oiwb 推送快照（\`oiwb.push\`）——比前端埋点更可靠。
+
+## v4.8.2 · 2026-09-10（用户名后的身份 tag）
+
+- 🏷 **用户名后显示身份 tag**：首页卡片与剪贴板页的作者名后面，会跟着显示「🛡 管理员」「🛠 开发者」「⭐ VIP」标识。VIP 过期后自动不再显示，与站内 VIP 有效性判定保持一致。
+  - 后端：列表接口加 \`LEFT JOIN users\` 取作者 \`role / is_vip / vip_until\`；详情页接口补查作者身份；游客不显示任何 tag。
+- 🐞 修正 VIP 页面对比表里过时的「300 字」——实际分级规则早已是「默认 1500 / L2 5000 / L3·VIP·管理员不限」，页面文案终于与真实规则对齐。
+
+## v4.8.1 · 2026-09-09（新版本提示覆盖首次访问 + O0-3 排查）
+- 🎉 **新版本提示现在首次打开也会弹出**：调用处原为 \`if (seen && seen !== d.version)\`，那个 \`seen &&\` 守卫把「localStorage 里没有版本记录」的首次访问用户**全挡在了门外**——老用户能收到更新日志，新用户反而一次都看不到。现去掉该守卫，并对首次访问改用欢迎文案「🎉 欢迎使用 mdqp · 当前版本 vX」（对新用户说「已发布」不合语境）
+- 🧹 **O0-3 全量排查（四类扫描，0 真问题）**：容器 ID 缺失 / 无防护裸 fetch / 未定义函数 / JS 操作但 CSS 未定义的类。oiwb 103 个 ID 引用、mdqp 242 个 ID 引用全部有定义；\`oiwb* \` 自有函数无缺失；所有外部请求均已带超时或 catch。3 处告警经核实均为误报（vjudge 抓取脚本里的外部选择器、\`mdqpFetch\` 内部已带 signal、mdqp 的 class 定义在外部 \`style.css\`）
+- 📝 修正 \`worker.js\` 头部过时注释：仍写着「每板 300 字」，与 v4.6 落地的分级规则（L0/L1 1500、L2 5000、L3/VIP/站长不限，硬顶 20000）矛盾，已同步为分级描述
+
+## v4.8.0 · 2026-09-09（兼容性弹窗补全 + 兼容plus 带浏览器名）
+- 🔘 **「兼容良好」状态也给出两个下载入口**：此前兼容性弹窗只在「版本过低」时才有下载按钮，检测通过的用户只能看到一行文字。现在良好状态同样提供「腾讯软件中心镜像」与「Firefox 官方」两个按钮，以防万一（换台老机器 / 其他设备遇到问题）时不必再回来找入口
+- 🏷️ **「兼容plus」入口现在会带上浏览器名**：页脚链接与弹窗按钮此前是静态 \`href="/legacy"\`，跳过去后备用页不知道你用的是什么浏览器。现统一改为动态生成 \`/legacy?name=<浏览器名>\`，备用页能直接显示「检测到当前使用的是：Chrome 120」
+- 🛡️ **链接生成全程兜底**：拼 \`name\` 的任一步出错都 \`try/catch\` 降级为不带参数的 \`/legacy\`——**宁可少显示浏览器名，也绝不让备用页打不开**。备用页 \`legacy.html\` 自身读取 \`name\` 时同样有 try/catch，畸形编码（如 \`name=100%\`）最多不显示名称，页面主体照常渲染
+
+## v4.7.9 · 2026-09-09（兼容plus 路径回退 · 修复极老浏览器白屏）
+- 🐞 **修复「兼容plus」备用页在极老浏览器可能白屏**：原路径 \`/legacy.html\` 会被 Cloudflare Pages 以 **308 Permanent Redirect** 重定向到 \`/legacy\`，而 308 是 2014 年才定稿的状态码（RFC 7538）——**IE8 及以下根本不认识它**，遇到未知 3xx 可能不跟随跳转，直接渲染那个 **0 字节的空响应**，结果白屏。最讽刺的是：最需要这张备用页的浏览器，恰恰倒在这一跳上
+- 🔧 三处入口统一改回 \`/legacy\`：页脚「兼容plus」链接、兼容性弹窗按钮、自动兜底新标签页。\`/legacy\` 由 Pages 直出 **200**，零跳转，老浏览器无需理解任何新状态码
+
+## v4.7.8 · 2026-09-08（兼容plus 入口 + 侧边栏闪动修复）
+- 🔘 **「兼容plus」手动入口**：页脚「浏览器兼容性」右侧新增「兼容plus」链接，一键跳转到纯文本轻量备用页 \`/legacy\`；兼容性弹窗内也加了同款按钮。极旧浏览器用户无需等自动探测即可手动进入轻量模式
+- 🐞 **侧边栏展开不再「闪一下」**：折叠态下标签/品牌文字由 \`display:none\` 瞬时切换改为 \`max-width + opacity\` 平滑淡入，消除鼠标靠近时从旁/从下弹出的突兀感（参照 shadcn-admin 折叠栏做法）
+- 🔧 自动兜底打开的纯文本页路径统一为 \`/legacy\`（Cloudflare Pages 会自动去掉 .html 后缀）
+
+## v4.7.7 · 2026-09-08（老内核兼容 · 兜兜兜底 plus）
+- 🆘 **极老浏览器再补一层「纯文本备用页」**：检测到不兼容时，自动新开标签页跳 \`/legacy\`（纯文本、几乎零现代特性，IE6 也能渲染），并在弹窗内加「📄 在新标签页打开纯文本备用方案」手动按钮；备用页里下载链接以**纯文本网址**展示，底部注明「这是非常旧浏览器跳不出弹窗的备备用方案，如果另一个标签页弹窗能显示可以直接通过那里点击」
+
+## v4.7.6 · 2026-09-08（老内核兼容提示修复 + 侧边栏丝滑）
+- 🛡️ **老内核兼容提示真能弹出来了**：① 改用 \`createElement\`+\`insertBefore\`（不再用 \`document.write\`，IE 对 write 出来的 \`<style>\` 常失效导致提示看不见）；② 所有样式内联到每个元素，不依赖任何 \`<style>\` 块；③ 新增 ES6 语法能力探测（\`new Function\` 试解析 \`async/await\`），覆盖「能过特性检测却跑不了 ES6」的极老 Chrome
+- 🐞 **修掉老内核下仍报 \`Uncaught\` 白屏**：兼容检测通过时同步置 \`window.__MDQP_LEGACY\`，让 app.js 初始化守卫真正跳过 SPA 启动（此前标记名不一致，SPA 仍在后台崩溃）
+- 🎯 **侧边栏「靠近展开」不再抖**：用 \`.sidebar\` 的 \`mouseenter\`/\`mouseleave\` 替代 \`mousemove\`+\`clientX\` 阈值触发，消除边界来回抖动
+
+## v4.7.5 · 2026-09-07（反馈清单收尾：侧边栏 / 目录 / 标签 / 反馈公开）
+- 📌 **侧边栏改成「靠近展开、移开折叠」**（反馈 #6）：不再需要点钉子按钮固定。鼠标移到屏幕最左侧 24px 内自动展开，移开自动收起；想常驻展开就点一下钉子按钮（记忆到 localStorage），再点收起
+- 📑 **目录固定在右侧**（反馈 #6）：宽屏（≥1100px）下剪贴板 / 编辑器 / 页面三处目录改为右侧悬浮固定（不再沉在正文后面），窄屏维持原位不遮挡
+- 🏷 **标签终于看得见了**（反馈 #5）：根因是公开列表接口 \`/api/clips\` 的 SELECT 压根没查 \`tags\` 字段，首页卡片永远拿不到标签。已补上；同时在**查看页**也会显示标签，点击可跳首页按该标签搜索
+- 👀 **反馈人人可看**（反馈 #4）：\`/feedback\` 页非管理员也会展示反馈列表与处理进度（只读、脱敏，隐藏联系方式与已驳回条目），管理员仍可审核。重复问题不必再提
+- 🤫 **次要请求失败不再弹窗**：cpoauth 状态探测等次要请求失败时静默处理（登录框内提示即可），不再一进页面就砸出「网络请求失败」大弹窗
+- 🧩 **首页骨架缺失不再整页中断**（反馈 #9）：机房代理返回旧缓存 / 被截断的 HTML 时，\`#heroStats\` 等容器缺失会让首页渲染抛 null 异常、列表全空。现改为空值保护，并在顶部显示黄条「页面结构加载不完整 → Ctrl+F5 强制刷新」，不再静默空白
+
+---
+
+## v4.7.4 · 2026-09-07（加载失败兜底横幅）
+- 🛟 **脚本崩了也不再白屏**：新增独立于 \`app.js\` 的兜底横幅（装在 \`app.js\` **之前**）。原先的报错弹窗由 \`app.js\` 自己安装，一旦 \`app.js\` 自身崩溃或被网络拦截，那套兜底就一起没了——现在底部会浮出红条，写明失败原因，并提供「重新加载 / 去反馈 / 关闭」
+- 🔍 **「脚本没启动」看门狗**：初始化未跑完且主区无内容时主动提示（多为缓存旧文件或脚本被拦截），不再留一片空白让人以为是网络坏了
+- 📮 **一键带错去反馈**：点横幅的「去反馈」会把已捕获的错误自动填进反馈表单的「具体情况」，不用手抄
+- 💬 **微信内置浏览器引导**：手机微信里打开会浮出引导层——**箭头指向右上角「⋯」**，提示「在浏览器打开」，并给「复制网址」按钮（微信内无法直接跳外部浏览器）；点「仍要继续访问」本次会话内不再打扰
+
+---
+
+## v4.7.3 · 2026-09-07（老内核浏览器兜底提示）
+- 🧓 **IE / 旧 Edge 不再白屏**：新增一段**纯 ES5 + 自带内联样式**的兜底提示（不依赖 ES6，也不依赖站点 CSS 变量，否则提示自己也会渲染失败）。老内核打开即全屏提示「浏览器内核过旧」，并给出下载入口——这解释了机房里「只剩导航栏和底部按钮」的现象：主脚本用了 ES6，IE 一解析就整块不执行
+- ⬇ **新增国内镜像下载**：兼容性提示里加了 **Firefox · 腾讯软件中心镜像**（Win7+，机房下载比官网快），与 Firefox 官方链接并列，二选一即可
+- 🐞 **消除双层弹窗**：兜底遮罩生效时，页尾原有的兼容性弹窗自动让位，不再叠两层
+
+---
+
+## v4.7.2 · 2026-09-07（修复制报错 + 老浏览器复制降级）
+- 🐞 **修复「复制」按钮报错**：\`copy()\` 在 6 处被调用却**从未定义**，点「复制链接 / 复制内容 / 复制邀请码 / 复制邀请链接」直接抛 \`ReferenceError: copy is not defined\`（反馈 #2 / #3 / #8，累计 3 次上报）。已补齐实现
+- 🧓 **老浏览器降级**：优先 \`navigator.clipboard\`，不支持（老旧浏览器 / 非 HTTPS）时自动降级 \`execCommand('copy')\`，不再一点就失效
 
 ---
 
@@ -235,6 +355,22 @@ function roleBadge(role, opts = {}) {
   return '';
 }
 
+/** v4.8.2: 他人身份 tag —— 用在首页卡片与剪贴板页的用户名后面（管理员 / 开发者 / 有效 VIP）
+ *  VIP 需校验 vip_until 是否过期，过期就不再显示（与 isVip() 判定保持一致）。 */
+function ownerBadge(role, isVipFlag, vipUntil) {
+  if (role === 'developer') return '<span class="badge badge-role badge-dev owner-tag">🛠 开发者</span>';
+  if (role === 'admin') return '<span class="badge badge-role badge-admin badge-admin-lvl1 owner-tag">🛡 管理员</span>';
+  if (isVipFlag) {
+    let ok = true;
+    if (vipUntil) {
+      const t = new Date(String(vipUntil).replace(' ', 'T') + 'Z').getTime();
+      ok = Number.isFinite(t) ? t > Date.now() : true;
+    }
+    if (ok) return '<span class="badge badge-role badge-vip owner-tag">⭐ VIP</span>';
+  }
+  return '';
+}
+
 function toast(msg, type = 'ok') {
   const t = $('#toast'); t.textContent = msg; t.className = 'toast show ' + type;
   clearTimeout(t._t); t._t = setTimeout(() => (t.className = 'toast'), 2600);
@@ -242,6 +378,7 @@ function toast(msg, type = 'ok') {
 
 // v4.6: 新版本提示（首次见到新版本时一次性横幅，展示本次完整更新日志 + 两个按钮）
 function maybeShowVersionToast(oldVer, newVer) {
+  const isFirst = !oldVer; // 首次访问（localStorage 无版本记录）：同样弹出，但文案换欢迎语
   // 已经看过的就别再弹
   try { if (localStorage.getItem('mdqp_version_announced') === newVer) return; } catch (_) {}
   // 距离上次访问 < 30 秒（刚刷新自己）也跳过
@@ -270,7 +407,7 @@ function maybeShowVersionToast(oldVer, newVer) {
   banner.innerHTML = `
     <div class="vt-icon">✨</div>
     <div class="vt-body">
-      <div class="vt-title">v${esc(newVer)} 已发布 · 本次更新日志</div>
+      <div class="vt-title">${isFirst ? '🎉 欢迎使用 mdqp · 当前版本 v' + esc(newVer) : 'v' + esc(newVer) + ' 已发布'} · 本次更新日志</div>
       <div class="vt-content">${bodyHtml}</div>
     </div>
     <div class="vt-acts">
@@ -306,7 +443,8 @@ async function api(path, opts = {}) {
     res = await fetch(path, Object.assign({ credentials: 'same-origin' }, opts, { headers }));
   } catch (e) {
     // v4.5.2：网络层失败（断网 / DNS / 被拦截）自动上报，用户不用开 F12
-    reportError({ kind: 'api', message: '网络请求失败：' + path, stack: (e && e.stack) || '', extra: String((e && e.message) || '') });
+    // v4.7.5：opts.silent 静默模式——次要探测（cpoauth 状态等）失败只返回，不弹报错窗
+    reportError({ kind: 'api', message: '网络请求失败：' + path, stack: (e && e.stack) || '', extra: String((e && e.message) || ''), silent: !!opts.silent });
     return { ok: false, status: 0, data: null };
   }
   let data = null; try { data = await res.json(); } catch { /* 非 JSON */ }
@@ -532,7 +670,14 @@ function clipCard(c) {
   if (c.max_views > 0) badges.push(`<span class="badge badge-eye">👁 ${c.views}/${c.max_views}</span>`);
   if (c.login_required) badges.push('<span class="badge badge-login">🔒 登录可见</span>');
   if (c.is_public === false) badges.push('<span class="badge">🙈 仅链接可见</span>');
-  const authorHtml = c.owner_type === 'user' ? `<a class="card-author" href="/u/${esc(c.owner_id)}" data-link>${esc(c.owner_name)}</a>` : `<span class="card-author guest">${esc(c.owner_name || '游客')}</span>`;
+  // v4.8.2: 用户名后的身份 tag。「我的剪贴板」等接口不返回 owner_* 字段，回退到当前登录者
+  let oRole = c.owner_role, oVip = c.owner_is_vip, oUntil = c.owner_vip_until;
+  if (c.owner_type === 'user' && oRole === undefined && state.me && String(state.me.userId || state.me.id) === String(c.owner_id)) {
+    oRole = state.me.role; oVip = state.me.is_vip; oUntil = state.me.vip_until;
+  }
+  const authorHtml = c.owner_type === 'user'
+    ? `<a class="card-author" href="/u/${esc(c.owner_id)}" data-link>${esc(c.owner_name)}</a>${ownerBadge(oRole, oVip, oUntil)}`
+    : `<span class="card-author guest">${esc(c.owner_name || '游客')}</span>`;
   // v4.6: 标签 + 置顶按钮（仅在我的剪贴板渲染时显示）
   const tagsArr = Array.isArray(c.tags) ? c.tags : [];
   const tagHtml = tagsArr.length ? `<div class="card-tags">${tagsArr.map((t) => `<a class="tag-chip" href="#" data-mytag="${esc(t)}" onclick="event.preventDefault();window.__myTagFilter&&window.__myTagFilter('${esc(t)}')">#${esc(t)}</a>`).join('')}</div>` : '';
@@ -545,7 +690,12 @@ let searchTimer = null;
 async function renderHome() {
   showView('home');
   const { data: stats } = await api('/api/stats');
-  if (stats) $('#heroStats').innerHTML = `<span>📋 ${stats.clips} 个剪贴板</span><span>👤 ${stats.users} 位用户</span>`;
+  // v4.7.5 反馈 #9：机房代理可能返回被截断 / 旧缓存的 index.html，容器缺失时
+  // `$('#heroStats').innerHTML` 会抛 null 异常并中断整个首页渲染（列表一片空白）。
+  // 这里做空值保护，并提示强制刷新，而不是静默白屏。
+  const heroStats = $('#heroStats');
+  if (stats && heroStats) heroStats.innerHTML = `<span>📋 ${stats.clips} 个剪贴板</span><span>👤 ${stats.users} 位用户</span>`;
+  if (!heroStats || !$('#jumpBtn') || !$('#searchInput') || !$('#clipList')) showStaleShellHint();
 
   // v4.0: 加载公告
   loadAnnouncements();
@@ -570,10 +720,27 @@ async function renderHome() {
   }
   renderHomeListHead();
 
-  $('#jumpBtn').onclick = jump;
-  $('#jumpInput').onkeydown = (e) => { if (e.isComposing || e.key !== 'Enter') return; jump(); };
-  $('#searchInput').oninput = (e) => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { state.q = e.target.value.trim(); state.page = 1; loadList(); }, 300); };
-  $('#searchInput').value = state.q; loadList();
+  const jumpBtn = $('#jumpBtn'), jumpInput = $('#jumpInput'), searchInput = $('#searchInput');
+  if (jumpBtn) jumpBtn.onclick = jump;
+  if (jumpInput) jumpInput.onkeydown = (e) => { if (e.isComposing || e.key !== 'Enter') return; jump(); };
+  if (searchInput) {
+    searchInput.oninput = (e) => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { state.q = e.target.value.trim(); state.page = 1; loadList(); }, 300); };
+    searchInput.value = state.q;
+  }
+  loadList();
+}
+
+/** v4.7.5：页面骨架缺失（多为代理返回旧缓存 / HTML 被截断）时的提示，替代白屏 */
+function showStaleShellHint() {
+  const box = $('#view-home') || document.querySelector('.view.active') || document.body;
+  if (!box || box.querySelector('#staleShellHint')) return;
+  const d = document.createElement('div');
+  d.id = 'staleShellHint';
+  d.setAttribute('style', 'margin:12px 0;padding:12px 14px;border-radius:10px;background:#fff4e5;color:#7a4b00;border:1px solid #f0c48a;font-size:13.5px;line-height:1.7');
+  d.innerHTML = '<b>⚠️ 页面结构加载不完整</b><br>常见于机房代理返回了旧缓存或被截断的页面。'
+    + '<a href="javascript:location.reload(true)" style="color:#a15c00;font-weight:600">点此强制刷新</a>'
+    + '（或按 <b>Ctrl + F5</b>）后通常恢复。若反复出现，欢迎到「反馈」页提一条 Bug。';
+  box.insertBefore(d, box.firstChild);
 }
 
 /** v4.6.2: 主页列表标题 / 搜索框占位随范围切换 */
@@ -641,6 +808,7 @@ async function loadHomeMine() {
 
 // ==================== 详情（含评论 + 登录门禁） ====================
 async function renderClip(clipId, pwd = '') {
+  track('clip.view', clipId, ''); // M3 埋点（旁路）
   showView('clip'); $('#clipArticle').classList.add('hidden');
   $('#clipGate').innerHTML = '<div class="skeleton-card"><div class="sk-line sk-title"></div><div class="sk-line sk-text"></div><div class="sk-line sk-text-short"></div><div class="sk-line sk-meta"></div></div>';
   $('#clipTools').innerHTML = '';
@@ -684,7 +852,12 @@ async function renderClip(clipId, pwd = '') {
   // 作者信息（含 VIP badge）
   const a = $('#clipAuthor');
   $('#clipAvatar').outerHTML = avatarHtml('', data.owner_name).replace('class="avatar', 'id="clipAvatar" class="avatar');
-  $('#clipAuthorName').textContent = data.owner_name || '游客';
+  const __an = $('#clipAuthorName');
+  __an.textContent = data.owner_name || '游客';
+  // v4.8.2: 用户名后的身份 tag（先清旧，避免重复渲染叠加）
+  const __oldTag = __an.parentNode.querySelector('.owner-tag');
+  if (__oldTag) __oldTag.remove();
+  if (data.owner_type === 'user') __an.insertAdjacentHTML('afterend', ownerBadge(data.owner_role, data.owner_is_vip, data.owner_vip_until));
   if (data.owner_type === 'user') { a.href = '/u/' + data.owner_id; a.setAttribute('data-link', ''); a.classList.remove('no-link'); }
   else { a.href = 'javascript:void(0)'; a.removeAttribute('data-link'); a.classList.add('no-link'); }
 
@@ -698,6 +871,11 @@ async function renderClip(clipId, pwd = '') {
   if (data.max_readers > 0) badges.push(`<span class="badge badge-reader">👥 ${data.reader_count || 0}/${data.max_readers} 人</span>`);
   if (data.login_required) badges.push('<span class="badge badge-login">🔒 登录可见</span>');
   if (!data.is_public) badges.push('<span class="badge">🙈 未公开</span>');
+  // v4.7.5 反馈 #5：查看页也显示标签（点击跳首页按标签搜索）
+  const vTags = Array.isArray(data.tags) ? data.tags : [];
+  if (vTags.length) {
+    badges.push(`<span class="card-tags" style="padding:0;display:inline-flex;gap:5px;flex-wrap:wrap">${vTags.map((t) => `<a class="tag-chip" href="/?q=${encodeURIComponent(t)}" data-link">#${esc(t)}</a>`).join('')}</span>`);
+  }
   $('#clipBadges').innerHTML = badges.join('');
 
   // 操作按钮
@@ -1275,7 +1453,7 @@ async function renderVipPage() {
           <tbody>
             <tr><td>每日创建上限</td><td>5 个</td><td class="compare-highlight"><b>无限制</b></td></tr>
             <tr><td>每月创建上限</td><td>50 个</td><td class="compare-highlight"><b>无限制</b></td></tr>
-            <tr><td>字数限制</td><td>300 字</td><td class="compare-highlight"><b>无限制</b></td></tr>
+            <tr><td>字数限制</td><td>1500 字（L2 5000）</td><td class="compare-highlight"><b>无限制</b></td></tr>
             <tr><td>自定义短链</td><td>${isAdmin ? '<span class="compare-check">✅</span>' : '<span class="compare-cross">需邀请</span>'}</td><td class="compare-highlight"><span class="compare-check">✅</span></td></tr>
             <tr><td>密码保护</td><td><span class="compare-check">✅</span></td><td class="compare-highlight"><span class="compare-check">✅</span></td></tr>
             <tr><td>定时过期</td><td><span class="compare-check">✅</span></td><td class="compare-highlight"><span class="compare-check">✅</span></td></tr>
@@ -1519,6 +1697,7 @@ async function renderAdmin() {
       <button class="btn btn-sm ${state.adminTab === 'pages' ? 'btn-primary' : ''}" data-tab="pages">📄 站点页面</button>
       <button class="btn btn-sm ${state.adminTab === 'announcements' ? 'btn-primary' : ''}" data-tab="announcements">📢 公告</button>
       <button class="btn btn-sm ${state.adminTab === 'invites' ? 'btn-primary' : ''}" data-tab="invites">🎁 邀请</button>
+      <button class="btn btn-sm ${state.adminTab === 'stats' ? 'btn-primary' : ''}" data-tab="stats">📊 数据看板</button>
       <button class="btn btn-sm ${state.adminTab === 'settings' ? 'btn-primary' : ''}" data-tab="settings">⚙️ 设置</button>
     </div><div id="adminBody"></div>`;
   $$('#adminBox [data-tab]').forEach((b) => { b.onclick = () => { state.adminTab = b.dataset.tab; renderAdmin(); }; });
@@ -1527,7 +1706,171 @@ async function renderAdmin() {
   if (state.adminTab === 'pages') return loadAdminPages();
   if (state.adminTab === 'announcements') return loadAdminAnnouncements();
   if (state.adminTab === 'invites') return loadAdminInvites();
+  if (state.adminTab === 'stats') return loadAdminStats();
   if (state.adminTab === 'settings') return loadAdminSettings();
+}
+
+// M3 埋点看板：读取 events 聚合数据（仅管理员可见）
+async function loadAdminStats() {
+  const box = $('#adminBody');
+  box.innerHTML = '加载中…';
+  const days = state.statsDays || 7;
+  const [{ data }, srcRes] = await Promise.all([
+    api('/api/admin/events/summary?days=' + days),
+    api('/api/admin/users/source-stats')
+  ]);
+  if (!data?.ok) {
+    return (box.innerHTML = emptyHTML('admin', '加载失败（需要管理员权限）', '<p class="muted" style="margin:0">若刚建表，暂无数据也属正常。</p>'));
+  }
+
+  const dayBtns = [1, 7, 30, 90]
+    .map((d) => `<button class="btn btn-sm ${days === d ? 'btn-primary' : ''}" data-days="${d}">${d} 天</button>`)
+    .join(' ');
+
+  const typeRows = (data.by_type || [])
+    .map((r) => `<tr><td><span class="badge badge-role" style="font-size:11px">${esc(r.app)}</span></td><td><code>${esc(r.type)}</code></td><td><b>${r.cnt}</b></td></tr>`)
+    .join('');
+
+  const dayRows = (data.by_day || [])
+    .slice(-14)
+    .map((r) => `<tr><td>${esc(r.d)}</td><td>${r.cnt}</td><td>${r.uv}</td></tr>`)
+    .join('');
+
+  // v4.10: 用户来源分布
+  const dist = (srcRes?.data?.distribution || []);
+  const total = srcRes?.data?.total || 0;
+  const srcRows = dist.length
+    ? dist.map((r) => {
+        const pct = total ? Math.round((r.count / total) * 100) : 0;
+        const label = r.source === 'unset' ? '未填写' : (SOURCE_LABEL[r.source] || r.source);
+        return `<tr><td>${esc(label)}</td><td><b>${r.count}</b></td><td class="muted">${pct}%</td></tr>`;
+      }).join('')
+    : '<tr><td colspan="3" class="muted">暂无数据</td></tr>';
+
+  box.innerHTML = `<div class="list-head"><h2>📊 数据看板</h2><div>${dayBtns}</div></div>
+    <p class="muted">近 ${days} 天：总事件 <b>${data.total}</b> · 活跃用户（去重）<b>${data.dau}</b></p>
+    <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>来源</th><th>事件</th><th>次数</th></tr></thead><tbody>${
+      typeRows || '<tr><td colspan="3" class="muted">暂无数据</td></tr>'
+    }</tbody></table></div>
+    <div class="list-head"><h2>👥 用户来源分布（共 ${total} 人）</h2></div>
+    <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>来源渠道</th><th>人数</th><th>占比</th></tr></thead><tbody>${srcRows}</tbody></table></div>
+    <div class="list-head"><h2>📈 每日趋势（最近 14 天）</h2></div>
+    <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>日期</th><th>事件数</th><th>活跃用户</th></tr></thead><tbody>${
+      dayRows || '<tr><td colspan="3" class="muted">暂无数据</td></tr>'
+    }</tbody></table></div>`;
+
+  $$('#adminBody [data-days]').forEach((b) => {
+    b.onclick = () => { state.statsDays = parseInt(b.dataset.days, 10); loadAdminStats(); };
+  });
+}
+
+// M3 埋点上报（旁路：失败静默，绝不弹出错误影响用户）
+function track(type, ref, meta) {
+  try {
+    fetch('/api/events', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ app: 'mdqp', type, ref: ref || '', meta: meta || '' })
+    }).catch(() => {});
+  } catch (e) { /* 静默 */ }
+}
+
+// v4.10: DAU 埋点。每会话只上报一次 page.view（服务端再按 uid 5 分钟去重）
+function trackPageView() {
+  try {
+    if (sessionStorage.getItem('mdqp_pv')) return;
+    sessionStorage.setItem('mdqp_pv', '1');
+    let ref = '';
+    try { if (document.referrer) ref = new URL(document.referrer).hostname; } catch (_) {}
+    track('page.view', location.pathname + location.search, ref);
+  } catch (e) { /* 静默 */ }
+}
+
+// v4.10: 用户来源渠道选项（与后端 SRC_OK 白名单保持一致）
+const SOURCE_OPTIONS = [
+  { code: 'offline',      label: '🤝 线下分享（同学/朋友推荐）' },
+  { code: 'social',       label: '💬 社交平台分享（QQ/微信/贴吧/小红书等）' },
+  { code: 'oj',           label: '🏆 OJ 分享（洛谷/Codeforces 等讨论区）' },
+  { code: 'other_share',  label: '🔗 其他分享' },
+  { code: 'random',       label: '🎲 随便点到的' },
+  { code: 'ad',           label: '📢 看到广告' },
+  { code: 'search',       label: '🔍 搜索引擎搜到' },
+  { code: 'unknown',      label: '🙈 不方便说' }
+];
+const SOURCE_LABEL = Object.fromEntries(SOURCE_OPTIONS.map((o) => [o.code, o.label.replace(/^[^一-龥]+ /, '')]));
+const SRC_SEEN_KEY = 'mdqp_src_ask_session';
+const SRC_DEFER_KEY = 'mdqp_src_ask_defer';
+
+// 首次登录后询问来源；已填写(source_set_at 非空)不再问；本会话关闭过不再问；累计关闭≥3次彻底不再问
+function maybeAskSource() {
+  try {
+    const me = state.me;
+    if (!me || me.type !== 'user') return;
+    if (me.source_set_at) return;                       // 已填，不再提醒
+    if (sessionStorage.getItem(SRC_SEEN_KEY)) return;   // 本会话已问过
+    const defer = parseInt(localStorage.getItem(SRC_DEFER_KEY) || '0', 10);
+    if (defer >= 3) return;                             // 反复跳过，放过用户
+    showSourceModal();
+  } catch (e) { /* 静默 */ }
+}
+
+function showSourceModal() {
+  const needDetail = (code) => code === 'other_share' || code === 'social' || code === 'oj';
+  const body = `<p class="muted" style="margin:0 0 10px">你是怎么知道 mdqp 的？答案仅用于改进产品（可随时在设置里修改）。</p>
+    <div class="ff-grid" id="srcGrid">${SOURCE_OPTIONS.map((o) => `<button class="btn btn-sm src-opt" data-code="${o.code}">${o.label}</button>`).join('')}</div>
+    <div id="srcDetailWrap" style="display:none;margin-top:10px">
+      <input id="srcDetail" class="input input-sm" maxlength="100" placeholder="补充说明（可选，如具体平台/活动名称）">
+    </div>`;
+  const m = openModal('👋 欢迎使用 mdqp', body);
+  const grid = m.body.querySelector('#srcGrid');
+  const detailWrap = m.body.querySelector('#srcDetailWrap');
+  const detailInput = m.body.querySelector('#srcDetail');
+  let submitted = false;
+  // 关闭（ESC / 点遮罩）且未提交 → 本会话不再问 + 累计 defer+1（≥3 后彻底不再问）
+  const ov = $('#modalOverlay');
+  const obs = new MutationObserver(() => {
+    if (!ov.classList.contains('show')) {
+      obs.disconnect();
+      if (submitted) return;
+      sessionStorage.setItem(SRC_SEEN_KEY, '1');
+      const d = parseInt(localStorage.getItem(SRC_DEFER_KEY) || '0', 10) + 1;
+      localStorage.setItem(SRC_DEFER_KEY, String(d));
+    }
+  });
+  obs.observe(ov, { attributes: true, attributeFilter: ['class'] });
+
+  // 预选当前已填来源（修改场景：不用从头选）
+  const cur = state.me && state.me.source;
+  if (cur && SOURCE_OPTIONS.some((o) => o.code === cur)) {
+    const cb = grid.querySelector(`.src-opt[data-code="${cur}"]`);
+    if (cb) cb.classList.add('btn-primary');
+    if (needDetail(cur) && (state.me.source_detail || '')) {
+      detailWrap.style.display = '';
+      detailWrap.dataset.open = cur;
+      detailInput.value = state.me.source_detail || '';
+    }
+  }
+
+  grid.onclick = (e) => {
+    const btn = e.target.closest('.src-opt'); if (!btn) return;
+    const code = btn.dataset.code;
+    if (needDetail(code)) {
+      detailWrap.style.display = '';
+      detailWrap.dataset.code = code;
+      detailInput.focus();
+      // 再次点击同一按钮（已展开）即提交
+      if (detailWrap.dataset.open === code) { submit(code); }
+      else { detailWrap.dataset.open = code; grid.querySelectorAll('.src-opt').forEach((b) => b.classList.toggle('btn-primary', b === btn)); }
+    } else { submit(code); }
+  };
+  function submit(code) {
+    submitted = true;
+    const detail = (needDetail(code) ? (detailInput.value || '').trim() : '');
+    api('/api/me', { method: 'PATCH', body: JSON.stringify({ source: code, source_detail: detail }) })
+      .then(() => { if (state.me) { state.me.source = code; state.me.source_detail = detail; state.me.source_set_at = new Date().toISOString().slice(0, 19).replace('T', ' '); } })
+      .catch(() => {});
+    closeModal();
+  }
 }
 
 const ADMIN_FULL_PERMS = ALL_PERMS.reduce((o, p) => (o[p] = true, o), {});
@@ -1543,11 +1886,12 @@ async function loadAdminUsers() {
     const ff = u.feature_flags || {};
     const ffOn = Object.keys(FEATURE_LABELS).filter((k) => ff[k]).map((k) => FEATURE_LABELS[k]);
     return `<tr>
-      <td><a href="/u/${u.id}" data-link>${avatarHtml(u.avatar, u.display_name)} <b>${esc(u.display_name)}</b></a><div class="muted" style="font-size:12px">@${esc(u.username)} · #${u.id}</div></td>
+      <td><a href="/u/${u.id}" data-link>${avatarHtml(u.avatar, u.display_name)} <b>${esc(u.display_name)}</b></a><div class="muted" style="font-size:12px">@${esc(u.username)} · #${u.id}</div><div class="muted" style="font-size:12px">📅 ${esc((u.created_at || '').slice(0, 10))}</div></td>
       <td>${roleHtml} ${vipHtml}</td>
       <td>${u.clip_count}</td>
       <td>${u.invite_count}</td>
       <td class="muted" style="font-size:12px;max-width:170px">${ffOn.length ? ffOn.join('、') : '—'}</td>
+      <td class="muted" style="font-size:12px">${u.source ? (SOURCE_LABEL[u.source] || esc(u.source)) : '<span class="muted">未填</span>'}${u.source_detail ? `<div style="font-size:11px;opacity:.7">${esc(u.source_detail)}</div>` : ''}</td>
       <td class="admin-actions">
         <button class="btn btn-sm" data-vip="${u.id}">${u.is_vip ? '取消VIP' : '设VIP'}</button>
         <button class="btn btn-sm" data-ff="${u.id}">功能</button>
@@ -1558,7 +1902,7 @@ async function loadAdminUsers() {
   }).join('');
   box.innerHTML = `<div class="list-head"><h2>👥 用户管理（${data.users.length} 人）</h2>
     <input id="adminUserSearch" class="input input-sm admin-search" placeholder="🔍 搜索用户名 / @账号 / ID"></div>
-    <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>用户</th><th>角色 / VIP</th><th>剪贴板</th><th>邀请</th><th>功能开关</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>用户</th><th>角色 / VIP</th><th>剪贴板</th><th>邀请</th><th>功能开关</th><th>来源</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 
   const search = $('#adminUserSearch');
   if (search) search.oninput = (e) => { const q = e.target.value.trim().toLowerCase(); box.querySelectorAll('tbody tr').forEach((tr) => { tr.style.display = !q || tr.textContent.toLowerCase().includes(q) ? '' : 'none'; }); };
@@ -2031,7 +2375,7 @@ function installErrorReporter() {
       window.__MDQP_VERSION = d.version;
       try {
         const seen = localStorage.getItem('mdqp_last_seen_version');
-        if (seen && seen !== d.version) maybeShowVersionToast(seen, d.version);
+        if (seen !== d.version) maybeShowVersionToast(seen, d.version); // 首次访问（seen 为空）也弹
         localStorage.setItem('mdqp_last_seen_version', d.version);
       } catch (_) {}
     }
@@ -2101,7 +2445,7 @@ async function renderFeedback() {
       $('#fbForm').reset(); curType = 'bug';
       $$('#fbType .fb-type-btn').forEach((x) => x.classList.toggle('active', x.dataset.type === 'bug'));
       $('#fbBugFields').classList.remove('hidden'); $('#fbSuggestFields').classList.add('hidden');
-      if (isAdmin()) loadFeedbackAdmin();
+      if (isAdmin()) loadFeedbackAdmin(); else loadFeedbackPublic();
     } else toast(data?.message || data?.error || '提交失败', 'err');
   };
   // v4.5.2：从报错弹窗跳转过来时自动预填环境 / 报错 / 控制台日志
@@ -2115,8 +2459,48 @@ async function renderFeedback() {
     if (sitEl) sitEl.value = (p.situation || '').slice(0, 2000);
     if (logEl) logEl.value = (p.console_log || '').slice(0, 4000);
     if (hintEl) { hintEl.textContent = '已自动填入报错信息与运行环境，补充「具体情况」后提交即可'; hintEl.style.color = ''; }
+  } else if (window.sessionStorage) {
+    // v4.7.3：从兜底横幅（脚本没启动 / 资源被拦截）跳来时，自动带上已捕获的错误
+    try {
+      const be = sessionStorage.getItem('mdqp_boot_error');
+      if (be) {
+        sessionStorage.removeItem('mdqp_boot_error');
+        curType = 'bug';
+        $$('#fbType .fb-type-btn').forEach((x) => x.classList.toggle('active', x.dataset.type === 'bug'));
+        $('#fbBugFields').classList.remove('hidden'); $('#fbSuggestFields').classList.add('hidden');
+        const sitEl2 = $('#fbSituation'), hintEl2 = $('#fbHint');
+        if (sitEl2) sitEl2.value = ('【页面加载失败·自动附带】' + be + '\n\n我当时的操作：（请补充）\n期望结果：页面正常显示').slice(0, 2000);
+        if (hintEl2) { hintEl2.textContent = '已自动填入页面加载失败的信息，补充「具体情况」后提交即可'; hintEl2.style.color = ''; }
+      }
+    } catch (e) {}
   }
-  if (isAdmin()) loadFeedbackAdmin();
+  if (isAdmin()) loadFeedbackAdmin(); else loadFeedbackPublic();
+}
+
+// v4.7.5 反馈 #4：非管理员也能看到反馈列表（只读、脱敏、无审核操作）
+async function loadFeedbackPublic() {
+  const el = $('#fbAdmin'); if (!el) return;
+  const { ok, data } = await api('/api/feedback');
+  if (!ok || !data?.feedback) { el.classList.add('hidden'); return; }
+  const list = data.feedback;
+  if (!list.length) { el.classList.add('hidden'); return; }
+  const statusLabel = { open: '待处理', reviewing: '处理中', resolved: '已解决', rejected: '已驳回' };
+  el.classList.remove('hidden');
+  el.innerHTML = '<div class="fb-admin-head"><h2>📋 反馈一览（' + list.length + '）</h2></div>'
+    + '<p class="muted" style="font-size:13px;margin:0 0 12px">下面是大家已经提过的问题与处理进度（已隐藏联系方式等隐私信息）。有重复的不必再提，看状态即可。</p>'
+    + list.map((f) => {
+      const isBug = f.type === 'bug';
+      return `<div class="fb-item">
+        <div class="fb-item-head">
+          <span class="badge ${isBug ? 'badge-lock' : 'badge-collab'}">${isBug ? '🐞 Bug' : '💡 建议'}</span>
+          <span class="badge fb-status fb-status-${f.status}">${statusLabel[f.status] || f.status}</span>
+          <span class="muted">${esc(f.author_name || '匿名')} · ${esc(timeAgo(f.created_at))}</span>
+        </div>
+        ${f.situation ? `<div class="fb-meta"><b>情况：</b>${esc(f.situation)}</div>` : ''}
+        <div class="fb-content">${esc(f.content)}</div>
+        ${f.admin_note ? `<div class="fb-meta fb-note"><b>处理备注：</b>${esc(f.admin_note)}</div>` : ''}
+      </div>`;
+    }).join('');
 }
 
 async function loadFeedbackAdmin() {
@@ -2484,7 +2868,7 @@ let authMode = 'login';
 let authMethods = { cpoauth: true, password: true };
 
 async function loadAuthMethods() {
-  try { const { data } = await api('/api/auth/methods'); if (data) authMethods = data; } catch {}
+  try { const { data } = await api('/api/auth/methods', { silent: true }); if (data) authMethods = data; } catch {}
 }
 
 /** 按 cpoauth 可用状态切换「第三方登录按钮 / 降级横幅」
@@ -2530,6 +2914,27 @@ async function goOiwb() {
   location.href = OIWB_BASE + '?ticket=' + encodeURIComponent(data.ticket);
 }
 
+// O1-1 反向闭环：从 oiwb 带 back=oiwb 跳来 → 登录后一键回 oiwb 自动登录
+function handleOiwbBack() {
+  if (!state.me || state.me.type !== 'user') {
+    openAuthModal('login');
+    toast('登录 mdqp 后自动回 oiwb', 'info');
+  } else {
+    showOiwbBackBanner();
+  }
+}
+function showOiwbBackBanner() {
+  let b = document.getElementById('oiwbBackBanner');
+  if (b) return;
+  b = document.createElement('div');
+  b.id = 'oiwbBackBanner';
+  b.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;display:flex;align-items:center;justify-content:center;gap:12px;padding:9px 16px;background:#1f4e79;color:#fff;font-size:14px;box-shadow:0 2px 10px rgba(0,0,0,.25)';
+  b.innerHTML = '<span>已登录 mdqp · 点此一键回 oiwb 并自动登录</span><button id="oiwbBackBtn" style="background:#fff;color:#1f4e79;border:none;border-radius:6px;padding:6px 14px;font-weight:600;cursor:pointer;">↩ 回 oiwb</button>';
+  document.body.appendChild(b);
+  const btn = document.getElementById('oiwbBackBtn');
+  if (btn) btn.onclick = goOiwb;
+}
+
 function openAuthModal(mode = 'login') {
   authMode = mode || 'login';
   const modal = $('#authModal'); if (!modal) return;
@@ -2537,8 +2942,8 @@ function openAuthModal(mode = 'login') {
   setAuthMode(authMode);
   modal.classList.remove('hidden'); modal.classList.add('show');
   setTimeout(() => $('#authUsername')?.focus(), 50);
-  // 打开后再做一次真实连通性探测：cpoauth 宕机时自动隐藏按钮并提示走密码登录
-  api('/api/auth/cpoauth-status')
+  // 打开后再做一次真实连通性探测：cpoauth 宕机时自动隐藏按钮并提示走密码登录（v4.7.5 静默，失败不弹大窗）
+  api('/api/auth/cpoauth-status', { silent: true })
     .then(({ data }) => { if (data && typeof data.ok === 'boolean') applyCpoauthState(data.ok); })
     .catch(() => {});
 }
@@ -2656,7 +3061,7 @@ async function getCpoauthStatus() {
     if (raw) { const o = JSON.parse(raw); if (Date.now() - o.t < CPOAUTH_OK_TTL) return o.ok; }
   } catch {}
   try {
-    const { data } = await api('/api/auth/cpoauth-status');
+    const { data } = await api('/api/auth/cpoauth-status', { silent: true });
     const ok = !!(data && data.ok);
     try { localStorage.setItem(CPOAUTH_OK_KEY, JSON.stringify({ ok, t: Date.now() })); } catch {}
     return ok;
@@ -2732,6 +3137,8 @@ function openSettingsModal() {
   $('#secCpText').textContent = me.cpoauth_bound ? '已绑定' : '未绑定';
   $('#secEmailText').textContent = me.email ? (me.email_verified ? me.email + '（已验证）' : me.email + '（未验证）') : '未提供';
   $('#secTlText').textContent = 'L' + (me.trust_level || 0) + ' · ' + ['新手上路', '常驻用户', '活跃用户', '核心用户'][me.trust_level || 0];
+  const curSrc = me.source ? (SOURCE_LABEL[me.source] || me.source) : '未填写';
+  $('#secSourceText').textContent = curSrc + (me.source_detail ? '（' + me.source_detail + '）' : '');
   renderTrustProgress($('#secTlProgress'), me.trust_progress);
   $('#secSetPw').textContent = me.has_password ? '修改' : '设置';
   $('#secBind').textContent = me.cpoauth_bound ? '管理' : '去绑定';
@@ -2778,6 +3185,7 @@ function setupSettingsModal() {
     else toast('保存失败：' + (r.data?.error || r.status), 'err');
   };
   $('#secSetPw').onclick = () => { closeSettingsModal(); openSetPwModal(); };
+  $('#secSourceEdit').onclick = () => { closeSettingsModal(); showSourceModal(); };
   $('#secLogout').onclick = async () => { await api('/api/auth/logout', { method: 'POST' }); location.href = '/'; };
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !m.classList.contains('hidden')) closeSettingsModal(); });
 }
@@ -2896,13 +3304,38 @@ window.addEventListener('popstate', render);
   const navOiwb = $('#navOiwb'); if (navOiwb) navOiwb.onclick = (e) => { e.preventDefault(); goOiwb(); };
   installErrorReporter(); // v4.5.2：报错自动捕获 + 一键反馈
   // 侧边栏折叠（仅桌面生效，状态持久化）
+  // 侧边栏（v4.7.5 反馈 #6②）：钉住=常驻展开；未钉住=折叠，鼠标靠近左缘自动展开、移开收起
+  const SIDEBAR_PIN_KEY = 'mdqp_sidebar_pinned';
+  let sbPinned = true;
+  try { sbPinned = localStorage.getItem(SIDEBAR_PIN_KEY) !== '0'; } catch (_) {}
+  const applySidebar = () => {
+    document.body.classList.toggle('sidebar-collapsed', !sbPinned);
+    if (!sbPinned) document.body.classList.remove('sidebar-peek');
+    const st2 = $('#sidebarToggle');
+    if (st2) {
+      st2.title = sbPinned ? '已钉住：点击改为悬浮（靠近左侧自动展开）' : '已悬浮：点击钉住侧边栏';
+      st2.setAttribute('aria-label', st2.title);
+      const lbl = st2.querySelector('.nav-label');
+      if (lbl) lbl.textContent = sbPinned ? '已钉住 · 点击改悬浮' : '已悬浮 · 点击钉住';
+    }
+  };
+  applySidebar();
   const st = $('#sidebarToggle');
   if (st) {
-    if (localStorage.getItem('mdqp_sidebar_collapsed') === '1') document.body.classList.add('sidebar-collapsed');
     st.onclick = () => {
-      const collapsed = document.body.classList.toggle('sidebar-collapsed');
-      localStorage.setItem('mdqp_sidebar_collapsed', collapsed ? '1' : '0');
+      sbPinned = !sbPinned;
+      try { localStorage.setItem(SIDEBAR_PIN_KEY, sbPinned ? '1' : '0'); } catch (_) {}
+      applySidebar();
     };
+  }
+  // 悬浮模式：未钉住时，鼠标移入侧边栏（含折叠态的窄条）即展开，移出即收起。
+  // 用 mouseenter/mouseleave（不冒泡、子元素不触发抖动）替代 mousemove+clientX 阈值，消除边界抖动。
+  const sbEl = document.querySelector('.sidebar');
+  if (sbEl) {
+    const peekOn = () => { if (sbPinned || window.innerWidth < 861) return; document.body.classList.add('sidebar-peek'); };
+    const peekOff = () => { if (sbPinned || window.innerWidth < 861) return; document.body.classList.remove('sidebar-peek'); };
+    sbEl.addEventListener('mouseenter', peekOn);
+    sbEl.addEventListener('mouseleave', peekOff);
   }
   const sp = new URLSearchParams(location.search);
   if (sp.get('logged_in')) { toast('登录成功'); history.replaceState({}, '', location.pathname); }
@@ -2911,4 +3344,12 @@ window.addEventListener('popstate', render);
   const inviteCode = sp.get('invite_code');
   if (inviteCode && sp.get('logged_in')) { setTimeout(() => bindInvite(inviteCode), 1500); }
   await loadMe(); render();
+  // v4.10: 补 DAU 埋点（page.view）。同会话只报一次，真实去重在服务端再做 5 分钟节流
+  trackPageView();
+  // v4.10: 首次登录后询问用户来源渠道（已填写/已跳过则不再问）
+  maybeAskSource();
+  window.__MDQP_BOOTED = 1; // 兜底横幅的看门狗依据：初始化跑完就不再提示
+  // O1-1 反向闭环：oiwb 带 back=oiwb 跳来 → 未登录弹登录框，已登录显示一键回 oiwb
+  const backParam = new URLSearchParams(location.search).get('back');
+  if (backParam === 'oiwb') handleOiwbBack();
 })();
