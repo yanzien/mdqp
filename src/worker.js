@@ -19,7 +19,7 @@ const app = new Hono();
 
 const GUEST_LIMIT = 5;
 const PAGE_SIZE = 20;
-const VERSION = '4.11.0';
+const VERSION = '4.11.1';
 const SEARCH_MAX = 100;
 const RESERVED = new Set([
   'api', 'raw', 'new', 'edit', 'u', 'user', 'users', 'admin', 'login', 'logout',
@@ -419,13 +419,27 @@ app.get('/api/stats', async (c) => {
 
 // ========== 公告 API ==========
 
+/** 清洗文本：剔除控制字符（保留 \n \t \r）+ 孤立代理对，避免 D1/JSON 序列化异常 */
+function sanitizeText(s) {
+  return String(s == null ? '' : s)
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
+    .replace(/[\uD800-\uDFFF]/g, '');
+}
+
 app.get('/api/announcements', async (c) => {
   c.header('Cache-Control', 'public, max-age=30');
   const db = c.env.db;
-  const rows = await db
-    .prepare('SELECT * FROM announcements WHERE is_active = 1 ORDER BY pinned DESC, created_at DESC')
-    .all();
-  return c.json({ announcements: rows.results });
+  try {
+    const rows = await db
+      .prepare('SELECT * FROM announcements WHERE is_active = 1 ORDER BY pinned DESC, created_at DESC')
+      .all();
+    // 兼容 D1 不同版本返回结构（results / 直接数组）
+    return c.json({ announcements: rows?.results || [] });
+  } catch (e) {
+    // 公告栏是全局非关键组件：D1 抖动 / 脏数据导致查询失败时降级为空，绝不 500 拖垮整站与 /admin
+    console.error('[announcements] GET failed, degrade to empty:', e);
+    return c.json({ announcements: [] });
+  }
 });
 
 app.put('/api/announcements', async (c) => {
@@ -435,7 +449,9 @@ app.put('/api/announcements', async (c) => {
 
   let body;
   try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
-  const content = (body.content || '').toString().slice(0, 5000);
+  let content = (body.content || '').toString().slice(0, 5000);
+  // 清洗：剔除控制字符（保留换行/制表/回车）+ 孤立代理对（否则 JSON.stringify 会抛错→500）
+  content = sanitizeText(content);
   if (!content.trim()) return c.json({ error: 'empty_content' }, 400);
 
   await db.prepare(
