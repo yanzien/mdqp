@@ -19,7 +19,7 @@ const app = new Hono();
 
 const GUEST_LIMIT = 5;
 const PAGE_SIZE = 20;
-const VERSION = '4.12.0';
+const VERSION = '4.13.0';
 const SEARCH_MAX = 100;
 const RESERVED = new Set([
   'api', 'raw', 'new', 'edit', 'u', 'user', 'users', 'admin', 'login', 'logout',
@@ -125,16 +125,40 @@ async function getIdentity(c) {
   const sessionMatch = cookie.match(/mdqp_session=([^;]+)/);
   if (sessionMatch) {
     const p = await verifyJWT(sessionMatch[1], secret);
-    if (p) return { type: 'user', userId: p.userId, sub: p.sub, name: p.name, avatar: p.avatar };
+    if (p) {
+      const ban = await getBanStatus(c.env.db, p.userId);
+      if (ban) return { type: 'banned', userId: p.userId, banReason: ban.reason, banUntil: ban.until };
+      return { type: 'user', userId: p.userId, sub: p.sub, name: p.name, avatar: p.avatar };
+    }
   }
   const auth = req.headers.get('Authorization');
   if (auth && auth.startsWith('Bearer ')) {
     const p = await verifyJWT(auth.slice(7), secret);
-    if (p) return { type: 'user', userId: p.userId, sub: p.sub, name: p.name, avatar: p.avatar };
+    if (p) {
+      const ban = await getBanStatus(c.env.db, p.userId);
+      if (ban) return { type: 'banned', userId: p.userId, banReason: ban.reason, banUntil: ban.until };
+      return { type: 'user', userId: p.userId, sub: p.sub, name: p.name, avatar: p.avatar };
+    }
   }
   const guestId = req.headers.get('X-Guest-Id');
   if (guestId && /^[a-zA-Z0-9-]{8,64}$/.test(guestId)) return { type: 'guest', guestId, name: '游客' };
   return { type: 'none' };
+}
+
+/** v4.13: 查询用户当前是否处于「生效中的封禁」。
+ *  过期（ban_until 已过）视为未封禁，并惰性清理，避免反复判定。返回 {reason, until} 或 null。 */
+async function getBanStatus(db, userId) {
+  if (!userId) return null;
+  const u = await db.prepare('SELECT banned, ban_until, ban_reason FROM users WHERE id = ?').bind(String(userId)).first();
+  if (!u || !u.banned) return null;
+  if (u.ban_until) {
+    const t = new Date(String(u.ban_until).replace(' ', 'T') + 'Z').getTime();
+    if (Date.now() >= t) {
+      try { await db.prepare('UPDATE users SET banned = 0, ban_until = NULL, ban_reason = NULL WHERE id = ?').bind(String(userId)).run(); } catch { /* ignore */ }
+      return null;
+    }
+  }
+  return { reason: u.ban_reason || '', until: u.ban_until || null };
 }
 
 function canWrite(identity, row) {
@@ -389,7 +413,7 @@ async function notifyTrustUpgrade(db, userId) {
   } catch (e) { /* 通知系统故障不阻断主流程 */ }
 }
 
-const ALL_PERMS = ['delete_user', 'set_clip_limit', 'edit_pages', 'edit_public_clips', 'edit_private_clips', 'view_code'];
+const ALL_PERMS = ['delete_user', 'set_clip_limit', 'edit_pages', 'edit_public_clips', 'edit_private_clips', 'view_code', 'ban_user'];
 
 /** 获取站点设置值 */
 async function getSiteSetting(db, key, fallback) {
@@ -1070,6 +1094,34 @@ app.put('/api/clips/:clipId', async (c) => {
   return c.json({ ok: true, clip_id: newClipId, tags: parseTags(tagsStr) });
 });
 
+// ========== v4.13: 举报剪贴板 ==========
+app.post('/api/clips/:clipId/report', async (c) => {
+  const db = c.env.db;
+  const clipId = c.req.param('clipId');
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required', message: '请先登录后再举报' }, 401);
+
+  const clip = await db.prepare('SELECT clip_id FROM clipboards WHERE clip_id = ?').bind(clipId).first();
+  if (!clip) return c.json({ error: 'not_found' }, 404);
+
+  let body;
+  try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
+  const reason = (body.reason || '').toString().trim();
+  const VALID = ['spam', 'porn', 'sensitive', 'illegal', 'other'];
+  if (!VALID.includes(reason)) return c.json({ error: 'bad_reason', message: '请选择举报原因' }, 400);
+  const detail = (body.detail || '').toString().slice(0, 1000);
+
+  // 去重：同一用户对同一剪贴板的未处理举报只计一次
+  const dup = await db.prepare("SELECT id FROM clip_reports WHERE clip_id = ? AND reporter_id = ? AND status = 'open'").bind(clipId, String(identity.userId)).first();
+  if (dup) return c.json({ ok: true, already: true, id: dup.id });
+
+  const ip = (c.req.raw.headers.get('CF-Connecting-IP') || c.req.raw.headers.get('X-Forwarded-For') || '').slice(0, 64);
+  await db.prepare(
+    "INSERT INTO clip_reports (clip_id, reporter_id, reporter_type, reporter_ip, reason, detail, status, created_at) VALUES (?, ?, 'user', ?, ?, ?, 'open', datetime('now'))"
+  ).bind(clipId, String(identity.userId), ip, reason, detail).run();
+  return c.json({ ok: true });
+});
+
 // ========== 删除 ==========
 
 app.delete('/api/clips/:clipId', async (c) => {
@@ -1159,6 +1211,11 @@ app.get('/api/users/:userId', async (c) => {
 app.get('/api/me', async (c) => {
   const db = c.env.db;
   const identity = await getIdentity(c);
+
+  // v4.13: 被封禁用户：统一返回 banned 标记，前端据此展示封禁页
+  if (identity.type === 'banned') {
+    return c.json({ authenticated: false, type: 'banned', banned: true, banReason: identity.banReason || '', banUntil: identity.banUntil || null });
+  }
 
   if (identity.type === 'user') {
     const uRow = await db.prepare(
@@ -1727,9 +1784,12 @@ app.post('/api/invite/bind', async (c) => {
           granted.push({ threshold: tier.threshold, reward: 'all_features', desc: '已开放所有高级功能' });
           break;
         case 'vip':
-          // 开通 VIP（永久）
-          await db.prepare("UPDATE users SET is_vip = 1, vip_until = NULL WHERE id = ?").bind(inviter.id).run();
-          granted.push({ threshold: tier.threshold, reward: 'vip', desc: '已开通 VIP' });
+          // 开通 VIP（默认 1 年；v4.13 起邀请所得 VIP 限时 1 年，不再永久）
+          {
+            const vipUntil = new Date(Date.now() + 365 * 86400000).toISOString().slice(0, 19).replace('T', ' ');
+            await db.prepare("UPDATE users SET is_vip = 1, vip_until = ? WHERE id = ?").bind(vipUntil, inviter.id).run();
+            granted.push({ threshold: tier.threshold, reward: 'vip', desc: '已开通 VIP（1 年）' });
+          }
           break;
         case 'unlimited_chars_pin': {
           // 真正授予"不限字数"标记（feature_flags.unlimited_chars），由 resolveBenefits 生效
@@ -1800,18 +1860,48 @@ app.get('/api/admin/users', async (c) => {
 
   const page = Math.max(1, parseInt(c.req.query('page') || '1'));
   const q = (c.req.query('q') || '').trim();
+  const source = (c.req.query('source') || '').trim();
+  const from = (c.req.query('from') || '').trim();
+  const to = (c.req.query('to') || '').trim();
+  const activeDays = parseInt(c.req.query('activeDays') || '0') || 0;
+  const minClips = parseInt(c.req.query('minClips') || '0') || 0;
+  const bannedOnly = c.req.query('banned'); // '1' | '0' | 不传=全部
+  const sort = (c.req.query('sort') || 'id');
+  const order = (c.req.query('order') || 'asc').toLowerCase() === 'desc' ? 'DESC' : 'ASC';
   const offset = (page - 1) * PAGE_SIZE;
-  let where = ''; const params = [];
-  if (q) { where = 'WHERE u.username LIKE ? OR u.display_name LIKE ?'; params.push(`%${q}%`, `%${q}%`); }
 
-  const totalRow = await db.prepare(`SELECT COUNT(*) as cnt FROM users u ${where}`).bind(...params).first();
+  const whereParts = [];
+  const params = [];
+  if (q) { whereParts.push('(u.username LIKE ? OR u.display_name LIKE ?)'); params.push(`%${q}%`, `%${q}%`); }
+  if (source) {
+    if (source === 'unset') whereParts.push("(u.source IS NULL OR u.source = '')");
+    else { whereParts.push('u.source = ?'); params.push(source); }
+  }
+  if (from) { whereParts.push('u.created_at >= ?'); params.push(from); }
+  if (to) { whereParts.push('u.created_at <= ?'); params.push(to + ' 23:59:59'); }
+  if (activeDays > 0) {
+    const cut = new Date(Date.now() - activeDays * 86400000).toISOString().slice(0, 19).replace('T', ' ');
+    whereParts.push('u.last_login >= ?'); params.push(cut);
+  }
+  if (bannedOnly === '1') whereParts.push('u.banned = 1');
+  else if (bannedOnly === '0') whereParts.push('(u.banned = 0 OR u.banned IS NULL)');
+
+  // clip_count 需子查询：既用于筛选（minClips）也用于排序
+  const innerSql = `SELECT u.*, (SELECT COUNT(*) FROM clipboards c WHERE c.owner_type = 'user' AND c.owner_id = u.id) AS clip_count FROM users u`;
+  if (minClips > 0) whereParts.push('clip_count >= ?'), params.push(minClips);
+
+  const ORDER_COLS = { id: 'sub.id', created_at: 'sub.created_at', last_login: 'sub.last_login', clip_count: 'sub.clip_count', username: 'sub.username' };
+  const orderCol = ORDER_COLS[sort] || 'sub.id';
+  const whereSql = whereParts.length ? 'WHERE ' + whereParts.join(' AND ') : '';
+
+  const totalRow = await db.prepare(`SELECT COUNT(*) as cnt FROM (${innerSql}) sub ${whereSql}`).bind(...params).first();
   const rows = await db.prepare(
-    `SELECT u.id, u.username, u.display_name, u.avatar, u.role, u.bio, u.signature,
-            u.linked_accounts, u.clip_limit, u.limit_period, u.admin_permissions,
-            u.created_at, u.last_login, u.is_vip, u.vip_until, u.invite_code,
-            u.invite_count, u.feature_flags, u.source, u.source_set_at,
-            (SELECT COUNT(*) FROM clipboards c WHERE c.owner_type = 'user' AND c.owner_id = u.id) AS clip_count
-     FROM users u ${where} ORDER BY u.id ASC LIMIT ? OFFSET ?`
+    `SELECT sub.id, sub.username, sub.display_name, sub.avatar, sub.role, sub.bio, sub.signature,
+            sub.linked_accounts, sub.clip_limit, sub.limit_period, sub.admin_permissions,
+            sub.created_at, sub.last_login, sub.is_vip, sub.vip_until, sub.invite_code,
+            sub.invite_count, sub.feature_flags, sub.source, sub.source_set_at,
+            sub.banned, sub.banned_at, sub.ban_until, sub.clip_count
+     FROM (${innerSql}) sub ${whereSql} ORDER BY ${orderCol} ${order} LIMIT ? OFFSET ?`
   ).bind(...params, PAGE_SIZE, offset).all();
 
   return c.json({
@@ -1825,7 +1915,8 @@ app.get('/api/admin/users', async (c) => {
       is_vip: !!r.is_vip, vip_until: r.vip_until,
       invite_code: r.invite_code || '', invite_count: r.invite_count || 0,
       feature_flags: parseFeatureFlags(r.feature_flags),
-      source: r.source || '', source_set_at: r.source_set_at || null
+      source: r.source || '', source_set_at: r.source_set_at || null,
+      banned: !!r.banned, ban_until: r.ban_until || null, banned_at: r.banned_at || null
     })),
     page, total: totalRow?.cnt || 0, totalPages: Math.max(1, Math.ceil((totalRow?.cnt || 0) / PAGE_SIZE))
   });
@@ -1852,13 +1943,20 @@ app.patch('/api/admin/users/:id', async (c) => {
   if (!(await isAdminIdentity(db, identity))) return c.json({ error: 'forbidden' }, 403);
 
   const targetId = c.req.param('id');
-  const target = await db.prepare('SELECT id, role, username, display_name FROM users WHERE id = ?').bind(targetId).first();
+  const target = await db.prepare('SELECT id, role, username, display_name, banned, ban_until, ban_reason FROM users WHERE id = ?').bind(targetId).first();
   if (!target) return c.json({ error: 'not_found' }, 404);
   if (target.role === 'developer') return c.json({ error: 'forbidden', message: '开发者身份不可更改' }, 403);
 
   let body;
   try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
   const changes = [];
+
+  // v4.13: 封禁操作需 ban_user 权限，且禁止封禁自己
+  const wantsBan = body.banned !== undefined || body.ban_reason !== undefined || body.ban_duration !== undefined;
+  if (wantsBan) {
+    if (!(await hasAdminPerm(db, identity, 'ban_user'))) return c.json({ error: 'forbidden', message: '无封禁权限' }, 403);
+    if (String(identity.userId) === String(targetId)) return c.json({ error: 'forbidden', message: '不能封禁自己' }, 403);
+  }
 
   // 角色变更
   if (body.role !== undefined) {
@@ -1891,9 +1989,34 @@ app.patch('/api/admin/users/:id', async (c) => {
   // === v4.0: VIP 设置 ===
   if (body.is_vip !== undefined) {
     const isVip = body.is_vip ? 1 : 0;
-    const vipUntil = body.vip_until || null;
+    let vipUntil = body.vip_until || null;
+    // v4.13: 支持设置 VIP 时长（天），0/null = 永久
+    if (isVip && body.vip_duration) {
+      const days = Math.max(1, parseInt(body.vip_duration) || 0);
+      if (days > 0) vipUntil = new Date(Date.now() + days * 86400000).toISOString().slice(0, 19).replace('T', ' ');
+    }
     await db.prepare('UPDATE users SET is_vip = ?, vip_until = ? WHERE id = ?').bind(isVip, vipUntil, targetId).run();
-    changes.push(isVip ? 'VIP 已开通' : 'VIP 已被撤销');
+    changes.push(isVip ? (vipUntil ? 'VIP 已开通（限时）' : 'VIP 已开通') : 'VIP 已被撤销');
+  }
+
+  // === v4.13: 封禁 / 解封（带时长，ban_duration 天；不传=永久） ===
+  if (body.banned !== undefined) {
+    const banned = body.banned ? 1 : 0;
+    if (banned) {
+      const reason = (body.ban_reason || '违反社区规范').toString().slice(0, 500);
+      let banUntil = null;
+      const days = parseInt(body.ban_duration);
+      if (Number.isFinite(days) && days > 0) {
+        banUntil = new Date(Date.now() + days * 86400000).toISOString().slice(0, 19).replace('T', ' ');
+      }
+      await db.prepare("UPDATE users SET banned = 1, banned_at = datetime('now'), ban_reason = ?, ban_until = ? WHERE id = ?")
+        .bind(reason, banUntil, targetId).run();
+      changes.push(banUntil ? `已封禁至 ${banUntil}` : '已永久封禁');
+    } else {
+      await db.prepare("UPDATE users SET banned = 0, banned_at = NULL, ban_reason = NULL, ban_until = NULL WHERE id = ?")
+        .bind(targetId).run();
+      changes.push('已解封');
+    }
   }
 
   // === v4.0: 功能开关 ===
@@ -1943,7 +2066,8 @@ app.get('/api/admin/clips', async (c) => {
   const totalRow = await db.prepare(`SELECT COUNT(*) as cnt FROM clipboards ${where}`).bind(...params).first();
   const rows = await db.prepare(
     `SELECT clip_id, title, content, owner_type, owner_id, owner_name, is_public, editable_by_anyone,
-            password_hash, expires_at, max_views, views, created_at, updated_at, login_required, max_readers
+            password_hash, expires_at, max_views, views, created_at, updated_at, login_required, max_readers,
+            (SELECT COUNT(*) FROM clip_reports cr WHERE cr.clip_id = clipboards.clip_id AND cr.status = 'open') AS report_count
      FROM clipboards ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`
   ).bind(...params, PAGE_SIZE, offset).all();
   return c.json({
@@ -1954,10 +2078,74 @@ app.get('/api/admin/clips', async (c) => {
       is_public: !!r.is_public, editable_by_anyone: !!r.editable_by_anyone,
       has_password: !!r.password_hash, expires_at: r.expires_at,
       max_views: r.max_views, views: r.views, login_required: !!r.login_required,
-      max_readers: r.max_readers, created_at: r.created_at
+      max_readers: r.max_readers, created_at: r.created_at,
+      report_count: r.report_count || 0
     })),
     page, total: totalRow?.cnt || 0, totalPages: Math.max(1, Math.ceil((totalRow?.cnt || 0) / PAGE_SIZE))
   });
+});
+
+// ========== v4.13: 举报审核闭环（管理员/开发者） ==========
+const REPORT_REASON_LABEL = { spam: '恶意/垃圾', porn: '低俗色情', sensitive: '擦边内容', illegal: '违法违规', other: '其他' };
+
+app.get('/api/admin/clips/reports', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (!(await isAdminIdentity(db, identity))) return c.json({ error: 'forbidden' }, 403);
+  const status = (c.req.query('status') || 'open').trim();
+  const validStatus = ['open', 'resolved', 'dismissed', 'all'];
+  const st = validStatus.includes(status) ? status : 'open';
+  const whereSql = st === 'all' ? '' : 'WHERE r.status = ?';
+  const params = st === 'all' ? [] : [st];
+  const rows = await db.prepare(
+    `SELECT r.id, r.clip_id, r.reporter_id, r.reporter_type, r.reason, r.detail, r.status, r.created_at, r.resolved_at, r.resolution,
+            c.title AS clip_title, c.owner_type AS clip_owner_type, c.owner_id AS clip_owner_id, c.owner_name AS clip_owner_name, c.is_public AS clip_is_public,
+            (SELECT COUNT(*) FROM clip_reports r2 WHERE r2.clip_id = r.clip_id AND r2.status = 'open') AS clip_open_reports
+     FROM clip_reports r LEFT JOIN clipboards c ON c.clip_id = r.clip_id ${whereSql} ORDER BY r.created_at DESC LIMIT 200`
+  ).bind(...params).all();
+  return c.json({
+    reports: rows.results.map((r) => ({
+      id: r.id, clip_id: r.clip_id, reporter_id: r.reporter_id, reporter_type: r.reporter_type,
+      reason: r.reason, reason_label: REPORT_REASON_LABEL[r.reason] || r.reason, detail: r.detail || '',
+      status: r.status, created_at: r.created_at, resolved_at: r.resolved_at || null, resolution: r.resolution || '',
+      clip: r.clip_title ? {
+        title: r.clip_title, owner_type: r.clip_owner_type, owner_id: r.clip_owner_id,
+        owner_name: r.clip_owner_name, is_public: !!r.clip_is_public, open_reports: r.clip_open_reports || 0
+      } : null
+    }))
+  });
+});
+
+app.patch('/api/admin/clips/reports/:id', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (!(await isAdminIdentity(db, identity))) return c.json({ error: 'forbidden' }, 403);
+  const id = c.req.param('id');
+  const report = await db.prepare('SELECT id, clip_id, status FROM clip_reports WHERE id = ?').bind(id).first();
+  if (!report) return c.json({ error: 'not_found' }, 404);
+  if (report.status !== 'open') return c.json({ error: 'already_handled', message: '该举报已处理' }, 409);
+
+  let body;
+  try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
+  const status = (body.status || 'resolved').toString();
+  if (!['resolved', 'dismissed'].includes(status)) return c.json({ error: 'bad_status' }, 400);
+  const resolution = (body.resolution || '').toString().slice(0, 500);
+  const action = body.action === 'delete_clip' ? 'delete_clip' : '';
+
+  // 可选：连带删除被举报内容（及其评论/读者/其他举报）
+  if (action === 'delete_clip') {
+    const clipId = report.clip_id;
+    await db.prepare('DELETE FROM clipboards WHERE clip_id = ?').bind(clipId).run();
+    await db.prepare('DELETE FROM comments WHERE clip_id = ?').bind(clipId).run();
+    await db.prepare('DELETE FROM clip_readers WHERE clip_id = ?').bind(clipId).run();
+    await db.prepare('DELETE FROM clip_reports WHERE clip_id = ?').bind(clipId).run();
+    return c.json({ ok: true, deleted_clip: clipId });
+  }
+
+  await db.prepare(
+    "UPDATE clip_reports SET status = ?, resolved_at = datetime('now'), resolved_by = ?, resolution = ? WHERE id = ?"
+  ).bind(status, String(identity.userId), resolution, id).run();
+  return c.json({ ok: true, id: Number(id), status });
 });
 
 // OAuth 子路由
