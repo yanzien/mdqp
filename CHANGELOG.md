@@ -1,12 +1,18 @@
 # 📝 更新日志
 
-mdqp 的主要版本变动记录。当前部署版本 **v4.11.0**。
+mdqp 的主要版本变动记录。当前部署版本 **v4.11.1**。
 
 > **维护约定**：任何功能改动、修复或配置变更，都必须在本文件追加条目，然后运行 `node scripts/sync-docs.mjs` 完成同步：
 > - `/changelog` 页读的是 `public/app.js` 顶部的 `CHANGELOG_MD` 常量（**不走数据库**），脚本负责从本文件写入；
 > - `/help` 页读的是数据库 `pages.help`，脚本负责从 `docs/help.md` 写入——**`docs/help.md` 是帮助内容的唯一源**，后台在线编辑的结果会在下次同步时被覆盖，长期修改请改文件后跑脚本；
 > - 别忘了同步 `src/worker.js` 顶部的 `const VERSION`；
 > - 发布前用 `node scripts/sync-docs.mjs --check` 自检（不同步则退出码 1）。
+
+---
+
+## v4.11.1 · 2026-09-18（公告接口 500 加固）
+
+- 🐞 **修复反馈 #12（`GET /api/announcements` 偶发 500）**：该接口是整个站点公告栏与 `/admin` 公告 tab 的依赖，一旦 500 会被 `api()` 自动错误上报反复刷屏。现改为**查询失败时降级返回空数组（绝不 500）**，并把脏文本清洗（剔除控制字符 + 孤立代理对）前置到 `PUT /api/announcements` 写入端——孤立代理对会让 `JSON.stringify` 抛错进而 500，是头号嫌疑。前端两处调用已有 `data?.announcements` 空值兜底，无需改动。
 
 ---
 
