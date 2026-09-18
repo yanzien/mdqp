@@ -19,7 +19,7 @@ const app = new Hono();
 
 const GUEST_LIMIT = 5;
 const PAGE_SIZE = 20;
-const VERSION = '4.10.1';
+const VERSION = '4.11.0';
 const SEARCH_MAX = 100;
 const RESERVED = new Set([
   'api', 'raw', 'new', 'edit', 'u', 'user', 'users', 'admin', 'login', 'logout',
@@ -595,10 +595,10 @@ app.post('/api/admin/code/apply', async (c) => {
   catch (e) { return c.json({ error: 'gh_error', message: String(e.message || e) }, 502); }
 });
 
-// 其他管理：提交改动审批（覆盖同文件未完成审批）
+// 其他管理：提交改动审批（覆盖同文件未完成审批）——需「编辑并提交代码」权限（开发者始终具备）
 app.post('/api/admin/code/submit', async (c) => {
   const db = c.env.db; const identity = await getIdentity(c);
-  if (!(await hasAdminPerm(db, identity, 'view_code'))) return c.json({ error: 'forbidden' }, 403);
+  if (!(await hasAdminPerm(db, identity, 'edit_code'))) return c.json({ error: 'forbidden' }, 403);
   let body; try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
   const { path, content, sha } = body;
   if (!path || content === undefined) return c.json({ error: 'missing' }, 400);
@@ -1196,6 +1196,8 @@ app.get('/api/me', async (c) => {
       no_cpoauth_nudge: !!uRow?.no_cpoauth_nudge,
       invite_code: uRow?.invite_code || '', invite_count: uRow?.invite_count || 0,
       feature_flags: parseFeatureFlags(uRow?.feature_flags),
+      // v4.11: 暴露后台权限位，供前端区分「仅查看源码」与「可编辑并提交代码」
+      admin_permissions: parseAdminPerms(uRow?.admin_permissions),
       // v4.10: 注册时间（created_at 已在 users 表）+ 来源渠道（首次登录后询问）
       created_at: uRow?.created_at || null,
       source: uRow?.source || '',
