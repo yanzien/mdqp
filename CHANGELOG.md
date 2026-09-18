@@ -1,12 +1,20 @@
 # 📝 更新日志
 
-mdqp 的主要版本变动记录。当前部署版本 **v4.10.1**。
+mdqp 的主要版本变动记录。当前部署版本 **v4.11.0**。
 
 > **维护约定**：任何功能改动、修复或配置变更，都必须在本文件追加条目，然后运行 `node scripts/sync-docs.mjs` 完成同步：
 > - `/changelog` 页读的是 `public/app.js` 顶部的 `CHANGELOG_MD` 常量（**不走数据库**），脚本负责从本文件写入；
 > - `/help` 页读的是数据库 `pages.help`，脚本负责从 `docs/help.md` 写入——**`docs/help.md` 是帮助内容的唯一源**，后台在线编辑的结果会在下次同步时被覆盖，长期修改请改文件后跑脚本；
 > - 别忘了同步 `src/worker.js` 顶部的 `const VERSION`；
 > - 发布前用 `node scripts/sync-docs.mjs --check` 自检（不同步则退出码 1）。
+
+---
+
+## v4.11.0 · 2026-09-18（错误页/看门狗 + `/admin/code` 查看编辑分离）
+
+- 🆕 **系统错误页 `/error` 与 `/404`**：均为 SPA 路由（**不加 `/c/` 前缀**以与片段区分），内容复用你写的剪贴板文稿（`clip_id=error` / `clip_id=404`），老浏览器也能正常访问。未知路径统一回退到 404 文稿。
+- 🆕 **看门狗（哨兵）自动跳转兼容plus**：`index.html` 兜底脚本新增错误分级——`compat`（兼容性 / 脚本启动失败等非小错误）直接跳 `/legacy` 兼容备用页；`fatal`（重大渲染错误）跳 `/error`。带防抖与环路保护，已处于 `/legacy`/`/error` 时不重复跳。
+- 🔐 **`/admin/code` 查看 / 编辑权限分离**：新增 `edit_code` 权限位，与 `view_code` 解耦。仅 `view_code` → 只能浏览源码与审批队列；持有 `edit_code` 或开发者 → 才能编辑并提交改动；开发者仍可一键直部署。`canEdit` 显隐「编辑」按钮，并展示「👁 只读 / ✏️ 可编辑」彩色徽章；权限弹窗中两项用蓝（查看）/ 橙（编辑）配色区分。`/api/me` 现返回 `admin_permissions` 供前端判定；`POST /api/admin/code/submit` 改为校验 `edit_code`。
 
 ---
 
