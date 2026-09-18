@@ -21,6 +21,10 @@ CREATE TABLE IF NOT EXISTS users (
   -- v4.0: VIP 系统
   is_vip INTEGER DEFAULT 0,
   vip_until TEXT DEFAULT NULL,       -- VIP 到期时间，NULL=永久
+  -- v4.10: 注册来源渠道收集（首次登录后询问）
+  source TEXT DEFAULT '',            -- 来源渠道：offline/social/oj/other_share/random/ad/search/unknown，空=未填写
+  source_detail TEXT DEFAULT '',     -- 来源补充说明（"其他分享"等时填写）
+  source_set_at TEXT DEFAULT NULL,   -- 用户填写来源的时间，NULL=未填写（首次未问/跳过）
   -- v4.0: 邀请系统
   invite_code TEXT UNIQUE DEFAULT '',
   inviter_id INTEGER DEFAULT NULL,   -- 邀请人的 users.id
@@ -63,7 +67,12 @@ CREATE TABLE IF NOT EXISTS clipboards (
   -- === v4.0 新增 ===
   login_required INTEGER DEFAULT 0,     -- 仅登录用户可查看
   max_readers INTEGER DEFAULT 0,        -- 唯一读者上限（按人不算次数），0=无限
-  char_limit INTEGER DEFAULT NULL,      -- 字数限制覆盖（NULL=用全局默认150）
+  reader_count INTEGER DEFAULT 0,       -- 当前唯一读者数（isExpired 判满员用；曾漏建导致详情 500）
+  char_limit INTEGER DEFAULT NULL,      -- 字数限制覆盖（NULL=用全局默认）
+
+  -- === v4.6 新增 ===
+  tags TEXT DEFAULT '',                 -- 标签（逗号分隔小写，如 "算法,模板,dp"）
+  pinned INTEGER DEFAULT 0,             -- 1=置顶（我的剪贴板排序优先）
 
   created_at TEXT DEFAULT (datetime('now')),
   updated_at TEXT DEFAULT (datetime('now'))
@@ -277,3 +286,17 @@ INSERT OR IGNORE INTO pages (slug, title, content) VALUES (
 
 mdqp 的主要版本变动记录。当前部署版本 **v4.0**。'
 );
+
+-- M3 埋点（2026-09-10 建）
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  app  TEXT NOT NULL DEFAULT 'mdqp',
+  type TEXT NOT NULL,
+  uid  TEXT DEFAULT '',
+  ref  TEXT DEFAULT '',
+  meta TEXT DEFAULT '',
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_events_app_type ON events(app, type, created_at);
+CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);
+CREATE INDEX IF NOT EXISTS idx_events_uid_type ON events(uid, type, created_at); -- v4.10: page.view 去重查询加速
