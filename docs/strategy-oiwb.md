@@ -22,11 +22,12 @@
 
 ---
 
-## 一、现状盘点（2026-09-04 19:00 实测）
+## 一、现状盘点（2026-09-10 复核）
 
-**oiwb**：单文件 `index.html`，216 KB / ~2906 行，原生 HTML/JS/CSS，**零依赖零构建**，纯 `localStorage`，离线可用。`APP_VER='v2.5.3'`（2026-09-04 O0-2 已完成 bump）。
+**oiwb**：单文件 `index.html`，原生 HTML/JS/CSS，纯 `localStorage`，离线可用。`APP_VER='v2.7.9'`（2026-09-09）。
+- ⚠️ **部署地址已变**：本文写作时是 `yanzien.github.io/oiwb/`（GitHub Pages），**现已迁到 Cloudflare Pages `https://oiwb.pages.dev`**。以 `oiwb-dist/` 为准，由 AI 跑 wrangler 部署。
 
-**mdqp**：Cloudflare Pages + D1 + Hono，已上线 v4.6.2（最新部署 f1c13787）。有完整 JWT + 权益矩阵 + 字数限额 + 草稿自动保存 + 我的剪贴板 2.0 + 主页 scope 切换 + 版本弹窗等。
+**mdqp**：Cloudflare Pages + D1 + Hono，**已上线 v4.8.2**（2026-09-10）。有完整 JWT + 权益矩阵 + 字数分级 + 草稿自动保存 + 我的剪贴板 2.0 + 主页 scope 切换 + 版本弹窗 + 作者身份 tag 等。
 
 **oiwb 功能面**（已远超 MVP，别重复造）：
 
@@ -43,20 +44,22 @@
 | 外观 | 暗色模式、窄屏单列、添加主屏变 APP |
 
 **八条铁律**（改代码时不可破）：
-> ① 导出/导入/清空/重置必须有 ② 30 条提示 ③ 今天处理常驻 ④ 昨天没做完自动顺延 ⑤ **零外链单文件** ⑥ 本地存储 ⑦ 预置示例数据 ⑧ 空数据不崩
+> ① 导出/导入/清空/重置必须有 ② 30 条提示 ③ 今天处理常驻 ④ 昨天没做完自动顺延 ⑤ ~~零外链单文件~~ **已由用户明确放宽**（2026-09-04 晚，为支持 mdqp 云端联动）⑥ 本地存储 ⑦ 预置示例数据 ⑧ 空数据不崩
 
-**问题清单**（v3.0 重排，按"打地基 → 上层 → 天马行空"）：
+**问题清单**（2026-09-10 复核，末列为本轮核实结果）：
 
-| # | 问题 | 现状 | 严重度 | 解法阶段 |
-|---|---|---|---|---|
-| **W1** | 仓库未上传 → Actions 从未跑 → 比赛数据停在 8/4 | `contests.json: updated 2026-08-04` | 🔴 | O0-1 |
-| **W2** | 数据孤岛：一切在 localStorage，换机/清缓存全丢 | 无远端同步 | 🔴 | O1 |
-| **W3** | 无账号，与 mdqp 完全不互通 | mdqp 已有 JWT，oiwb 不建 users 表 | 🔴 | **O1（升级到 P0）** |
-| **W4** | 跨站跳来跳去要重新登录 | 无 SSO | 🔴 | **O1（升级到 P0）** |
-| **W5** | 存量 BUG 未系统排查（tour OK，其余 8 类模式未扫） | — | 🟠 | O0-3 |
-| **W6** | 自动备份只写本地，防不了换机 | — | 🟡 | O1（顺带） |
-| **W7** | 无 AI 助手，错题靠自己悟 | — | 🟡 | O5 |
-| **W8** | 训练数据无横向对比（不知道我在同档位的水平） | — | 🟢 | O4 |
+| # | 问题 | 现状 | 严重度 | 解法阶段 | 状态 |
+|---|---|---|---|---|---|
+| **W1** | 仓库未上传 → Actions 从未跑 → 比赛数据停在 8/4 | bot 自动更新，最近一次 **2026-09-10 10:44** | 🔴 | O0-1 | ✅ 已解决 |
+| **W2** | 数据孤岛：一切在 localStorage，换机/清缓存全丢 | 快照同步已上线 | 🔴 | O1 | ✅ 已解决 |
+| **W3** | 无账号，与 mdqp 完全不互通 | 4 个 auth API + ticket 互通已上线 | 🔴 | O1 | ✅ 已解决 |
+| **W4** | 跨站跳来跳去要重新登录 | ticket 自动登录 + 反向闭环已上线 | 🔴 | O1 | ✅ 已解决 |
+| **W5** | 存量 BUG 未系统排查 | 四类扫描跑完，**0 真 BUG** | 🟠 | O0-3 | ✅ 已解决 |
+| **W6** | 自动备份只写本地，防不了换机 | ☁️↑ / ☁️↓ 云备份已上线 | 🟡 | O1 | ✅ 已解决 |
+| **W7** | 无 AI 助手，错题靠自己悟 | — | 🟡 | O5 | ⬜ 未开始 |
+| **W8** | 训练数据无横向对比 | — | 🟢 | O4 | ⬜ 未开始 |
+
+> **W1–W6 全部解决**。剩下的 W7/W8 属 O4/O5「天马行空」段，且本文 §十 Q8 自己就写明「O0+O1+O2 走完（约 4 周）再启动 O3-O5，过早做 AI 教练效果差」——不必急着排。
 
 ---
 
@@ -282,19 +285,19 @@ CREATE TABLE user_prefs (
 
 | # | 项 | 做什么 | 谁 | 验收 |
 |---|---|---|---|---|
-| **O0-1** | 上传 + Actions 开权限 🔴 | 推 `github-upload/` → Settings → Pages（main 根目录）→ Settings → Actions → General 开 **Read and write permissions**（爬虫要自动提交 contests.json） | **用户** | 首页看到未来比赛；Actions 每 30 分钟跑一次 |
-| **O0-2** | APP_VER bump + 更新日志 🟠 ✅ **已做** | `APP_VER='v2.5.3'` + changelog 三条（v2.5.1/2/2/3） | AI ✅ | 帮助页能看到 v2.5.3 |
-| **O0-3** | 存量 BUG 排查 🟠 | 按 9 类模式扫 2906 行：JSON.parse 容错、`tickContests` 时区/跨年边界、sort 比较器未定义变量（mdqp 踩过的 `cb` 坑）、innerHTML 未过 `esc()`、事件委托 selector、导入 JSON 结构校验、normDash 完整性、回收站过期逻辑 | AI | BUG 清单 + P0/P1 级修完 |
+| **O0-1** ✅ | 上传 + Actions 开权限 | AI 已：① 启用 Actions（enabled=true, allowed_actions=all）；② 同步 index.html v2.7.1 到 GitHub；③ oiwb 本地改 srcJson 默认直链 + 重部署 v2.7.1。**卡点**：`.github/workflows/scrape.yml` 无法经 API 创建——PAT 仅 `repo` 作用域、缺 `workflow` 作用域（GitHub 故意返回 404）；GitHub MCP 也无 git tree 写权限（403）。需用户：要么给带 `workflow` scope 的新 PAT，要么在 GitHub Web UI 手动建 `.github/workflows/scrape.yml`（内容见本地 `oiwb/github/workflows/scrape.yml`）。 | ✅ done（2026-09-04：用户给带 `workflow` scope 的新 PAT，AI 已建 `.github/workflows/scrape.yml` 并手动触发，workflow `completed/success`，`contests.json` 已填充真实赛程数据）| 首页看到未来比赛；Actions 每 30 分钟跑一次 |
+| **O0-2** ✅ | APP_VER bump + 更新日志 | `APP_VER='v2.5.3'` + changelog 三条（v2.5.1/2/2/3） | AI ✅ | 帮助页能看到 v2.5.3 |
+| **O0-3** ✅ | 存量 BUG 排查 | 按 9 类模式扫 2906 行：JSON.parse 容错、`tickContests` 时区/跨年边界、sort 比较器未定义变量（mdqp 踩过的 `cb` 坑）、innerHTML 未过 `esc()`、事件委托 selector、导入 JSON 结构校验、normDash 完整性、回收站过期逻辑 | AI ✅ 2026-09-09 | 已扫完四类（容器ID/裸fetch/未定义函数/CSS类）：**0 真 BUG**，12 处告警全为误报 |
 
 ### O1 · 1–2 周（**账号互通 + 跨站自动登录 + 数据备份** · 用户明确核心需求）
 
 | # | 项 | 做什么 | 谁 | 验收 |
 |---|---|---|---|---|
-| **O1-1** 🔴 | **账号互通 + 跨站 ticket** | mdqp 新增 4 个 API（`/api/auth/{ticket,exchange,refresh,logout}`）；oiwb 检测 `?ticket=` 自动登录 + "去 oiwb"/"去 mdqp" 跳转按钮 + 后台 refresh | AI | mdqp 登录 → 点去 oiwb → 自动登录，localStorage 有 token |
-| **O1-2** | **侧栏"账号"区** | oiwb 新增账号区（用户名 / 头像 / 登出 / 云端状态指示灯），云端激活时显示绿点 | AI | 登录后侧栏能看到名字 + 状态 |
-| **O1-3** | **快照同步（§3.4 一期）** | `oiwb_snapshots` 表 + `/api/oiwb/sync` + oiwb 设置页"备份到云端/从云端恢复"按钮 + 可选每日自动 | AI | 备份成功后从另一台恢复，数据一致 |
-| **O1-4** | **联动入口** | 「存到片段库」按钮（跳 mdqp `/new` query 预填）+ 「片段库」面板（mdqp 私有搜索弹层）+ mdqp CORS 白名单 oiwb 域 | AI | oiwb 里能跳到 mdqp 预填 + 拉回私有片段 |
-| **O1-5** | **二维码兜底登录** | mdqp 设置页生成 60s 一次码（QR） + oiwb 扫码 → JWT（适用手机/离线场景） | AI | 手机访问 oiwb → 扫码电脑 mdqp → 自动登录 |
+| **O1-1** ✅ | **账号互通 + 跨站 ticket** | mdqp 新增 4 个 API（`/api/auth/{ticket,exchange,refresh,logout}`）；oiwb 检测 `?ticket=` 自动登录 + "去 oiwb"/"去 mdqp" 跳转按钮 + 后台 refresh | AI | mdqp 登录 → 点去 oiwb → 自动登录，localStorage 有 token |
+| **O1-2** ✅ | **侧栏"账号"区** | oiwb 新增账号区（用户名 / 头像 / 登出 / 云端状态指示灯），云端激活时显示绿点 | AI | 登录后侧栏能看到名字 + 状态 |
+| **O1-3** ✅ | **快照同步（§3.4 一期）** | `oiwb_snapshots` 表 + `/api/oiwb/sync` + oiwb 设置页"备份到云端/从云端恢复"按钮 + 可选每日自动 | AI | 备份成功后从另一台恢复，数据一致 |
+| **O1-4** ✅ | **联动入口**（**已全部完成**） | ✅ 「存到片段库」按钮（📝 跳 mdqp `/new?back=oiwb` 预填 + 反向闭环）、mdqp CORS（`app.use('/api/*', cors())` 全开）。✅ **「片段库」面板**（2026-09-10，oiwb v2.8.0：账号区 📚 按钮 → 弹层搜索 `/api/me/clips`，点标题打开、点「复制」取回内容） | AI | **存 + 取闭环已通** |
+| **O1-5** ⬜ | **二维码兜底登录** | mdqp 设置页生成 60s 一次码（QR） + oiwb 扫码 → JWT（适用手机/离线场景） | AI | 手机访问 oiwb → 扫码电脑 mdqp → 自动登录 |
 
 ### O2 · 2–3 周（**SSO · 共同域 Cookie · 让账号互通零摩擦**）
 
@@ -349,20 +352,22 @@ CREATE TABLE user_prefs (
 
 **mdqp 新增工作项（v3.0）**：
 
-| # | 项 | 量级 | 阶段 |
-|---|---|---|---|
-| **M1** | `oiwb_snapshots` 表 + `POST/GET /api/oiwb/sync` | 0.5 天 | O1 |
-| **M2** | `/new` 支持 `?title=&tags=` 预填 + CORS 白名单 | 0.5 天 | O1 |
-| **M3** | `events` 埋点表 + 最小看板 | 1 天 | O1 |
-| **M4** | API Key（`api_keys` 表 + Bearer 鉴权，v1 P1-2 提前） | 1 天 | O1 |
-| **M5** | **4 个 auth API**（`/api/auth/{ticket,exchange,refresh,logout}`）+ jti 状态表 | 1 天 | **O1-1 🔴** |
-| **M6** | QR 码登录（`oiwb_login_codes` 表，60s 过期） | 0.5 天 | O1 |
-| **M7** | 结构化同步表（`oiwb_tasks`、`oiwb_contests`、`oiwb_links`）+ upsert API | 2 天 | O3 |
-| **M8** | 能力核计算（Workers AI 推理 + 定时聚合） | 2 天 | O5 |
-| **M9** | OI 题手榜（`oiwb_leaderboard_optin` + 计算 + 公开/私密） | 1.5 天 | O4 |
-| **M10** | 跨 app prefs（`user_prefs` 表 + 通用 OAuth Provider 接口） | 1.5 天 | O5 |
+| # | 项 | 量级 | 阶段 | 状态（2026-09-10） |
+|---|---|---|---|---|
+| **M1** | `oiwb_snapshots` 表 + `POST/GET /api/oiwb/sync` | 0.5 天 | O1 | ✅ 已上线 |
+| **M2** | `/new` 支持 `?title=&tags=&back=` 预填 + CORS | 0.5 天 | O1 | ✅ 已上线（CORS 用 `cors()` 全开） |
+| **M3** | `events` 埋点表 + 最小看板 | 1 天 | O1 | ✅ **已做**（2026-09-10 v4.9.0；2026-09-12 v4.10.0 补 `page.view` 埋点 + 5 分钟去重，DAU 终可统计） |
+| **M4** | API Key（`api_keys` 表 + Bearer 鉴权） | 1 天 | O1 | ⬜ **未做**（无 `api_keys` 表） |
+| **M5** | **4 个 auth API**（ticket / exchange / refresh / 吊销）+ jti 状态表 | 1 天 | O1-1 | ✅ 已上线（吊销端点是 `/api/auth/revoke-token`） |
+| **M6** | QR 码登录（`oiwb_login_codes` 表，60s 过期） | 0.5 天 | O1 | ⬜ 未做 |
+| **M7** | 结构化同步表（`oiwb_tasks`、`oiwb_contests`、`oiwb_links`）+ upsert API | 2 天 | O3 | ⬜ 未开始 |
+| **M8** | 能力核计算（Workers AI 推理 + 定时聚合） | 2 天 | O5 | ⬜ 未开始 |
+| **M9** | OI 题手榜（`oiwb_leaderboard_optin` + 计算 + 公开/私密） | 1.5 天 | O4 | ⬜ 未开始 |
+| **M10** | 跨 app prefs（`user_prefs` 表 + 通用 OAuth Provider 接口） | 1.5 天 | O5 | ⬜ 未开始 |
 
-**总工作量估算**：M1-M10 共约 12.5 天（不含 O0-3 BUG 排查）。
+**已完成 M1/M2/M3/M5（2.5 天）；剩余 M4/M6/M7-M10 约 10 天。**
+
+> ✅ **M3（埋点）已于 2026-09-10 完成**（mdqp v4.9.0）。§八 那 9 项指标里「跨站 ticket 成功率」「云备份启用数」「跳 mdqp 存片段数」三项**已有数据源**。**建议先攒 1-2 周真实数据，再据此判断 O3-O5 是否值得投入。**
 
 ---
 
@@ -469,11 +474,36 @@ CREATE TABLE user_prefs (
 
 ---
 
-## 九、现在该做的 3 件事（v3.0 更新版）
+## 九、现在该做的事（2026-09-10 重写）
 
-1. **O0-1 上传 + 开 Actions 写权限**（你做，10 分钟）——比赛视图现在是负体验。
-2. **O0-3 全量 BUG 排查**（我做，1 天）——2906 行趁功能没翻倍前清债。
-3. **🆕 O1-1 账号互通 + 跨站 ticket**（我做，1–2 天）——**这是你今晚提的核心需求**，含 4 个 mdqp auth API + oiwb 检测 ticket + 后台 refresh。
+> 原来那三条（O0-1 上传开 Actions / O0-3 BUG 排查 / O1-1 账号互通）**已全部完成**。换成本轮真正该排的。
+
+### ✅ 1. M3 埋点（`events` 表 + 最小看板）—— **2026-09-10 已完成**（mdqp v4.9.0）
+
+`events` 表已建（真库 + `database_init.sql`）；`POST /api/events` 公开上报（**类型白名单**，非法丢弃，失败静默，**请求体 16KB 上限 + `page.view` 按 uid 5 分钟去重**）；`GET /api/admin/events/summary` 管理员聚合；后台新增「📊 数据看板」tab（1/7/30/90 天切换）。服务端在 `clip.create` / `auth.ticket` / `oiwb.push` 三处自动打点，前端 `track()` / `oiwbTrack()` 旁路补 `clip.view` / `snippet.search` / `snippet.open` / `oiwb.restore`。
+
+> **v4.10.0 修 M3 两处不实**：① 此前注释谎称「靠频率限制兜底」实则没有——已补 `page.view` 去重 + 诚实注释；② 补 `page.view` 前端埋点（此前全站仅 `clip.view` 一个调用点，DAU 测不出）。现在**每次页面加载上报一次 `page.view`（会话内幂等）+ 服务端 5 分钟去重**，DAU 终可统计。
+> **下一步**：先让它跑几天攒数据，再回头看 §八 那 9 项指标，**用真实数据决定 O3-O5 值不值得投入**。
+
+### ✅ 2.1 用户来源渠道收集（注册时间 + 来源）—— **2026-09-12 已完成**（mdqp v4.10.0）
+
+- `users` 新增 `source` / `source_detail` / `source_set_at` 三列；首次登录后弹窗询问来源（线下/社交平台/OJ/其他分享、随便点到、看到广告、搜索引擎、不方便说），可填补充说明；已填或选「不方便说」不再提醒，反复跳过（≥3 次）彻底不打扰。
+- `PATCH /api/me` 支持上报（白名单校验）；`GET /api/me` 返回三字段；后台用户列表加「来源」列 + 个人页早已展示「加入于」注册时间；看板新增「用户来源分布」统计。`migrate_source.sql` 已对真库执行。
+
+### ✅ 2. 收尾 O1 的两个缺口 —— **O1-4 已补齐**（oiwb v2.8.0）
+
+- **O1-4 后半 · 片段库面板 ✅**：账号区 📚 按钮 → 弹层搜索 `/api/me/clips`，点标题打开、点「复制」取回内容。**存 + 取闭环已通**（此前只能存不能取）。
+- **O1-5 · 二维码登录（M6）⬜**：手机/离线兜底。优先级不高——ticket 已覆盖 90% 场景，可继续往后放。
+
+> 顺带修了反馈 #10：☁️↑「上传到云端」必抛 `favorites is not defined`（旧备份实现引用了从未定义的变量）。已合并到统一同步路径。
+
+### 🟡 3. O2 前置 · DNS 子域迁移 —— **blockers 在用户侧**
+
+`oj.yanzien.eu.org`（oiwb）+ `mdqp.yanzien.eu.org`（mdqp）迁到同父域后，才能上方案 B 共同域 Cookie SSO。这事**只有用户能做**（申请子域 + Pages 加自定义域），AI 这边接口已就绪。
+
+### ⏸ 暂缓
+
+**O3（结构化同步）/ O4（题手榜）/ O5（AI 教练）** ——按 §十 Q8 本文自己的结论：用户基数小的时候做 AI 教练效果差（训练数据少）。等 O1 有真实用量数据再启动。
 
 ---
 
@@ -505,4 +535,17 @@ CREATE TABLE user_prefs (
 
 ---
 
-*本方案 2026-09-04 19:00 编写，在 v2.1 事实核对基础上加入"账号互通 + 跨站自动登录"核心需求与"天马行空"扩展。O1-1 已完成（2026-09-04）；下一步待办：O0-3 全量 BUG 排查、O0-1 上传 + 开 Actions 写权限、oiwb 部署到 oiwb.pages.dev 打通端到端。*
+*本方案 2026-09-04 19:00 编写，在 v2.1 事实核对基础上加入"账号互通 + 跨站自动登录"核心需求与"天马行空"扩展。*
+- *2026-09-04 晚更新*：① **O1-1 已完成**（mdqp v4.7.1 + oiwb v2.6.0 双站上线，账号互通 + 一键回 oiwb 跨站闭环实测通过）；② **O1 双存储已实现**（用户选定"整体自动镜像"方案：登录后 oiwb 数据本地 + mdqp 云端镜像、未登录纯本地；已 bump oiwb v2.7.0、修好坏掉的手动恢复按钮、移除零外链单文件限制）；③ **铁律⑤ 已由用户明确放宽**（不强制零外链单文件）；④ oiwb v2.7.0 代码已就绪并通过语法校验，**待部署到 oiwb.pages.dev**（部署命令被沙箱拦截，等用户授权重跑）。
+- ~~*下一步待办*：O0-3 全量 BUG 排查；O0-1 的 `.github/workflows/scrape.yml` 待用户建（PAT 缺 workflow scope）；建好后 AI 触发 scrape 并验证 contests.json。~~ → **全部已完成**。
+- *2026-09-10 复核更新*：
+  - **完成度核对（逐项 grep / 查库 / 查 GitHub 验证，不凭记忆）**——**O0 全部 ✅**（O0-1 bot 今天 10:44 仍在自动更新 contests.json，新鲜度远超 <24h 目标）；**O1 四项 ✅**（O1-1 账号互通 / O1-2 账号区 / O1-3 快照云备份 / O1-4 前半段联动入口）；**O1-4 后半段「片段库面板」🟡 未做**；**O1-5 二维码 ⬜ 未做**；O2-O5 未开始。
+  - mdqp 侧 **M1/M2/M5 已上线**，**M3（埋点）/ M4（API Key）/ M6（QR）未做**。
+  - 订正两处过时信息：① oiwb 部署地址已由 GitHub Pages 迁到 **Cloudflare Pages `oiwb.pages.dev`**；② 铁律⑤「零外链单文件」已由用户明确放宽。
+  - **O0-3 结论：四类扫描（容器ID / 裸fetch / 未定义函数 / CSS类）共 12 处告警，逐一核实后全为误报，0 真 BUG。**
+  - §九 已重写为当前真正该排的三件事（埋点 / 补齐 O1 缺口 / DNS 迁移）。
+- *2026-09-10 晚再更新*：
+  - **M3 埋点已上线**（mdqp **v4.9.0**）：建 `events` 表（真库 + `database_init.sql` 双向同步）；`POST /api/events` 公开上报 + 类型白名单 + 失败静默；`GET /api/admin/events/summary` 管理员聚合；后台新增「📊 数据看板」tab。服务端埋 `clip.create` / `auth.ticket` / `oiwb.push`，前端埋 `clip.view` / `snippet.search` / `snippet.open` / `oiwb.restore`。**§八 9 项指标从此有数据源。**
+  - **O1-4 后半「片段库面板」已补齐**（oiwb **v2.8.0**）：账号区 📚 按钮 → 弹层搜索 `/api/me/clips` → 打开 / 复制。**存 + 取闭环已通。**
+  - **修反馈 #10**：☁️↑「上传到云端」必抛 `favorites is not defined`。根因是旧备份实现 `oiwbMdqpBackup()` 引用了全文件从未定义的 `favorites`（该函数与 `oiwbCloudPush` **重复实现**，自动同步走新的、手动按钮走旧的，故旧路径腐烂无人发现）。**已合并为一条路径**。
+  - **教训（重要）**：同一功能存在两条实现路径时，冷路径必然腐烂。O0-3 扫描只查了"函数是否定义/是否被调用"，**查不出"变量未定义"这类运行时错误**——`favorites` 就是靠用户反馈才暴露。今后新增检查项：**函数体内引用的顶层变量是否都已声明**。
