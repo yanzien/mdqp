@@ -72,7 +72,22 @@
       return { '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c];
     });
   }
-  function show(msg) {
+  /* 跳转到兼容/错误页（带防抖，避免重复跳转或环路） */
+  function redirectTo(url) {
+    try { if (window.__mdqpErrRedirected) return; } catch (e) {}
+    var p = (location.pathname || '/').replace(/\/+$/, '');
+    if (p === url || p + '/' === url) return;
+    // 已在 /legacy（或 /error、/404）则不重复跳，防止抖动/环路
+    if (url.indexOf('/legacy') === 0 && p.indexOf('/legacy') === 0) return;
+    if (p === '/error' || p === '/404') return;
+    try { window.__mdqpErrRedirected = true; } catch (e) {}
+    try { if (window.sessionStorage) window.sessionStorage.setItem('mdqp_err_from', p); } catch (e) {}
+    location.href = url;
+  }
+  /* level: undefined/缺省=普通提示横幅；'compat'=兼容问题直接跳兼容plus；'fatal'=重大错误跳 /error */
+  function show(msg, level) {
+    if (level === 'compat') { redirectTo('/legacy'); return; }
+    if (level === 'fatal') { redirectTo('/error'); return; }
     if (!msg) return;
     var text = String(msg).slice(0, 200);
     try { if (window.sessionStorage) window.sessionStorage.setItem(KEY, text); } catch (e) {}
@@ -116,7 +131,7 @@
     if (window.__MDQP_BOOTED || window.__MDQP_LEGACY) return;
     var app = document.getElementById('app');
     var empty = !app || String(app.textContent || '').replace(/\s/g, '').length < 10;
-    if (empty) show('脚本未能启动（可能是网络拦截，或缓存了旧版文件），请硬刷新（Ctrl+F5）试试');
+    if (empty) show('脚本未能启动（可能是网络拦截，或缓存了旧版文件），正在切换到兼容备用页…', 'compat');
   }
   document.addEventListener('DOMContentLoaded', function () { setTimeout(watchdog, 5000); });
   window.addEventListener('load', function () { setTimeout(watchdog, 2000); });
