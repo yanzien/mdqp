@@ -2,7 +2,7 @@
  * mdqp v4.0 — Cloudflare Worker (Hono + D1)
  *
  * 权限模型 v4.0:
- *  - 登录用户(cpoauth): 日限5/月限50剪贴板；每板300字(中文全算英文折半)；管理员与有效VIP豁免字数；功能开关可单独关闭
+ *  - 登录用户(cpoauth): 日限5/月限50剪贴板；每板字数按信任等级分级（L0/L1 1500、L2 5000、L3/VIP/站长不限，防滥用硬顶 20000 等效字）；功能开关可单独关闭
  *  - 游客(未登录): 周限5个；协作板；按设备指纹算唯一读者
  *  - VIP: 金色标识，管理员授予
  *  - 邀请系统: 邀请码+链接，tier 奖励自动发放
@@ -19,7 +19,7 @@ const app = new Hono();
 
 const GUEST_LIMIT = 5;
 const PAGE_SIZE = 20;
-const VERSION = '4.7.1';
+const VERSION = '4.10.1';
 const SEARCH_MAX = 100;
 const RESERVED = new Set([
   'api', 'raw', 'new', 'edit', 'u', 'user', 'users', 'admin', 'login', 'logout',
@@ -485,7 +485,14 @@ app.post('/api/feedback', async (c) => {
 app.get('/api/feedback', async (c) => {
   const db = c.env.db;
   const identity = await getIdentity(c);
-  if (!(await isAdminIdentity(db, identity))) return c.json({ error: 'forbidden' }, 403);
+  // v4.7.5 反馈 #4：普通用户也能看反馈（只读、脱敏、不含已驳回）
+  if (!(await isAdminIdentity(db, identity))) {
+    const pub = await db.prepare(
+      `SELECT id, type, status, situation, content, admin_note, author_name, created_at
+       FROM feedback WHERE status != 'rejected' ORDER BY created_at DESC LIMIT 100`
+    ).all();
+    return c.json({ feedback: pub.results, readonly: true });
+  }
   const status = c.req.query('status');
   const rows = status
     ? await db.prepare('SELECT * FROM feedback WHERE status = ? ORDER BY created_at DESC').bind(status).all()
@@ -661,22 +668,26 @@ app.get('/api/clips', async (c) => {
   const q = (c.req.query('q') || '').trim().slice(0, SEARCH_MAX);
   const offset = (page - 1) * PAGE_SIZE;
 
-  let where = "WHERE is_public = 1 AND (expires_at IS NULL OR expires_at > datetime('now')) AND (max_views = 0 OR views < max_views)";
+  // v4.8.2: 带 c. 前缀（需 LEFT JOIN users 取作者角色/VIP）
+  let where = "WHERE c.is_public = 1 AND (c.expires_at IS NULL OR c.expires_at > datetime('now')) AND (c.max_views = 0 OR c.views < c.max_views)";
   const params = [];
   if (q) {
-    where += ' AND (title LIKE ? OR content LIKE ? OR owner_name LIKE ?)';
+    where += ' AND (c.title LIKE ? OR c.content LIKE ? OR c.owner_name LIKE ?)';
     params.push(`%${q}%`, `%${q}%`, `%${q}%`);
   }
 
-  const totalRow = await db.prepare(`SELECT COUNT(*) as cnt FROM clipboards ${where}`).bind(...params).first();
+  const totalRow = await db.prepare(`SELECT COUNT(*) as cnt FROM clipboards c ${where}`).bind(...params).first();
   const total = totalRow?.cnt || 0;
 
   const rows = await db
     .prepare(
-      `SELECT clip_id, title, content, owner_type, owner_id, owner_name, editable_by_anyone,
-              password_hash, expires_at, max_views, views, created_at, updated_at,
-              login_required, max_readers
-       FROM clipboards ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`
+      `SELECT c.clip_id, c.title, c.content, c.owner_type, c.owner_id, c.owner_name, c.editable_by_anyone,
+              c.password_hash, c.expires_at, c.max_views, c.views, c.created_at, c.updated_at,
+              c.login_required, c.max_readers, COALESCE(c.tags, '') AS tags,
+              u.role AS owner_role, u.is_vip AS owner_is_vip, u.vip_until AS owner_vip_until
+       FROM clipboards c
+       LEFT JOIN users u ON c.owner_type = 'user' AND u.id = c.owner_id
+       ${where} ORDER BY c.created_at DESC LIMIT ? OFFSET ?`
     )
     .bind(...params, PAGE_SIZE, offset)
     .all();
@@ -690,12 +701,18 @@ app.get('/api/clips', async (c) => {
       owner_type: r.owner_type,
       owner_id: r.owner_id,
       owner_name: r.owner_name,
+      // v4.8.2: 作者角色/VIP，供首页与剪贴板页在用户名后显示身份 tag
+      owner_role: r.owner_role || null,
+      owner_is_vip: !!r.owner_is_vip,
+      owner_vip_until: r.owner_vip_until || null,
       editable_by_anyone: !!r.editable_by_anyone,
       expires_at: r.expires_at,
       max_views: r.max_views,
       views: r.views,
       login_required: !!r.login_required,
       max_readers: r.max_readers,
+      // v4.7.5 反馈 #5：列表也返回标签（此前只在 /api/me/clips 返回，首页卡片永远空）
+      tags: parseTags(r.tags),
       created_at: r.created_at,
       updated_at: r.updated_at
     })),
@@ -763,6 +780,11 @@ app.get('/api/clips/:clipId', async (c) => {
     await db.prepare('UPDATE clipboards SET views = views + 1 WHERE clip_id = ?').bind(clipId).run();
   }
 
+  // v4.8.2: 作者身份（角色/VIP），供剪贴板页在用户名后显示 tag
+  const ownerInfo = r.owner_type === 'user'
+    ? await db.prepare('SELECT role, is_vip, vip_until FROM users WHERE id = ?').bind(String(r.owner_id)).first()
+    : null;
+
   return c.json({
     clip_id: r.clip_id,
     title: r.title,
@@ -770,6 +792,10 @@ app.get('/api/clips/:clipId', async (c) => {
     owner_type: r.owner_type,
     owner_id: r.owner_id,
     owner_name: r.owner_name,
+    // v4.8.2: 作者角色/VIP（游客为 null）
+    owner_role: ownerInfo?.role || null,
+    owner_is_vip: !!ownerInfo?.is_vip,
+    owner_vip_until: ownerInfo?.vip_until || null,
     is_public: !!r.is_public,
     editable_by_anyone: !!r.editable_by_anyone,
     has_password: !!r.password_hash,
@@ -938,6 +964,9 @@ app.post('/api/clips', async (c) => {
        password_hash, expires_at, max_views, login_required, max_readers, tags)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).bind(clipId, title, content, ownerType, ownerId, ownerName, isPublic ? 1 : 0, editableByAnyone, passwordHash, expiresAt, maxViews, loginRequired, maxReaders, tagsStr).run();
+
+  // M3 埋点：剪贴板创建（旁路，失败不影响返回）
+  await logEvent(db, 'mdqp', 'clip.create', ownerType === 'user' ? ownerId : '', clipId, isPublic ? 'public' : 'private');
 
   return c.json({ ok: true, clip_id: clipId, owner_type: ownerType, tags: parseTags(tagsStr) });
 });
@@ -1112,7 +1141,8 @@ app.get('/api/me', async (c) => {
     const uRow = await db.prepare(
       `SELECT username, role, bio, signature, linked_accounts, is_vip, vip_until,
               invite_code, invite_count, feature_flags, password_hash,
-              email, email_verified, no_cpoauth_nudge, created_at
+              email, email_verified, no_cpoauth_nudge, created_at,
+              source, source_detail, source_set_at
        FROM users WHERE id = ?`
     ).bind(String(identity.userId)).first();
     const clips = await db.prepare(
@@ -1166,6 +1196,11 @@ app.get('/api/me', async (c) => {
       no_cpoauth_nudge: !!uRow?.no_cpoauth_nudge,
       invite_code: uRow?.invite_code || '', invite_count: uRow?.invite_count || 0,
       feature_flags: parseFeatureFlags(uRow?.feature_flags),
+      // v4.10: 注册时间（created_at 已在 users 表）+ 来源渠道（首次登录后询问）
+      created_at: uRow?.created_at || null,
+      source: uRow?.source || '',
+      source_detail: uRow?.source_detail || '',
+      source_set_at: uRow?.source_set_at || null,
       quota: { daily_used: dayCnt?.cnt || 0, daily_limit: dailyLimit, monthly_used: monthCnt?.cnt || 0, monthly_limit: monthlyLimit },
       clips: clips.results.map((r) => ({
         clip_id: r.clip_id, title: r.title || '无标题', preview: makePreview(r.content),
@@ -1321,11 +1356,23 @@ app.patch('/api/me', async (c) => {
   if (body.bio !== undefined) fields.bio = String(body.bio).slice(0, 500);
   // v4.4: 「不再提示绑定 cpoauth」持久化（跨设备一致）
   if (body.no_cpoauth_nudge !== undefined) fields.no_cpoauth_nudge = body.no_cpoauth_nudge ? 1 : 0;
+  // v4.10: 来源渠道（首次登录后询问；白名单校验，仅允许已知渠道 + 空/unknown）
+  const SRC_OK = new Set(['', 'offline', 'social', 'oj', 'other_share', 'random', 'ad', 'search', 'unknown']);
+  let srcSetAt = null; // null=不变；'now'=设为当前时间；'clear'=置 NULL
+  if (body.source !== undefined) {
+    const s = SRC_OK.has(body.source) ? body.source : '';
+    fields.source = s;
+    srcSetAt = s ? 'now' : 'clear';
+  }
+  if (body.source_detail !== undefined) fields.source_detail = String(body.source_detail).slice(0, 100);
   if (Object.keys(fields).length === 0) return c.json({ error: 'nothing_to_update' }, 400);
   const cols = Object.keys(fields).map((k) => `${k} = ?`).join(', ');
   const vals = Object.values(fields);
-  await db.prepare(`UPDATE users SET ${cols} WHERE id = ?`).bind(...vals, String(identity.userId)).run();
-  return c.json({ ok: true, ...fields });
+  // source_set_at 用 SQL 字面量（datetime('now')/NULL），不走参数绑定
+  const setAtSql = srcSetAt === 'now' ? "source_set_at = datetime('now')" : srcSetAt === 'clear' ? 'source_set_at = NULL' : null;
+  const sql = `UPDATE users SET ${cols}${setAtSql ? ', ' + setAtSql : ''} WHERE id = ?`;
+  await db.prepare(sql).bind(...vals, String(identity.userId)).run();
+  return c.json({ ok: true, ...fields, source_set_at: srcSetAt === 'now' ? (new Date().toISOString().slice(0, 19).replace('T', ' ')) : (srcSetAt === 'clear' ? null : undefined) });
 });
 
 // ========== 战绩概览（cp:summary 代理，best-effort + D1 缓存） ==========
@@ -1722,7 +1769,7 @@ app.get('/api/admin/users', async (c) => {
     `SELECT u.id, u.username, u.display_name, u.avatar, u.role, u.bio, u.signature,
             u.linked_accounts, u.clip_limit, u.limit_period, u.admin_permissions,
             u.created_at, u.last_login, u.is_vip, u.vip_until, u.invite_code,
-            u.invite_count, u.feature_flags,
+            u.invite_count, u.feature_flags, u.source, u.source_set_at,
             (SELECT COUNT(*) FROM clipboards c WHERE c.owner_type = 'user' AND c.owner_id = u.id) AS clip_count
      FROM users u ${where} ORDER BY u.id ASC LIMIT ? OFFSET ?`
   ).bind(...params, PAGE_SIZE, offset).all();
@@ -1737,9 +1784,25 @@ app.get('/api/admin/users', async (c) => {
       created_at: r.created_at, last_login: r.last_login, clip_count: r.clip_count || 0,
       is_vip: !!r.is_vip, vip_until: r.vip_until,
       invite_code: r.invite_code || '', invite_count: r.invite_count || 0,
-      feature_flags: parseFeatureFlags(r.feature_flags)
+      feature_flags: parseFeatureFlags(r.feature_flags),
+      source: r.source || '', source_set_at: r.source_set_at || null
     })),
     page, total: totalRow?.cnt || 0, totalPages: Math.max(1, Math.ceil((totalRow?.cnt || 0) / PAGE_SIZE))
+  });
+});
+
+// ========== v4.10: 用户来源分布（仅管理员/开发者） ==========
+app.get('/api/admin/users/source-stats', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (!(await isAdminIdentity(db, identity))) return c.json({ error: 'forbidden' }, 403);
+  const rows = await db.prepare(
+    "SELECT CASE WHEN source IS NULL OR source = '' THEN 'unset' ELSE source END AS source, COUNT(*) AS cnt FROM users GROUP BY 1 ORDER BY cnt DESC"
+  ).all();
+  const total = await db.prepare("SELECT COUNT(*) AS n FROM users").first();
+  return c.json({
+    total: total?.n || 0,
+    distribution: (rows?.results || []).map((r) => ({ source: r.source, count: r.cnt }))
   });
 });
 
@@ -1898,6 +1961,7 @@ app.post('/api/auth/ticket', async (c) => {
     { jti, uid: Number(identity.userId), scope, exp, sub: identity.sub, kind: 'ticket' },
     secret
   );
+  await logEvent(db, 'mdqp', 'auth.ticket', identity.userId, scope, '');
   return c.json({ ticket, exp, scope });
 });
 
@@ -2038,6 +2102,7 @@ app.post('/api/oiwb/sync', async (c) => {
     'ON CONFLICT(uid) DO UPDATE SET size = excluded.size, blob = excluded.blob, updated_at = excluded.updated_at'
   ).bind(identity.userId, blob.length, blob, now).run();
 
+  await logEvent(db, 'oiwb', 'oiwb.push', identity.userId, '', 'size=' + blob.length);
   return c.json({ ok: true, size: blob.length, updated_at: now });
 });
 
@@ -2051,6 +2116,100 @@ app.get('/api/oiwb/sync', async (c) => {
     .bind(identity.userId).first();
   if (!row) return c.json({ blob: null, size: 0, updated_at: 0 });
   return c.json({ blob: row.blob, size: row.size, updated_at: row.updated_at });
+});
+
+// ========== M3 埋点（events 表） ==========
+// 设计原则：埋点是旁路，任何失败都必须静默，绝不影响主流程。
+
+// 事件类型白名单：未在名单内的一律丢弃，防止把表刷成垃圾堆
+const EVENT_TYPES = new Set([
+  'clip.create', 'clip.view', 'clip.copy', 'clip.save',
+  'auth.login', 'auth.logout', 'auth.ticket',
+  'oiwb.push', 'oiwb.pull', 'oiwb.restore', 'oiwb.open',
+  'snippet.save', 'snippet.open', 'snippet.search',
+  'page.view', 'vip.view', 'feedback.submit'
+]);
+
+async function logEvent(db, app, type, uid, ref, meta) {
+  try {
+    if (!EVENT_TYPES.has(type)) return;
+    await db
+      .prepare('INSERT INTO events (app, type, uid, ref, meta) VALUES (?, ?, ?, ?, ?)')
+      .bind(app === 'oiwb' ? 'oiwb' : 'mdqp', type, String(uid || '').slice(0, 32), String(ref || '').slice(0, 64), String(meta || '').slice(0, 500))
+      .run();
+  } catch (e) {
+    /* 埋点失败静默 */
+  }
+}
+
+// 上报埋点（公开接口：游客也需打点，故不做登录校验）
+// 防护组合：① EVENT_TYPES 白名单（非白名单 type 直接丢弃）
+//          ② 单请求最多 10 条（body.events.slice(0,10)）
+//          ③ 各字段长度截断（type 64 / ref 64 / meta 500 / uid 32，见 logEvent）
+//          ④ 请求体大小上限 16KB（超直接拒，防滥用）
+//          ⑤ page.view 按 uid 5 分钟去重（避免刷新刷数据，保证 DAU 真实可信）
+app.post('/api/events', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+
+  // ④ body 大小上限
+  const len = parseInt(c.req.header('content-length') || '0', 10);
+  if (len > 16 * 1024) return c.json({ error: 'payload_too_large' }, 413);
+
+  let body;
+  try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
+
+  const list = Array.isArray(body.events) ? body.events.slice(0, 10) : [body];
+  const uid = identity.type === 'user' ? identity.userId : (identity.type === 'guest' ? 'g:' + identity.guestId : '');
+  let n = 0;
+  for (const ev of list) {
+    const type = String((ev && ev.type) || '').slice(0, 64);
+    if (!EVENT_TYPES.has(type)) continue;
+    // ⑤ page.view 去重：同一 uid 5 分钟内只计一次
+    if (type === 'page.view' && uid) {
+      const dup = await db.prepare(
+        "SELECT 1 FROM events WHERE uid = ? AND type = 'page.view' AND created_at >= datetime('now','-5 minutes') LIMIT 1"
+      ).bind(uid).first();
+      if (dup) continue;
+    }
+    await logEvent(db, ev.app, type, uid, (ev && ev.ref) || '', (ev && ev.meta) || '');
+    n++;
+  }
+  return c.json({ ok: true, accepted: n });
+});
+
+// 看板聚合（仅管理员/开发者）
+app.get('/api/admin/events/summary', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (!(await isAdminIdentity(db, identity))) return c.json({ error: 'forbidden' }, 403);
+
+  const days = Math.min(90, Math.max(1, parseInt(c.req.query('days') || '7') || 7));
+  const since = `-${days} days`;
+
+  const byType = await db
+    .prepare("SELECT app, type, COUNT(*) AS cnt FROM events WHERE created_at >= datetime('now', ?) GROUP BY app, type ORDER BY cnt DESC")
+    .bind(since).all();
+
+  const byDay = await db
+    .prepare("SELECT date(created_at) AS d, COUNT(*) AS cnt, COUNT(DISTINCT uid) AS uv FROM events WHERE created_at >= datetime('now', ?) AND uid <> '' GROUP BY d ORDER BY d")
+    .bind(since).all();
+
+  const dau = await db
+    .prepare("SELECT COUNT(DISTINCT uid) AS n FROM events WHERE created_at >= datetime('now', ?) AND uid <> ''")
+    .bind(since).first();
+
+  const total = await db
+    .prepare("SELECT COUNT(*) AS n FROM events WHERE created_at >= datetime('now', ?)")
+    .bind(since).first();
+
+  return c.json({
+    ok: true, days,
+    total: total?.n || 0,
+    dau: dau?.n || 0,
+    by_type: (byType.results || []).map((r) => ({ app: r.app, type: r.type, cnt: r.cnt })),
+    by_day: (byDay.results || []).map((r) => ({ d: r.d, cnt: r.cnt, uv: r.uv }))
+  });
 });
 
 // ========== Raw 直链 ==========
