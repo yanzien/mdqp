@@ -35,7 +35,17 @@ function copy(text, msg) {
 // 更新日志：随代码发布自动同步
 const CHANGELOG_MD = `# 📝 更新日志
 
-mdqp 的主要版本变动记录。当前部署版本 **v4.12.0**。
+mdqp 的主要版本变动记录。当前部署版本 **v4.13.0**。
+
+---
+
+## v4.13.0 · 2026-09-18（用户封禁 + 举报审核闭环 · P2）
+
+- 🆕 **用户封禁（可设时长）**：后台用户管理新增「封禁 / 解封」操作，可填封禁原因与封禁时长（天，留空=永久）。封禁即时生效——被封禁用户下一请求即被登出、无法再发帖/删帖，且**无法重新登录**（cpoauth 与密码登录均拦截），到期自动解封。封禁权限独立为 \`ban_user\`，开发者与本人不可被封禁。
+- 🆕 **完整举报审核闭环**：任意片段详情页新增「⚠ 举报」入口（需登录，可选 恶意/垃圾、低俗色情、擦边、违法违规、其他 + 补充说明，同内容同用户去重）；后台新增「⚠️ 内容审核」tab，列出待审举报（含被举报内容、作者、时间），可一键「删除内容」（连带评论/读者/其它举报）或「忽略」。tab 角标实时显示待审数量。旨在防止恶意、低俗、擦边等不良内容。
+- 🎚 **VIP / 封禁时长可设**：VIP 设置弹窗支持填写时长（天，留空=永久）；邀请所得的 VIP 由「永久」改为**默认 1 年**（\`vip_until = 注册 + 365 天\`）。
+- 🔍 **用户筛选增强**：后台用户管理支持按来源、最近活跃天数、最少片段数、封禁状态筛选，并按注册时间 / 最近登录 / 片段数 / 用户名排序。
+- 🗄 迁移：\`migrate_v4.13.sql\` 为 \`users\` 增加 \`banned/banned_at/ban_reason/ban_until\`，并新建 \`clip_reports\` 表（含状态流转与索引）。
 
 ---
 
@@ -674,8 +684,31 @@ async function render() {
 }
 
 // ==================== 身份 ====================
+/** v4.13: 被封禁用户的全局横幅 */
+function showBanBanner(reason, until) {
+  let el = document.getElementById('banBanner');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'banBanner';
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:linear-gradient(90deg,#7f1d1d,#b91c1c);color:#fff;padding:10px 16px;font-size:14px;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,.3)';
+    document.body.appendChild(el);
+  }
+  el.innerHTML = `🚫 <b>账号已被封禁</b> ${esc(reason)} ${until} <button id="banLogout" style="margin-left:10px;background:#fff;color:#b91c1c;border:none;border-radius:6px;padding:2px 10px;cursor:pointer">退出登录</button>`;
+  const lo = document.getElementById('banLogout');
+  if (lo) lo.onclick = async () => { await api('/api/auth/logout', { method: 'POST' }); location.href = '/'; };
+}
+
 async function loadMe() {
   const { data } = await api('/api/me'); state.me = data || { type: 'none' }; const box = $('#navAuth');
+  // v4.13: 清掉可能存在的封禁横幅（非封禁用户不应显示）
+  document.getElementById('banBanner')?.remove();
+  if (state.me.type === 'banned') {
+    const until = state.me.banUntil ? '（封禁至 ' + esc(String(state.me.banUntil).slice(0, 10)) + '）' : '（永久封禁）';
+    box.innerHTML = `<span class="guest-chip" style="border-color:rgba(220,38,38,.4);color:#e0524f">🚫 已封禁</span><button class="btn btn-primary" id="loginBtn">🔑 登录</button>`;
+    $('#loginBtn').onclick = () => openAuthModal('login');
+    showBanBanner(state.me.banReason || '你因违反社区规范已被封禁', until);
+    return;
+  }
   if (state.me.type === 'user') {
     box.innerHTML = `<span class="nav-user" title="${esc(state.me.name)}">${avatarHtml(state.me.avatar, state.me.name)}</span><button class="btn btn-ghost" id="logoutBtn">退出</button>`;
     $('#logoutBtn').onclick = async () => { await api('/api/auth/logout', { method: 'POST' }); location.href = '/'; };
@@ -915,6 +948,11 @@ async function renderClip(clipId, pwd = '') {
   if (data.can_edit) {
     $('#clipTools').innerHTML += `<a class="btn btn-sm" href="/edit/${esc(data.clip_id)}" data-link>✏️ 编辑</a><button class="btn btn-sm btn-danger" id="delBtn">🗑 删除</button>`;
     $('#delBtn').onclick = async () => { if (!confirm('确定删除？')) return; const r = await api(`/api/clips/${encodeURIComponent(data.clip_id)}`, { method: 'DELETE' }); if (r.ok) { toast('已删除'); go('/'); } else toast('删除失败：' + (r.data?.error || r.status), 'err'); };
+  }
+  // v4.13: 举报入口（仅登录用户可见）
+  if (state.me?.type === 'user') {
+    $('#clipTools').innerHTML += `<button class="btn btn-sm" id="reportBtn" style="border-color:rgba(220,38,38,.4);color:#e0524f">⚠ 举报</button>`;
+    $('#reportBtn').onclick = () => openReportModal(data.clip_id);
   }
   setupToc($('#outlineBtn'), $('#clipOutline'), $('#clipContent'));
 
@@ -1722,10 +1760,14 @@ async function savePage() { const content = $('#edContent').value; if (!content.
 // ==================== 管理后台（v4.0 扩展 tab） ====================
 async function renderAdmin() {
   showView('admin'); await loadMe(); if (!isAdmin()) { $('#adminBox').innerHTML = emptyHTML('admin', '🚫 无权访问', `<p class="muted" style="margin:0">管理后台仅对站点管理员开放</p><a class="btn btn-primary btn-sm" href="/" data-link>回首页</a>`); return; }
+  // v4.13: 待审举报数（用于 tab 角标）
+  let pendingReports = 0;
+  try { const { data } = await api('/api/admin/clips/reports?status=open'); pendingReports = data?.reports?.length || 0; } catch { /* ignore */ }
   $('#adminBox').innerHTML = `<h1 class="clip-title">🛡 管理后台</h1><p class="muted">${state.me.role === 'developer' ? '你是本站开发者，拥有一切权限。' : '你是管理员：可管理用户与所有剪贴板、编辑站点页面、发布公告、管理邀请/VIP/评论。'}</p>
     <div class="admin-tabs">
       <button class="btn btn-sm ${state.adminTab === 'users' ? 'btn-primary' : ''}" data-tab="users">👥 用户</button>
       <button class="btn btn-sm ${state.adminTab === 'clips' ? 'btn-primary' : ''}" data-tab="clips">📋 全部剪贴板</button>
+      <button class="btn btn-sm ${state.adminTab === 'reports' ? 'btn-primary' : ''}" data-tab="reports">⚠️ 内容审核${pendingReports ? ` <span class="badge" style="background:rgba(220,38,38,.15);color:#e0524f;border:1px solid rgba(220,38,38,.4)">${pendingReports}</span>` : ''}</button>
       <button class="btn btn-sm ${state.adminTab === 'pages' ? 'btn-primary' : ''}" data-tab="pages">📄 站点页面</button>
       <button class="btn btn-sm ${state.adminTab === 'announcements' ? 'btn-primary' : ''}" data-tab="announcements">📢 公告</button>
       <button class="btn btn-sm ${state.adminTab === 'invites' ? 'btn-primary' : ''}" data-tab="invites">🎁 邀请</button>
@@ -1735,6 +1777,7 @@ async function renderAdmin() {
   $$('#adminBox [data-tab]').forEach((b) => { b.onclick = () => { state.adminTab = b.dataset.tab; renderAdmin(); }; });
   if (state.adminTab === 'users') return loadAdminUsers();
   if (state.adminTab === 'clips') return loadAdminClips();
+  if (state.adminTab === 'reports') return loadAdminReports();
   if (state.adminTab === 'pages') return loadAdminPages();
   if (state.adminTab === 'announcements') return loadAdminAnnouncements();
   if (state.adminTab === 'invites') return loadAdminInvites();
@@ -1909,48 +1952,77 @@ const ADMIN_FULL_PERMS = ALL_PERMS.reduce((o, p) => (o[p] = true, o), {});
 
 async function loadAdminUsers() {
   const box = $('#adminBody'); box.innerHTML = '加载中…';
-  const { data } = await api('/api/admin/users');
+  const f = {
+    source: ($('#aufSource')?.value || '').trim(),
+    activeDays: ($('#aufActive')?.value || '').trim(),
+    minClips: ($('#aufMinClips')?.value || '').trim(),
+    banned: ($('#aufBanned')?.value || '').trim(),
+    sort: ($('#aufSort')?.value || 'id').trim(),
+    order: ($('#aufOrder')?.value || 'asc').trim(),
+    q: ($('#adminUserSearch')?.value || '').trim()
+  };
+  const qs = new URLSearchParams();
+  if (f.source) qs.set('source', f.source);
+  if (f.activeDays) qs.set('activeDays', f.activeDays);
+  if (f.minClips) qs.set('minClips', f.minClips);
+  if (f.banned) qs.set('banned', f.banned);
+  if (f.sort) qs.set('sort', f.sort);
+  if (f.order) qs.set('order', f.order);
+  if (f.q) qs.set('q', f.q);
+  const { data } = await api('/api/admin/users?' + qs.toString());
   if (!data?.users) return (box.innerHTML = emptyHTML('admin', '加载失败（需要管理员权限）', ''));
-  const rows = data.users.map((u) => {
+  const users = data.users;
+  const srcOpts = `<option value="">来源:全部</option><option value="unset">未填写</option>${SOURCE_OPTIONS.map((o) => `<option value="${o.code}">${esc(o.label)}</option>`).join('')}`;
+  const rows = users.map((u) => {
     const lvl = u.role === 'admin' ? Math.max(1, Math.min(5, Object.values(u.admin_permissions || {}).filter(Boolean).length)) : 0;
     const roleHtml = u.role === 'developer' ? roleBadge('developer') : u.role === 'admin' ? roleBadge('admin', { permLevel: lvl }) : '';
     const vipHtml = u.is_vip ? roleBadge('user', { is_vip: true }) : '';
+    const banHtml = u.banned ? `<span class="badge" style="background:rgba(220,38,38,.15);color:#e0524f;border:1px solid rgba(220,38,38,.4)">🚫 封禁${u.ban_until ? ' 至 ' + esc((u.ban_until || '').slice(0, 10)) : '（永久）'}</span>` : '';
     const ff = u.feature_flags || {};
     const ffOn = Object.keys(FEATURE_LABELS).filter((k) => ff[k]).map((k) => FEATURE_LABELS[k]);
     return `<tr>
       <td><a href="/u/${u.id}" data-link>${avatarHtml(u.avatar, u.display_name)} <b>${esc(u.display_name)}</b></a><div class="muted" style="font-size:12px">@${esc(u.username)} · #${u.id}</div><div class="muted" style="font-size:12px">📅 ${esc((u.created_at || '').slice(0, 10))}</div></td>
-      <td>${roleHtml} ${vipHtml}</td>
+      <td>${roleHtml} ${vipHtml} ${banHtml}</td>
       <td>${u.clip_count}</td>
       <td>${u.invite_count}</td>
       <td class="muted" style="font-size:12px;max-width:170px">${ffOn.length ? ffOn.join('、') : '—'}</td>
       <td class="muted" style="font-size:12px">${u.source ? (SOURCE_LABEL[u.source] || esc(u.source)) : '<span class="muted">未填</span>'}${u.source_detail ? `<div style="font-size:11px;opacity:.7">${esc(u.source_detail)}</div>` : ''}</td>
       <td class="admin-actions">
-        <button class="btn btn-sm" data-vip="${u.id}">${u.is_vip ? '取消VIP' : '设VIP'}</button>
+        <button class="btn btn-sm" data-vip="${u.id}">⭐ VIP</button>
         <button class="btn btn-sm" data-ff="${u.id}">功能</button>
         ${u.role === 'developer' ? '<span class="muted">开发者</span>' : `<button class="btn btn-sm" data-role="${u.id}">${u.role === 'admin' ? '撤管' : '升管'}</button>`}
+        ${u.banned ? `<button class="btn btn-sm" data-unban="${u.id}">解封</button>` : `<button class="btn btn-sm btn-danger" data-ban="${u.id}">封禁</button>`}
         <button class="btn btn-sm btn-danger" data-deluser="${u.id}">删除</button>
       </td>
     </tr>`;
   }).join('');
-  box.innerHTML = `<div class="list-head"><h2>👥 用户管理（${data.users.length} 人）</h2>
-    <input id="adminUserSearch" class="input input-sm admin-search" placeholder="🔍 搜索用户名 / @账号 / ID"></div>
-    <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>用户</th><th>角色 / VIP</th><th>剪贴板</th><th>邀请</th><th>功能开关</th><th>来源</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  box.innerHTML = `<div class="list-head"><h2>👥 用户管理（${users.length} 人 · 共 ${data.total}）</h2></div>
+    <div class="admin-filter-bar" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px">
+      <select id="aufSource" class="input input-sm">${srcOpts}</select>
+      <input id="aufActive" class="input input-sm" type="number" min="0" placeholder="最近活跃天数" style="width:110px">
+      <input id="aufMinClips" class="input input-sm" type="number" min="0" placeholder="最少片段数" style="width:100px">
+      <select id="aufBanned" class="input input-sm"><option value="">封禁:全部</option><option value="1">已封禁</option><option value="0">未封禁</option></select>
+      <select id="aufSort" class="input input-sm"><option value="id">排序:ID</option><option value="created_at">注册时间</option><option value="last_login">最近登录</option><option value="clip_count">片段数</option><option value="username">用户名</option></select>
+      <select id="aufOrder" class="input input-sm"><option value="asc">升序</option><option value="desc">降序</option></select>
+      <button id="aufApply" class="btn btn-sm btn-primary">筛选</button>
+      <input id="adminUserSearch" class="input input-sm admin-search" placeholder="🔍 搜索用户名 / @账号 / ID" style="flex:1;min-width:160px">
+    </div>
+    <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>用户</th><th>角色 / VIP / 封禁</th><th>剪贴板</th><th>邀请</th><th>功能开关</th><th>来源</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 
+  // 回填筛选值
+  $('#aufSource').value = f.source; $('#aufActive').value = f.activeDays; $('#aufMinClips').value = f.minClips;
+  $('#aufBanned').value = f.banned; $('#aufSort').value = f.sort; $('#aufOrder').value = f.order;
+
+  $('#aufApply').onclick = loadAdminUsers;
   const search = $('#adminUserSearch');
   if (search) search.oninput = (e) => { const q = e.target.value.trim().toLowerCase(); box.querySelectorAll('tbody tr').forEach((tr) => { tr.style.display = !q || tr.textContent.toLowerCase().includes(q) ? '' : 'none'; }); };
 
-  $$('#adminBody [data-vip]').forEach((b) => b.onclick = async () => {
-    const u = data.users.find((x) => String(x.id) === b.dataset.vip);
-    if (!u) return;
-    try {
-      const r = await api('/api/admin/users/' + b.dataset.vip, { method: 'PATCH', body: JSON.stringify({ is_vip: u.is_vip ? 0 : 1 }) });
-      if (!r.ok) return toast(r.data?.message || '操作失败', 'err');
-      toast(u.is_vip ? '已取消 VIP' : '已设为 VIP');
-      loadAdminUsers();
-    } catch { toast('网络错误，请重试', 'err'); }
+  $$('#adminBody [data-vip]').forEach((b) => b.onclick = () => {
+    const u = users.find((x) => String(x.id) === b.dataset.vip);
+    if (u) openVipModal(u);
   });
   $$('#adminBody [data-ff]').forEach((b) => b.onclick = () => {
-    const u = data.users.find((x) => String(x.id) === b.dataset.ff);
+    const u = users.find((x) => String(x.id) === b.dataset.ff);
     const cur = u.feature_flags || {};
     const body = `<div class="ff-grid">${Object.entries(FEATURE_LABELS).map(([k, l]) => `<label class="ff-item"><input type="checkbox" data-ffk="${k}" ${cur[k] ? 'checked' : ''}> <span>${l}</span></label>`).join('')}</div>`;
     const m = openModal('功能开关 · ' + u.display_name, body);
@@ -1963,7 +2035,7 @@ async function loadAdminUsers() {
     };
   });
   $$('#adminBody [data-role]').forEach((b) => b.onclick = async () => {
-    const u = data.users.find((x) => String(x.id) === b.dataset.role);
+    const u = users.find((x) => String(x.id) === b.dataset.role);
     if (u.role === 'admin') {
       if (!confirm('确认撤下该用户的管理员身份？')) return;
       const r = await api('/api/admin/users/' + b.dataset.role, { method: 'PATCH', body: JSON.stringify({ role: 'user' }) });
@@ -1975,11 +2047,87 @@ async function loadAdminUsers() {
     const r = await api('/api/admin/users/' + b.dataset.role, { method: 'PATCH', body: JSON.stringify({ role: 'admin', admin_permissions: perms }) });
     if (r.ok) { toast('已册封'); loadAdminUsers(); } else toast('失败', 'err');
   });
+  $$('#adminBody [data-ban]').forEach((b) => b.onclick = () => {
+    const u = users.find((x) => String(x.id) === b.dataset.ban);
+    if (u) openBanModal(u);
+  });
+  $$('#adminBody [data-unban]').forEach((b) => b.onclick = async () => {
+    if (!confirm('确认解封该用户？')) return;
+    const r = await api('/api/admin/users/' + b.dataset.unban, { method: 'PATCH', body: JSON.stringify({ banned: false }) });
+    if (r.ok) { toast('已解封'); loadAdminUsers(); } else toast('失败：' + (r.data?.message || r.status), 'err');
+  });
   $$('#adminBody [data-deluser]').forEach((b) => b.onclick = async () => {
     if (!confirm('删除该用户及其全部剪贴板？不可恢复')) return;
     const r = await api('/api/admin/users/' + b.dataset.deluser, { method: 'DELETE' });
     if (r.ok) { toast('已删除'); loadAdminUsers(); } else toast('失败：' + (r.data?.message || r.status), 'err');
   });
+}
+
+/** VIP 设置弹窗（v4.13：时长可设置，0/空=永久） */
+function openVipModal(u) {
+  const cur = u.is_vip ? 1 : 0;
+  const until = u.vip_until || '';
+  const body = `<div class="form-row" style="display:flex;gap:14px;margin-bottom:8px">
+    <label><input type="radio" name="vipAct" value="set" ${cur ? 'checked' : ''}> 开通 / 续期 VIP</label>
+    <label><input type="radio" name="vipAct" value="unset" ${cur ? '' : 'checked'}> 取消 VIP</label>
+  </div>
+  <div class="form-row" style="margin-bottom:8px">时长（天，留空=永久）：<input id="vipDur" class="input input-sm" type="number" min="1" placeholder="例如 365（1 年）" style="width:140px"></div>
+  <p class="muted" style="font-size:12px">当前：${cur ? (until ? 'VIP 至 ' + esc(until.slice(0, 10)) : '永久 VIP') : '非 VIP'}</p>`;
+  const m = openModal('VIP 设置 · ' + (u.display_name || u.username), body);
+  m.foot.innerHTML = `<button class="btn btn-sm" id="vipCancel">取消</button><button class="btn btn-sm btn-primary" id="vipSave">保存</button>`;
+  m.foot.querySelector('#vipCancel').onclick = closeModal;
+  m.foot.querySelector('#vipSave').onclick = async () => {
+    const act = m.body.querySelector('input[name=vipAct]:checked')?.value;
+    const dur = m.body.querySelector('#vipDur').value.trim();
+    const payload = { is_vip: act === 'set' ? 1 : 0 };
+    if (payload.is_vip && dur) payload.vip_duration = parseInt(dur) || 0;
+    const r = await api('/api/admin/users/' + u.id, { method: 'PATCH', body: JSON.stringify(payload) });
+    if (r.ok) { toast(payload.is_vip ? 'VIP 已设置' : '已取消 VIP'); closeModal(); loadAdminUsers(); }
+    else toast('失败：' + (r.data?.message || r.status), 'err');
+  };
+}
+
+/** 封禁弹窗（v4.13：原因 + 时长可设置，空=永久） */
+function openBanModal(u) {
+  const body = `<div class="form-row" style="margin-bottom:8px">封禁原因：<textarea id="banReason" class="input bio-input" style="min-height:80px" placeholder="例如：发布违规/低俗内容"></textarea></div>
+  <div class="form-row">封禁时长（天，留空=永久封禁）：<input id="banDur" class="input input-sm" type="number" min="1" placeholder="例如 7" style="width:130px"></div>`;
+  const m = openModal('封禁用户 · ' + (u.display_name || u.username), body);
+  m.foot.innerHTML = `<button class="btn btn-sm" id="banCancel">取消</button><button class="btn btn-sm btn-danger" id="banSave">确认封禁</button>`;
+  m.foot.querySelector('#banCancel').onclick = closeModal;
+  m.foot.querySelector('#banSave').onclick = async () => {
+    const reason = m.body.querySelector('#banReason').value.trim();
+    const dur = m.body.querySelector('#banDur').value.trim();
+    const payload = { banned: true, ban_reason: reason || '违反社区规范' };
+    if (dur) payload.ban_duration = parseInt(dur) || 0;
+    const r = await api('/api/admin/users/' + u.id, { method: 'PATCH', body: JSON.stringify(payload) });
+    if (r.ok) { toast('已封禁'); closeModal(); loadAdminUsers(); }
+    else toast('失败：' + (r.data?.message || r.status), 'err');
+  };
+}
+
+/** 举报内容弹窗（v4.13） */
+function openReportModal(clipId) {
+  const REASONS = [
+    { code: 'spam', label: '恶意 / 垃圾信息' },
+    { code: 'porn', label: '低俗 / 色情内容' },
+    { code: 'sensitive', label: '擦边内容' },
+    { code: 'illegal', label: '违法违规内容' },
+    { code: 'other', label: '其他' }
+  ];
+  const body = `<div class="form-row" style="display:flex;flex-direction:column;gap:8px;margin-bottom:8px">${
+    REASONS.map((r, i) => `<label style="display:flex;gap:8px;align-items:center"><input type="radio" name="repReason" value="${r.code}" ${i === 0 ? 'checked' : ''}> ${r.label}</label>`).join('')
+  }</div>
+  <div class="form-row">补充说明（选填）：<textarea id="repDetail" class="input bio-input" style="min-height:70px" placeholder="可描述具体问题所在"></textarea></div>`;
+  const m = openModal('举报内容 · /c/' + clipId, body);
+  m.foot.innerHTML = `<button class="btn btn-sm" id="repCancel">取消</button><button class="btn btn-sm btn-danger" id="repSave">提交举报</button>`;
+  m.foot.querySelector('#repCancel').onclick = closeModal;
+  m.foot.querySelector('#repSave').onclick = async () => {
+    const reason = m.body.querySelector('input[name=repReason]:checked')?.value;
+    const detail = m.body.querySelector('#repDetail').value.trim();
+    const r = await api('/api/clips/' + encodeURIComponent(clipId) + '/report', { method: 'POST', body: JSON.stringify({ reason, detail }) });
+    if (r.ok) { toast(r.data?.already ? '你已举报过该内容' : '举报已提交，感谢反馈'); closeModal(); }
+    else toast('提交失败：' + (r.data?.message || r.status), 'err');
+  };
 }
 
 async function loadAdminClips() {
@@ -2003,6 +2151,42 @@ async function loadAdminClips() {
     if (!confirm('删除该剪贴板？')) return;
     const r = await api('/api/clips/' + b.dataset.delclip, { method: 'DELETE' });
     if (r.ok) { toast('已删除'); loadAdminClips(); } else toast('失败', 'err');
+  });
+}
+
+async function loadAdminReports() {
+  const box = $('#adminBody'); box.innerHTML = '加载中…';
+  const { data } = await api('/api/admin/clips/reports?status=open');
+  if (!data?.reports) return (box.innerHTML = emptyHTML('admin', '加载失败（需要管理员权限）', ''));
+  const reports = data.reports;
+  const REASONS = { spam: '恶意/垃圾', porn: '低俗色情', sensitive: '擦边内容', illegal: '违法违规', other: '其他' };
+  if (!reports.length) return (box.innerHTML = `<div class="list-head"><h2>⚠️ 内容审核</h2></div><div class="empty">🎉 暂无待处理举报</div>`);
+  const rows = reports.map((r) => {
+    const clip = r.clip;
+    const delLabel = clip ? '删除内容' : '清理举报';
+    return `<tr>
+      <td><b>${esc(r.reason_label || REASONS[r.reason] || r.reason)}</b>${r.detail ? `<div class="muted" style="font-size:12px;max-width:260px">${esc(r.detail)}</div>` : ''}</td>
+      <td>${clip ? `<a href="/c/${esc(clip.clip_id)}" data-link>${esc(clip.title || '无标题')}</a>${clip.open_reports > 1 ? ` <span class="badge" style="background:rgba(220,38,38,.12);color:#e0524f">${clip.open_reports} 条举报</span>` : ''}` : `<span class="muted">内容已删除</span><div class="muted" style="font-size:11px">clip_id: ${esc(r.clip_id)}</div>`}</td>
+      <td>${clip ? (clip.owner_type === 'user' ? `<a href="/u/${esc(clip.owner_id)}" data-link>${esc(clip.owner_name || clip.owner_id)}</a>` : esc(clip.owner_name || '游客')) : '—'}</td>
+      <td class="muted" style="font-size:12px">${esc((r.created_at || '').slice(0, 16))}<br>举报人 #${r.reporter_id || '游客'}</td>
+      <td class="admin-actions">
+        <button class="btn btn-sm btn-danger" data-del-report="${r.id}" data-clip="${esc(r.clip_id)}">${delLabel}</button>
+        <button class="btn btn-sm" data-dismiss-report="${r.id}">忽略</button>
+      </td>
+    </tr>`;
+  }).join('');
+  box.innerHTML = `<div class="list-head"><h2>⚠️ 内容审核（${reports.length} 条待处理）</h2><p class="muted">处理举报：可删除违规内容（连带评论/读者/其它举报）或标记为已忽略。</p></div>
+    <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>举报原因</th><th>被举报内容</th><th>作者</th><th>时间</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+
+  $$('#adminBody [data-del-report]').forEach((b) => b.onclick = async () => {
+    if (!confirm('确认删除该内容？将一并删除其评论、读者记录及其它举报，不可恢复。')) return;
+    const r = await api('/api/admin/clips/reports/' + b.dataset.delReport, { method: 'PATCH', body: JSON.stringify({ status: 'resolved', action: 'delete_clip', resolution: '举报成立，内容已删除' }) });
+    if (r.ok) { toast('已删除内容'); loadAdminReports(); } else toast('失败：' + (r.data?.message || r.status), 'err');
+  });
+  $$('#adminBody [data-dismiss-report]').forEach((b) => b.onclick = async () => {
+    if (!confirm('标记为已忽略？')) return;
+    const r = await api('/api/admin/clips/reports/' + b.dataset.dismissReport, { method: 'PATCH', body: JSON.stringify({ status: 'dismissed', resolution: '举报不成立，已忽略' }) });
+    if (r.ok) { toast('已忽略'); loadAdminReports(); } else toast('失败', 'err');
   });
 }
 
