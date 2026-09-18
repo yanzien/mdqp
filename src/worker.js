@@ -19,7 +19,7 @@ const app = new Hono();
 
 const GUEST_LIMIT = 5;
 const PAGE_SIZE = 20;
-const VERSION = '4.11.1';
+const VERSION = '4.12.0';
 const SEARCH_MAX = 100;
 const RESERVED = new Set([
   'api', 'raw', 'new', 'edit', 'u', 'user', 'users', 'admin', 'login', 'logout',
@@ -309,6 +309,13 @@ async function resolveBenefits(db, identity, trustBase) {
   const isStaff = await isAdminIdentity(db, identity);
   const level = trustBase ? computeTrustLevel(trustBase) : 0;
   const benefits = benefitsFor(level, isVip, isStaff);
+  // 邀请奖励：unlimited_chars 标记同样拉满单篇字数
+  if (identity && identity.type === 'user' && identity.userId) {
+    try {
+      const ff = await getUserFeatures(db, identity.userId);
+      if (ff && ff.unlimited_chars) benefits.char = -1;
+    } catch (_) { /* 忽略：取权益失败不阻断主流程 */ }
+  }
   return { level, isVip, isStaff, benefits, charLimit: charLimitOf(benefits), unlimited: benefits.char === -1 };
 }
 
@@ -1600,6 +1607,18 @@ app.get('/api/search/users', async (c) => {
 
 // ========== 邀请系统 API ==========
 
+// 邀请奖励默认配置：与「邀请中心」前端展示的 1/3/5/10 人四档奖励对齐。
+// 用代码默认值而非依赖站点设置，确保邀请系统真实可用（不再"假功能"）。
+const DEFAULT_INVITE_REWARDS = {
+  inviter: [
+    { threshold: 1, reward: 'all_features' },
+    { threshold: 3, reward: 'vip' },
+    { threshold: 5, reward: 'unlimited_chars_pin' },
+    { threshold: 10, reward: 'developer_gift' }
+  ],
+  invitee: { reward: 'custom_slug' }
+};
+
 /** 获取当前用户的邀请信息 */
 app.get('/api/invite/me', async (c) => {
   const db = c.env.db;
@@ -1625,7 +1644,7 @@ app.get('/api/invite/me', async (c) => {
   ).bind(String(u.id)).first()).cnt || 0;
 
   // 获取奖励配置
-  const rewards = parseJSON(await getSiteSetting(db, 'invite_rewards', '{}'));
+  const rewards = parseJSON(await getSiteSetting(db, 'invite_rewards', JSON.stringify(DEFAULT_INVITE_REWARDS)));
   // VIP 联系方式
   const vipContact = await getSiteSetting(db, 'vip_contact', '');
 
@@ -1692,7 +1711,7 @@ app.post('/api/invite/bind', async (c) => {
   await db.prepare('UPDATE users SET invite_count = invite_count + 1 WHERE id = ?').bind(inviter.id).run();
 
   // === 发放奖励 ===
-  const rewards = parseJSON(await getSiteSetting(db, 'invite_rewards', '{}')) || {};
+  const rewards = parseJSON(await getSiteSetting(db, 'invite_rewards', JSON.stringify(DEFAULT_INVITE_REWARDS))) || {};
   const inviterRewards = rewards.inviter || [];
   const currentInviterCount = (await db.prepare('SELECT invite_count FROM users WHERE id = ?').bind(inviter.id).first())?.invite_count || 0;
 
@@ -1712,11 +1731,14 @@ app.post('/api/invite/bind', async (c) => {
           await db.prepare("UPDATE users SET is_vip = 1, vip_until = NULL WHERE id = ?").bind(inviter.id).run();
           granted.push({ threshold: tier.threshold, reward: 'vip', desc: '已开通 VIP' });
           break;
-        case 'unlimited_chars_pin':
-          // 不限字数 + 置顶权限（用 feature_flags 或特殊标记）
-          // 这里简化为：给一个特殊标记，前端识别
-          granted.push({ threshold: tier.threshold, reward: 'unlimited_chars_pin', desc: '获得不限字数及置顶权限（待管理员手动授予）' });
+        case 'unlimited_chars_pin': {
+          // 真正授予"不限字数"标记（feature_flags.unlimited_chars），由 resolveBenefits 生效
+          const ff = await getUserFeatures(db, inviter.id);
+          ff.unlimited_chars = 1;
+          await db.prepare('UPDATE users SET feature_flags = ? WHERE id = ?').bind(JSON.stringify(ff), inviter.id).run();
+          granted.push({ threshold: tier.threshold, reward: 'unlimited_chars_pin', desc: '已获得不限字数权限' });
           break;
+        }
         case 'developer_gift':
           granted.push({ threshold: tier.threshold, reward: 'developer_gift', desc: '🎁 开发者大礼包！请加站长微信细谈' });
           break;
