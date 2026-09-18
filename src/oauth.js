@@ -10,6 +10,20 @@ const SESSION_MAX_AGE = 7 * 24 * 3600; // 7 天
 
 const oauthRoutes = new Hono();
 
+/** v4.13: 判断用户当前是否被封禁（过期视为未封禁，并惰性清理） */
+async function isBannedNow(db, userId) {
+  const row = await db.prepare('SELECT banned, ban_until FROM users WHERE id = ?').bind(String(userId)).first();
+  if (!row || !row.banned) return false;
+  if (row.ban_until) {
+    const t = new Date(String(row.ban_until).replace(' ', 'T') + 'Z').getTime();
+    if (Date.now() >= t) {
+      try { await db.prepare('UPDATE users SET banned = 0, ban_until = NULL, ban_reason = NULL WHERE id = ?').bind(String(userId)).run(); } catch { /* ignore */ }
+      return false;
+    }
+  }
+  return true;
+}
+
 const CPOAUTH = {
   authUrl: 'https://www.cpoauth.com/oauth/authorize',
   tokenUrl: 'https://www.cpoauth.com/api/oauth/token',
@@ -212,6 +226,11 @@ oauthRoutes.get('/callback', async (c) => {
       if (userId === 1) {
         await db.prepare("UPDATE users SET role = 'developer' WHERE id = 1").run();
       }
+    }
+
+    // v4.13: 已封禁用户禁止通过 cpoauth 登录
+    if (await isBannedNow(db, userId)) {
+      return redirectWithCookies('/?error=banned', clearCookies);
     }
 
     const jwt = await signJWT(
@@ -456,7 +475,7 @@ oauthRoutes.post('/password/login', async (c) => {
   }
 
   const row = await db
-    .prepare('SELECT id, username, display_name, avatar, password_hash, sub FROM users WHERE (username = ? OR email = ?) AND password_hash != \'\'')
+    .prepare('SELECT id, username, display_name, avatar, password_hash, sub, banned, ban_until FROM users WHERE (username = ? OR email = ?) AND password_hash != \'\'')
     .bind(username, username)
     .first();
 
@@ -464,6 +483,12 @@ oauthRoutes.post('/password/login', async (c) => {
   if (!row) {
     await recordAttempt(db, ip, username, false);
     return c.json({ error: 'invalid_credentials', message: '用户名或密码错误' }, 401);
+  }
+
+  // v4.13: 已封禁用户禁止登录（先于密码校验，避免被封禁账号探测）
+  if (await isBannedNow(db, row.id)) {
+    await recordAttempt(db, ip, username, false);
+    return c.json({ error: 'banned', message: '该账号已被封禁，无法登录' }, 403);
   }
 
   const ph = await hashPassword(password);
