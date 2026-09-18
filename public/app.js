@@ -35,7 +35,15 @@ function copy(text, msg) {
 // 更新日志：随代码发布自动同步
 const CHANGELOG_MD = `# 📝 更新日志
 
-mdqp 的主要版本变动记录。当前部署版本 **v4.10.1**。
+mdqp 的主要版本变动记录。当前部署版本 **v4.11.0**。
+
+---
+
+## v4.11.0 · 2026-09-18（错误页/看门狗 + \`/admin/code\` 查看编辑分离）
+
+- 🆕 **系统错误页 \`/error\` 与 \`/404\`**：均为 SPA 路由（**不加 \`/c/\` 前缀**以与片段区分），内容复用你写的剪贴板文稿（\`clip_id=error\` / \`clip_id=404\`），老浏览器也能正常访问。未知路径统一回退到 404 文稿。
+- 🆕 **看门狗（哨兵）自动跳转兼容plus**：\`index.html\` 兜底脚本新增错误分级——\`compat\`（兼容性 / 脚本启动失败等非小错误）直接跳 \`/legacy\` 兼容备用页；\`fatal\`（重大渲染错误）跳 \`/error\`。带防抖与环路保护，已处于 \`/legacy\`/\`/error\` 时不重复跳。
+- 🔐 **\`/admin/code\` 查看 / 编辑权限分离**：新增 \`edit_code\` 权限位，与 \`view_code\` 解耦。仅 \`view_code\` → 只能浏览源码与审批队列；持有 \`edit_code\` 或开发者 → 才能编辑并提交改动；开发者仍可一键直部署。\`canEdit\` 显隐「编辑」按钮，并展示「👁 只读 / ✏️ 可编辑」彩色徽章；权限弹窗中两项用蓝（查看）/ 橙（编辑）配色区分。\`/api/me\` 现返回 \`admin_permissions\` 供前端判定；\`POST /api/admin/code/submit\` 改为校验 \`edit_code\`。
 
 ---
 
@@ -621,24 +629,33 @@ function updateNav() {
 async function render() {
   closeNav(); updateNav();
   const p = location.pathname.replace(/\/+$/, '') || '/'; const seg = p.split('/').filter(Boolean);
-  if (p === '/') return renderHome();
-  if (p === '/new') return renderEditor(null);
-  if (p === '/me') return renderMe();
-  if (seg[0] === 'edit' && seg[1]) return renderEditor(seg[1]);
-  if (seg[0] === 'edit-page' && seg[1]) return renderPageEditor(seg[1]);
-  if (seg[0] === 'u' && seg[1]) return renderUser(seg[1]);
-  if (seg[0] === 'c' && seg[1]) return renderClip(seg[1]);
-  if (p === '/help') return renderPage('help');
-  if (p === '/about') return renderPage('about');
-  if (p === '/changelog') return renderPage('changelog');
-  if (seg[0] === 'invite' && seg[1]) return renderInviteLanding(seg[1]);
-  if (p === '/invite') return renderInvitePage();
-  if (p === '/vip') return renderVipPage();
-  if (p === '/feedback') return renderFeedback();
-  if (seg[0] === 'admin' && seg[1] === 'code') return renderAdminCode();
-  if (seg[0] === 'admin') return renderAdmin();
-  if (seg.length === 1) return renderClip(seg[0]);
-  showView('404');
+  try {
+    if (p === '/') return renderHome();
+    if (p === '/new') return renderEditor(null);
+    if (p === '/me') return renderMe();
+    if (seg[0] === 'edit' && seg[1]) return renderEditor(seg[1]);
+    if (seg[0] === 'edit-page' && seg[1]) return renderPageEditor(seg[1]);
+    if (seg[0] === 'u' && seg[1]) return renderUser(seg[1]);
+    if (seg[0] === 'c' && seg[1]) return renderClip(seg[1]);
+    if (p === '/help') return renderPage('help');
+    if (p === '/about') return renderPage('about');
+    if (p === '/changelog') return renderPage('changelog');
+    if (seg[0] === 'invite' && seg[1]) return renderInviteLanding(seg[1]);
+    if (p === '/invite') return renderInvitePage();
+    if (p === '/vip') return renderVipPage();
+    if (p === '/feedback') return renderFeedback();
+    // 系统错误页 / 404 页：复用剪贴板文稿（本身即 📋），不加 /c/ 前缀以便与片段区分
+    if (seg[0] === 'error') return renderClip('error');
+    if (seg[0] === '404') return renderClip('404');
+    if (seg[0] === 'admin' && seg[1] === 'code') return renderAdminCode();
+    if (seg[0] === 'admin') return renderAdmin();
+    if (seg.length === 1) return renderClip(seg[0]);
+    // 未知路径 → 展示用户撰写的 404 文稿（而非静态占位）
+    return renderClip('404');
+  } catch (e) {
+    if (window.__mdqpShowErrBar) window.__mdqpShowErrBar('页面渲染出错：' + (e && e.message ? e.message : e), 'fatal');
+    else throw e;
+  }
 }
 
 // ==================== 身份 ====================
@@ -1065,9 +1082,9 @@ function insertMention(username, displayName) {
 function hideMentionPopup() { const p = $('#mentionPopup'); if (p) p.classList.add('hidden'); mentionState.open = false; }
 
 // ==================== 用户主页（扩展：VIP/邀请/功能状态） ====================
-const PERM_LABELS = { delete_user: '删除用户账号', set_clip_limit: '设置剪贴板限制', edit_pages: '编辑站点文章', edit_public_clips: '修改公开剪贴板', edit_private_clips: '修改私有剪贴板', view_code: '查看源码/编辑代码' };
+const PERM_LABELS = { delete_user: '删除用户账号', set_clip_limit: '设置剪贴板限制', edit_pages: '编辑站点文章', edit_public_clips: '修改公开剪贴板', edit_private_clips: '修改私有剪贴板', view_code: '查看源码（只读）', edit_code: '编辑并提交代码' };
 const FEATURE_LABELS = { custom_slug: '自定义短链', max_views: '阅读次数上限', password: '密码保护', expiry: '定时过期', collaboration: '协作模式', login_required: '登录可见', max_readers: '读者数限制', comments: '评论功能' };
-const ALL_PERMS = ['delete_user', 'set_clip_limit', 'edit_pages', 'edit_public_clips', 'edit_private_clips', 'view_code'];
+const ALL_PERMS = ['delete_user', 'set_clip_limit', 'edit_pages', 'edit_public_clips', 'edit_private_clips', 'view_code', 'edit_code'];
 
 function promptAdminPermsDialog() {
   const keys = Object.keys(PERM_LABELS); const checked = keys.map(k => k + ':1').join('\n');
@@ -1105,7 +1122,7 @@ function closeModal() { const ov = $('#modalOverlay'); if (ov) ov.classList.remo
 function openPermsModal(displayName) {
   return new Promise((resolve) => {
     const body = `<p class="muted" style="margin:0 0 8px">为 <b>${esc(displayName)}</b> 设置管理员权限（可多选）：</p>
-      <div class="ff-grid">${ALL_PERMS.map((p) => `<label class="ff-item"><input type="checkbox" data-perm="${p}" checked> <span>${PERM_LABELS[p] || p}</span></label>`).join('')}</div>`;
+      <div class="ff-grid">${ALL_PERMS.map((p) => `<label class="ff-item ${p === 'view_code' ? 'ff-view' : p === 'edit_code' ? 'ff-edit' : ''}"><input type="checkbox" data-perm="${p}" checked> <span>${PERM_LABELS[p] || p}</span></label>`).join('')}</div>`;
     const m = openModal('册封管理员', body);
     m.foot.innerHTML = `<button class="btn btn-sm" id="promCancel">取消</button><button class="btn btn-sm btn-primary" id="promSave">确认册封</button>`;
     m.foot.querySelector('#promCancel').onclick = () => { closeModal(); resolve(null); };
@@ -2573,10 +2590,17 @@ async function renderAdminCode() {
   await loadMe();
   if (!isAdmin()) { $('#adminCodeBox').innerHTML = emptyHTML('code', '🚫 无权访问', `<p class="muted" style="margin:0">查看代码仅对站点管理员开放</p><a class="btn btn-primary btn-sm" href="/" data-link>回首页</a>`); return; }
   const isDev = state.me.role === 'developer';
+  const canEdit = isDev || !!(state.me.admin_permissions && state.me.admin_permissions.edit_code);
+  const modeTag = isDev ? '<span class="badge badge-code-edit">🛠 可编辑 · 直部署</span>'
+    : canEdit ? '<span class="badge badge-code-edit">✏️ 可编辑 · 提交审批</span>'
+    : '<span class="badge badge-code-ro">👁 只读查看</span>';
+  const modeDesc = isDev ? '你是开发者，可直接编辑并<span class="gold">即刻部署</span>。'
+    : canEdit ? '你被授予「编辑并提交代码」权限：改动会提交给开发者审批，通过后会自动部署。'
+    : '你当前仅有<b>查看源码</b>权限，只能浏览，不能编辑。如需编辑，请让开发者在「用户 → 权限设置」中为你勾选 <b>编辑并提交代码</b>。';
   const box = $('#adminCodeBox');
   box.innerHTML = `
-    <h1 class="clip-title">💻 查看代码</h1>
-    <p class="muted">浏览 <b>yanzien/mdqp</b> 全部源码（实时来自 GitHub）。${isDev ? '你是开发者，可直接编辑并<span class="gold">即刻部署</span>。' : '你可将改动提交给开发者审批，通过后会自动部署。'}</p>
+    <h1 class="clip-title">💻 查看代码 ${modeTag}</h1>
+    <p class="muted">浏览 <b>yanzien/mdqp</b> 全部源码（实时来自 GitHub）。${modeDesc}</p>
     <div class="code-tabs">
       <button class="code-tab active" data-tab="browse">📂 代码浏览</button>
       <button class="code-tab" data-tab="review">📝 审批队列</button>
@@ -2637,13 +2661,15 @@ async function loadCodeFile(path) {
 function renderCodeViewer() {
   const cur = state.codeCur; if (!cur) return;
   const isDev = state.me.role === 'developer';
+  const canEdit = isDev || !!(state.me.admin_permissions && state.me.admin_permissions.edit_code);
   const tb = $('#codeToolbar');
   tb.classList.remove('hidden');
   tb.innerHTML = `
     <span class="code-path">${esc(cur.path)}</span>
     <span class="muted">${cur.content.length} 字符</span>
+    ${!canEdit && !state.codeEditing ? '<span class="badge badge-code-ro code-ro-tag">👁 只读</span>' : ''}
     <span class="code-actions">
-      ${state.codeEditing ? '' : '<button class="btn btn-sm" id="codeEditBtn">✏️ 编辑</button>'}
+      ${state.codeEditing ? '' : (canEdit ? '<button class="btn btn-sm" id="codeEditBtn">✏️ 编辑</button>' : '')}
       ${state.codeEditing ? '<button class="btn btn-sm" id="codePreviewBtn">👁 本地预览</button><button class="btn btn-sm btn-primary" id="codeSaveBtn">' + (isDev ? '🚀 直接部署' : '📨 提交审批') + '</button><button class="btn btn-sm btn-ghost" id="codeCancelBtn">取消</button>' : ''}
     </span>`;
   const view = $('#codeView');
