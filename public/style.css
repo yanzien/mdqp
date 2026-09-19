@@ -1008,6 +1008,8 @@ a.linked-card:hover { transform: translateY(-1px); box-shadow: 0 3px 10px rgba(0
 .notif-cat-expiry { background: color-mix(in srgb, #b45309 14%, var(--surface)); color: #b45309; border-color: color-mix(in srgb, #b45309 40%, var(--border)); }
 .notif-cat-visited { background: color-mix(in srgb, #0e7490 12%, var(--surface)); color: #0e7490; border-color: color-mix(in srgb, #0e7490 35%, var(--border)); }
 .notif-cat-admin { background: color-mix(in srgb, #be123c 12%, var(--surface)); color: #be123c; border-color: color-mix(in srgb, #be123c 35%, var(--border)); }
+.notif-cat-ticket { background: color-mix(in srgb, #15803d 12%, var(--surface)); color: #15803d; border-color: color-mix(in srgb, #15803d 35%, var(--border)); }
+.notif-cat-comment { background: color-mix(in srgb, #1d4ed8 12%, var(--surface)); color: #1d4ed8; border-color: color-mix(in srgb, #1d4ed8 35%, var(--border)); }
 
 
 /* ============ v4.5.2 报错提示弹窗（自动捕获，无需 F12） ============ */
