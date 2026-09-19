@@ -853,6 +853,15 @@ main { max-width: 960px; width: 100%; margin: 0 auto; padding: 26px 22px 60px; f
 .tk-admin-row { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
 .tk-admin-row label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
 .tk-admin .btn { margin-top: 10px; }
+
+/* ========== 工单写入独立页（/tickets/new） ========== */
+.tk-form-row { margin: 14px 0; }
+.tk-form-row > label { display: block; font-weight: 600; font-size: 14px; margin-bottom: 6px; }
+.tk-form-row .input, .tk-form-row .input-sm { margin-top: 4px; }
+.tk-form-row .muted { font-weight: 400; font-size: 12.5px; }
+.tk-editor-split { margin-top: 6px; }
+.tk-new-foot { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; }
+
 .loading, .empty { padding: 28px; text-align: center; color: var(--muted); }
 
 /* ========== 登录 / 注册弹窗（cpoauth 兜底） ========== */
