@@ -815,6 +815,46 @@ main { max-width: 960px; width: 100%; margin: 0 auto; padding: 26px 22px 60px; f
 .fb-status-resolved { background: rgba(26,127,79,.12); color: #1a7f4f; border: 1px solid rgba(26,127,79,.3); }
 .fb-status-rejected { background: rgba(192,57,43,.12); color: #c0392b; border: 1px solid rgba(192,57,43,.3); }
 
+/* ========== v4.14: 统一工单系统（仿洛谷工单） ========== */
+.tk-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 16px; flex-wrap: wrap; }
+.tk-head .clip-title { margin: 0 0 4px; }
+.tk-filters { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+.tk-mine { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; color: var(--muted); }
+.tk-list { display: flex; flex-direction: column; gap: 10px; }
+.tk-card { display: block; text-decoration: none; color: inherit; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; transition: border-color .15s, box-shadow .15s, transform .05s; }
+.tk-card:hover { border-color: var(--primary); box-shadow: 0 4px 14px rgba(0,0,0,.06); }
+.tk-card:active { transform: translateY(1px); }
+.tk-card-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.tk-card-top { margin-bottom: 8px; }
+.tk-title { font-size: 15px; font-weight: 700; color: var(--text); }
+.tk-card-meta { font-size: 12px; }
+.tk-replies { background: var(--surface-2); color: var(--muted); }
+.tk-detail .crumb { margin-bottom: 12px; }
+.tk-banner { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 18px; margin-bottom: 16px; }
+.tk-banner-top { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.tk-detail-title { font-size: 20px; margin: 0; color: var(--text); }
+.tk-banner-meta { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 10px; font-size: 13px; }
+.tk-clip { margin-top: 10px; font-size: 13px; padding-top: 10px; border-top: 1px dashed var(--border); }
+.tk-section { margin: 18px 0; }
+.tk-h3 { font-size: 15px; margin: 0 0 10px; color: var(--text); }
+.tk-desc { white-space: pre-wrap; word-break: break-word; line-height: 1.7; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px; color: var(--text); }
+.tk-note { background: var(--primary-soft); border: 1px solid color-mix(in srgb, var(--primary) 30%, var(--border)); border-radius: 10px; padding: 12px 14px; color: var(--primary); font-size: 14px; }
+.tk-replies { display: flex; flex-direction: column; gap: 10px; }
+.tk-reply { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; }
+.tk-reply-staff { border-color: color-mix(in srgb, var(--primary) 40%, var(--border)); background: var(--primary-soft); }
+.tk-reply-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
+.tk-reply-author { font-weight: 700; color: var(--text); }
+.tk-reply-time { font-size: 12px; }
+.tk-reply-content { white-space: pre-wrap; word-break: break-word; line-height: 1.6; color: var(--text); }
+.tk-staff { background: var(--primary); color: #fff; border: none; }
+.tk-reply-editor { margin-top: 16px; }
+.tk-reply-foot { display: flex; justify-content: flex-end; margin-top: 8px; }
+.tk-admin { margin-top: 20px; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 16px; }
+.tk-admin-row { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
+.tk-admin-row label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+.tk-admin .btn { margin-top: 10px; }
+.loading, .empty { padding: 28px; text-align: center; color: var(--muted); }
+
 /* ========== 登录 / 注册弹窗（cpoauth 兜底） ========== */
 .btn-block { display: block; width: 100%; text-align: center; }
 .auth-modal { width: min(420px, 100%); }
