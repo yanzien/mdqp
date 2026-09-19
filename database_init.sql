@@ -133,6 +133,19 @@ CREATE TABLE IF NOT EXISTS announcements (
   updated_by TEXT DEFAULT ''
 );
 
+-- ========== v4.5: 通知系统 ==========
+CREATE TABLE IF NOT EXISTS notifications (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  category TEXT NOT NULL,
+  title TEXT NOT NULL,
+  body TEXT DEFAULT '',
+  link TEXT DEFAULT '',
+  is_read INTEGER DEFAULT 0,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, is_read, created_at);
+
 -- ========== v4.0: 代码查看/审批 ==========
 CREATE TABLE IF NOT EXISTS code_change_requests (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
