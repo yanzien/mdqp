@@ -102,7 +102,7 @@
     }
     el.innerHTML = '<div style="margin-bottom:6px;word-break:break-word">⚠️ <b>页面部分功能加载失败</b>：'
       + esc(text) + '<span style="color:#c9a0a0">　可先刷新；若反复出现，欢迎反馈</span></div>'
-      + '<a href="/feedback" style="display:inline-block;color:#ffd9d9;border:1px solid #7a2e2e;'
+      + '<a href="/tickets" style="display:inline-block;color:#ffd9d9;border:1px solid #7a2e2e;'
       + 'padding:4px 10px;border-radius:6px;text-decoration:none;margin-right:8px">去反馈</a>'
       + '<button type="button" id="mdqpErrBarReload" style="color:#ffd9d9;background:#5a2323;'
       + 'border:1px solid #7a2e2e;padding:4px 10px;border-radius:6px;cursor:pointer;margin-right:8px">重新加载</button>'
@@ -250,8 +250,8 @@
     <a class="nav-item" href="/changelog" data-link data-nav="changelog">
       <span class="nav-ico">📝</span><span class="nav-label">更新日志</span>
     </a>
-    <a class="nav-item" href="/feedback" data-link data-nav="feedback">
-      <span class="nav-ico">💬</span><span class="nav-label">反馈</span>
+    <a class="nav-item" href="/tickets" data-link data-nav="tickets">
+      <span class="nav-ico">🎫</span><span class="nav-label">工单</span>
     </a>
   </div>
 
@@ -490,10 +490,10 @@
       <div id="vipPageContent"></div>
     </section>
 
-    <!-- ========== 官方反馈贴 ========== -->
-    <section class="view" id="view-feedback">
+    <!-- ========== 统一工单中心（合并反馈 + 举报） ========== -->
+    <section class="view" id="view-tickets">
       <div class="crumb"><a href="/" data-link>← 首页</a></div>
-      <div id="feedbackBox"></div>
+      <div id="ticketBox"></div>
     </section>
 
     <!-- ========== 查看代码 / 在线编辑 / 审批部署 ========== -->
