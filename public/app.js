@@ -35,7 +35,7 @@ function copy(text, msg) {
 // 更新日志：随代码发布自动同步
 const CHANGELOG_MD = `# 📝 更新日志
 
-mdqp 的主要版本变动记录。当前部署版本 **v4.14.0**。
+mdqp 的主要版本变动记录。当前部署版本 **v4.14.1**。
 
 ---
 
@@ -47,6 +47,12 @@ mdqp 的主要版本变动记录。当前部署版本 **v4.14.0**。
 - 🗄️ 数据库：\`migrate_v4.14.sql\` 新建 \`tickets\` + \`ticket_replies\` 表，并把旧 \`feedback\` 与 \`clip_reports\` 数据**回灌**为工单（幂等，不会重复）。旧两表保留为归档、不再写入。
 - 🔧 接口：\`/api/tickets\`（POST 创建 / GET 列表 / GET :code 详情 / POST :code/reply 回复 / PATCH :code 管理员处理 / DELETE :code 删除）替换旧的 \`/api/feedback*\` 与 \`/api/clips/:id/report\`、\`/api/admin/clips/reports*\`。
 - 🎨 UI：洛谷风工单卡片（工单号 #TKxxxx / 分类 / 状态 / 提交人 / 时间 / 回复数）+ 详情页（描述 + 处理记录时间线 + 管理员操作区）。
+
+## v4.14.1 · 2026-09-19（工单写入改独立页 + Markdown 编辑器）
+
+- 🆕 **工单写入搬到独立页 \`/tickets/new\`**：原「发起工单」弹窗改为整页编辑器——左侧 Markdown 输入（工具栏 + 实时预览，复用站点编辑器体验），右侧实时渲染，支持标题与分类（程序缺陷 / 功能建议 / 其他）。
+- 🐞 **Bug 反馈保留结构化格式**：从报错弹窗点「🐞 反馈给站长」、命令面板「上报最近一次报错」、或横幅「去反馈」，跳到新工单页时自动预填「错误类型 / 发生时间 / 发生页面 / 错误信息 / 运行环境 / 最近控制台日志 + 我当时的操作 / 期望结果」模板；手动切到「程序缺陷」分类且内容为空时也会自动带出该模板。
+- 🔧 联动：原 \`/feedback\` 别名、「＋ 发起工单」按钮、报错一键反馈现在统一跳 \`/tickets/new\`；旧的 \`openNewTicketModal\` 弹窗已删除，避免两套写入入口腐烂。
 
 ---
 
@@ -696,6 +702,7 @@ async function render() {
     if (p === '/vip') return renderVipPage();
     if (p === '/feedback') return renderTickets();          // 旧 /feedback 别名 → 工单中心
     if (p === '/tickets') return renderTickets();
+    if (p === '/tickets/new') return renderNewTicket();     // 工单写入独立页（Markdown 编辑器）
     if (seg[0] === 'tickets' && seg[1]) return renderTicketDetail(seg[1]);
     // 系统错误页 / 404 页：复用剪贴板文稿（本身即 📋），不加 /c/ 前缀以便与片段区分
     if (seg[0] === 'error') return renderClip('error');
@@ -2329,15 +2336,36 @@ function updatePreview() {
   if (!$('#edToc').classList.contains('hidden')) $('#edToc').innerHTML = buildOutline(pv);
 }
 
+const MD_WRAPS = {
+  h1: ['\n# ', '', '一级标题'], h2: ['\n## ', '', '二级标题'], h3: ['\n### ', '', '三级标题'],
+  bold: ['**', '**', '加粗'], italic: ['*', '*', '斜体'], strike: ['~~', '~~', '删除线'],
+  link: ['[', '](https://)', '链接文字'], image: ['![', '](https://)', '图片描述'],
+  code: ['\n```\n', '\n```\n', '代码'], quote: ['\n> ', '', '引用'],
+  list: ['\n- ', '', '列表项'], table: ['\n| 列1 | 列2 |\n|---|---|\n| ', ' |  |\n', '内容'], hr: ['\n\n---\n\n', '', '']
+};
+
+/** 通用 Markdown 编辑器绑定：textarea + 预览区 + 工具栏（可指定元素，支持多实例复用） */
+function bindMdEditor(ta, pv, toolbar, countEl) {
+  const update = () => {
+    const v = ta.value;
+    if (v.trim()) renderMd(pv, v); else pv.innerHTML = '<p class="muted">预览区：左侧输入 Markdown，这里实时渲染。</p>';
+    if (countEl) countEl.textContent = countChars(v) + ' 字';
+  };
+  ta.oninput = update;
+  if (toolbar) toolbar.querySelectorAll('button[data-md]').forEach((b) => {
+    b.onclick = () => {
+      const [pre, post, ph] = MD_WRAPS[b.dataset.md] || ['', '', ''];
+      const s = ta.selectionStart, e = ta.selectionEnd, sel = ta.value.slice(s, e) || ph;
+      ta.value = ta.value.slice(0, s) + pre + sel + post + ta.value.slice(e);
+      ta.focus(); ta.selectionStart = s + pre.length; ta.selectionEnd = s + pre.length + sel.length; update();
+    };
+  });
+  update();
+}
+
 function bindToolbar() {
   $('#previewToggle').onclick = () => { const s = $('#editorSplit'); s.classList.toggle('no-preview'); $('#previewToggle').classList.toggle('off', s.classList.contains('no-preview')); };
-  const wraps = {
-    h1: ['\n# ', '', '一级标题'], h2: ['\n## ', '', '二级标题'], h3: ['\n### ', '', '三级标题'],
-    bold: ['**', '**', '加粗'], italic: ['*', '*', '斜体'], strike: ['~~', '~~', '删除线'],
-    link: ['[', '](https://)', '链接文字'], image: ['![', '](https://)', '图片描述'],
-    code: ['\n```\n', '\n```\n', '代码'], quote: ['\n> ', '', '引用'],
-    list: ['\n- ', '', '列表项'], table: ['\n| 列1 | 列2 |\n|---|---|\n| ', ' |  |\n', '内容'], hr: ['\n\n---\n\n', '', '']
-  };
+  const wraps = MD_WRAPS;
   $$('.editor-toolbar button[data-md]').forEach((b) => { b.onclick = () => { const ta = $('#edContent'); const [pre, post, ph] = wraps[b.dataset.md]; const s = ta.selectionStart, e = ta.selectionEnd; const sel = ta.value.slice(s, e) || ph; ta.value = ta.value.slice(0, s) + pre + sel + post + ta.value.slice(e); ta.focus(); ta.selectionStart = s + pre.length; ta.selectionEnd = s + pre.length + sel.length; updatePreview(); }; });
   const fixerBtn = $('#fixerBtn'); if (fixerBtn) fixerBtn.onclick = () => openFixer($('#edContent')?.value || '');
 }
@@ -2519,15 +2547,25 @@ function reportError(info) {
   showErrModal(err);
 }
 
-/** 把当前错误打包成反馈草稿，跳转 /feedback（等于用户同意后再提交） */
+/** 组装 Bug 工单的结构化格式（保留 v4.14.0 之前的报错反馈排版：错误类型/页面/环境/控制台/操作/期望） */
+function bugReportContent(err) {
+  const e = err || lastErr || { kind: 'manual', kindLabel: '手动上报', message: '（无自动捕获到的报错，请手动描述）', time: new Date().toLocaleString('zh-CN'), url: location.pathname + location.search };
+  const full = buildReportText(e);
+  return `【自动上报】${e.kindLabel || '问题反馈'}
+错误：${e.message || '（未捕获到具体错误）'}
+页面：${e.url || location.pathname}
+环境：${collectEnv()}
+控制台：${full}
+
+我当时的操作：（请补充）
+期望结果：（请补充）`;
+}
+
+/** 把当前错误打包成反馈草稿，跳转工单写入页（等于用户同意后再提交） */
 function goReportError(err) {
-  const full = buildReportText(err || lastErr || { kind: 'manual', kindLabel: '手动上报', message: '（无自动捕获到的报错，请手动描述）', time: new Date().toLocaleString('zh-CN'), url: location.pathname + location.search });
-  pendingBug = {
-    category: 'bug',
-    content: `【自动上报】${(err || lastErr || {}).kindLabel || '问题反馈'}\n错误：${(err || lastErr || {}).message || '（未捕获到具体错误）'}\n页面：${(err || lastErr || {}).url || location.pathname}\n环境：${collectEnv()}\n控制台：${full}\n\n我当时的操作：（请补充）\n期望结果：（请补充）`
-  };
+  pendingBug = { category: 'bug', content: bugReportContent(err || lastErr) };
   closeErrModal();
-  go('/tickets');
+  go('/tickets/new');
 }
 
 function installErrorReporter() {
@@ -2638,12 +2676,12 @@ async function renderTickets() {
       <span class="muted" id="tkCount"></span>
     </div>
     <div id="tkList" class="tk-list"><div class="loading">加载中…</div></div>`;
-  $('#newTicketBtn').onclick = () => openNewTicketModal();
+  $('#newTicketBtn').onclick = () => go('/tickets/new');
   const reload = () => loadTicketList();
   $('#tkStatus').onchange = reload;
   $('#tkCat').onchange = reload;
   const mine = $('#tkMine'); if (mine) mine.onchange = reload;
-  if (pendingBug) { const p = pendingBug; pendingBug = null; openNewTicketModal(p); }
+  if (pendingBug) { go('/tickets/new'); return; }   // pendingBug 为全局，renderNewTicket 会消费
   await loadTicketList();
 }
 
@@ -2768,29 +2806,72 @@ async function renderTicketDetail(code) {
   };
 }
 
-function openNewTicketModal(prefill) {
-  const p = prefill || {};
-  const body = `
-    <div class="form-row"><label>分类
-      <select id="ntCat" class="input-sm">
-        <option value="bug">程序缺陷</option>
-        <option value="suggestion">功能建议</option>
-        <option value="other">其他</option>
-      </select></label></div>
-    <div class="form-row"><label>标题（选填）<input id="ntTitle" class="input" placeholder="一句话概括" maxlength="100"></label></div>
-    <div class="form-row"><label>详细描述 <span class="muted">（必填）</span>
-      <textarea id="ntContent" class="input" rows="6" placeholder="描述你的问题、建议或遇到的情况" maxlength="5000">${esc(p.content || '')}</textarea></label></div>`;
-  const m = openModal('发起工单', body);
-  if (p.category && ['bug', 'suggestion', 'other'].includes(p.category)) m.body.querySelector('#ntCat').value = p.category;
-  m.foot.innerHTML = `<button class="btn btn-sm" id="ntCancel">取消</button><button class="btn btn-sm btn-primary" id="ntSave">提交工单</button>`;
-  m.foot.querySelector('#ntCancel').onclick = closeModal;
-  m.foot.querySelector('#ntSave').onclick = async () => {
-    const category = m.body.querySelector('#ntCat').value;
-    const title = m.body.querySelector('#ntTitle').value.trim();
-    const content = m.body.querySelector('#ntContent').value.trim();
+async function renderNewTicket() {
+  showView('tickets');
+  const box = $('#ticketBox'); if (!box) return;
+  const pf = pendingBug || {}; pendingBug = null;
+  const preCat = ['bug', 'suggestion', 'other'].includes(pf.category) ? pf.category : 'bug';
+  box.innerHTML = `
+    <div class="tk-detail">
+      <div class="crumb"><a href="/tickets" data-link>← 工单中心</a></div>
+      <h1 class="clip-title">🎫 发起工单</h1>
+      <p class="muted">描述你遇到的问题、建议或遇到的情况。所有工单公开可见，管理员会逐一处理。支持 Markdown 格式。</p>
+      <div class="tk-form-row"><label>分类
+        <select id="ntCat" class="input-sm">
+          <option value="bug">程序缺陷</option>
+          <option value="suggestion">功能建议</option>
+          <option value="other">其他</option>
+        </select></label>
+        <span class="muted" id="ntCatHint"></span>
+      </div>
+      <div class="tk-form-row"><label>标题（选填）
+        <input id="ntTitle" class="input" placeholder="一句话概括" maxlength="100">
+      </label></div>
+      <div class="tk-form-row">
+        <div class="tk-editor-toolbar editor-toolbar">
+          <button data-md="h1" title="一级标题">H1</button>
+          <button data-md="h2" title="二级标题">H2</button>
+          <button data-md="h3" title="三级标题">H3</button>
+          <button data-md="bold" title="加粗"><b>B</b></button>
+          <button data-md="italic" title="斜体"><i>I</i></button>
+          <button data-md="code" title="代码块">‹›</button>
+          <button data-md="quote" title="引用">❝</button>
+          <button data-md="list" title="列表">•</button>
+          <button id="ntPreviewToggle" class="tb-toggle">👁 实时预览</button>
+          <span class="tb-count muted" id="ntCharCount">0 字</span>
+        </div>
+        <div class="tk-editor-split editor-split" id="ntSplit">
+          <textarea id="tkContent" class="editor-area" rows="16" placeholder="用 Markdown 描述你的问题或建议…"></textarea>
+          <div id="tkPreview" class="markdown-body preview-pane"></div>
+        </div>
+      </div>
+      <div class="tk-new-foot">
+        <button class="btn btn-sm" id="ntCancel">取消</button>
+        <button class="btn btn-sm btn-primary" id="ntSave">提交工单</button>
+      </div>
+    </div>`;
+  const ta = $('#tkContent'), pv = $('#tkPreview'), cat = $('#ntCat'), split = $('#ntSplit'), toolbar = box.querySelector('.tk-editor-toolbar');
+  if (pf.title) $('#ntTitle').value = pf.title;
+  ta.value = pf.content || '';
+  if (preCat === 'bug' && !ta.value.trim()) ta.value = bugReportContent(null);
+  cat.value = preCat;
+  const hint = { bug: '🐞 已自动附带环境信息，补充「我当时的操作 / 期望结果」即可', suggestion: '💡 说说你的想法或改进建议', other: '💬 其它问题或咨询' };
+  $('#ntCatHint').textContent = hint[preCat] || '';
+  cat.onchange = () => {
+    const c = cat.value;
+    $('#ntCatHint').textContent = hint[c] || '';
+    if (c === 'bug' && !ta.value.trim()) { ta.value = bugReportContent(null); ta.dispatchEvent(new Event('input')); }
+  };
+  $('#ntPreviewToggle').onclick = () => { split.classList.toggle('no-preview'); $('#ntPreviewToggle').classList.toggle('off', split.classList.contains('no-preview')); };
+  bindMdEditor(ta, pv, toolbar, $('#ntCharCount'));
+  $('#ntCancel').onclick = () => go('/tickets');
+  $('#ntSave').onclick = async () => {
+    const category = cat.value, title = $('#ntTitle').value.trim(), content = ta.value.trim();
     if (!content) return toast('请填写详细描述', 'err');
+    const btn = $('#ntSave'); btn.disabled = true; btn.textContent = '提交中…';
     const r = await api('/api/tickets', { method: 'POST', body: JSON.stringify({ category, title, content }) });
-    if (r.ok) { toast('工单已提交', 'ok'); closeModal(); go('/tickets/' + r.data.code); }
+    btn.disabled = false; btn.textContent = '提交工单';
+    if (r.ok) { toast('工单已提交', 'ok'); go('/tickets/' + r.data.code); }
     else toast(r.data?.message || r.data?.error || '提交失败', 'err');
   };
 }
