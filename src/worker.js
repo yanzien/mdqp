@@ -19,7 +19,7 @@ const app = new Hono();
 
 const GUEST_LIMIT = 5;
 const PAGE_SIZE = 20;
-const VERSION = '4.14.1';
+const VERSION = '4.14.2';
 const SEARCH_MAX = 100;
 const RESERVED = new Set([
   'api', 'raw', 'new', 'edit', 'u', 'user', 'users', 'admin', 'login', 'logout',
@@ -473,6 +473,18 @@ app.get('/api/announcements', async (c) => {
   }
 });
 
+// 发布 + 清理公告（抽成函数便于失败重试一次，应对 D1 偶发抖动）
+async function publishAnnouncement(db, content, updatedBy) {
+  await db.prepare(
+    `INSERT INTO announcements (content, is_active, pinned, updated_at, updated_by)
+     VALUES (?, 1, 1, datetime('now'), ?)`
+  ).bind(content, updatedBy).run();
+  // 保留最新 N 条公告（默认最多 5 条活跃）
+  await db.exec(`DELETE FROM announcements WHERE id NOT IN (
+    SELECT id FROM announcements WHERE is_active = 1 ORDER BY created_at DESC LIMIT 5
+  ) AND is_active = 1`);
+}
+
 app.put('/api/announcements', async (c) => {
   const db = c.env.db;
   const identity = await getIdentity(c);
@@ -484,26 +496,34 @@ app.put('/api/announcements', async (c) => {
   // 清洗：剔除控制字符（保留换行/制表/回车）+ 孤立代理对（否则 JSON.stringify 会抛错→500）
   content = sanitizeText(content);
   if (!content.trim()) return c.json({ error: 'empty_content' }, 400);
+  const updatedBy = identity.name || String(identity.userId);
 
-  await db.prepare(
-    `INSERT INTO announcements (content, is_active, pinned, updated_at, updated_by)
-     VALUES (?, 1, 1, datetime('now'), ?)`
-  ).bind(content, identity.name || String(identity.userId)).run();
-
-  // 保留最新 N 条公告（默认最多 5 条活跃）
-  await db.exec(`DELETE FROM announcements WHERE id NOT IN (
-    SELECT id FROM announcements WHERE is_active = 1 ORDER BY created_at DESC LIMIT 5
-  ) AND is_active = 1`);
-
-  return c.json({ ok: true });
+  try {
+    await publishAnnouncement(db, content, updatedBy);
+    return c.json({ ok: true });
+  } catch (e) {
+    // 重试一次（D1 偶发抖动）：多数瞬时失败重试即可成功，避免 /admin 误报 500
+    try {
+      await publishAnnouncement(db, content, updatedBy);
+      return c.json({ ok: true });
+    } catch (e2) {
+      console.error('[announcements] PUT failed after retry:', e2);
+      return c.json({ error: 'db_error', message: '公告发布失败，请稍后重试' }, 500);
+    }
+  }
 });
 
 app.delete('/api/announcements/:id', async (c) => {
   const db = c.env.db;
   const identity = await getIdentity(c);
   if (!(await isAdminIdentity(db, identity))) return c.json({ error: 'forbidden' }, 403);
-  await db.prepare('DELETE FROM announcements WHERE id = ?').bind(c.req.param('id')).run();
-  return c.json({ ok: true });
+  try {
+    await db.prepare('DELETE FROM announcements WHERE id = ?').bind(c.req.param('id')).run();
+    return c.json({ ok: true });
+  } catch (e) {
+    console.error('[announcements] DELETE failed:', e);
+    return c.json({ error: 'db_error', message: '公告删除失败，请稍后重试' }, 500);
+  }
 });
 
 // ========== 统一工单系统（合并「反馈」+「内容举报」，仿洛谷工单） ==========
@@ -625,7 +645,7 @@ app.post('/api/tickets/:code/reply', async (c) => {
   const code = c.req.param('code');
   const identity = await getIdentity(c);
   if (identity.type === 'none') return c.json({ error: 'unauthorized' }, 401);
-  const t = await db.prepare('SELECT id, status FROM tickets WHERE code = ?').bind(code).first();
+  const t = await db.prepare('SELECT id, code, status, author_id, author_type FROM tickets WHERE code = ?').bind(code).first();
   if (!t) return c.json({ error: 'not_found' }, 404);
   let body;
   try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
@@ -637,6 +657,15 @@ app.post('/api/tickets/:code/reply', async (c) => {
     "INSERT INTO ticket_replies (ticket_id, author_id, author_name, author_type, is_staff, content, created_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))"
   ).bind(t.id, identity.type === 'user' ? String(identity.userId) : (identity.guestId || ''), authorName, identity.type === 'user' ? 'user' : 'guest', isStaff ? 1 : 0, content).run();
   await db.prepare("UPDATE tickets SET updated_at = datetime('now') WHERE id = ?").bind(t.id).run();
+  // 通知工单作者（非本人回复时推送）
+  try {
+    if (t.author_type === 'user' && t.author_id && String(t.author_id) !== String(identity.userId)) {
+      await createNotification(db, t.author_id, 'ticket',
+        '💬 你的工单 ' + t.code + ' 收到新回复',
+        (isStaff ? '管理员' : authorName) + '回复了你的工单',
+        '/tickets/' + t.code);
+    }
+  } catch (e) { /* 通知失败不影响主流程 */ }
   return c.json({ ok: true });
 });
 
@@ -646,7 +675,7 @@ app.patch('/api/tickets/:code', async (c) => {
   const identity = await getIdentity(c);
   if (!(await isAdminIdentity(db, identity))) return c.json({ error: 'forbidden' }, 403);
   const code = c.req.param('code');
-  const t = await db.prepare('SELECT id, related_clip_id, status FROM tickets WHERE code = ?').bind(code).first();
+  const t = await db.prepare('SELECT id, code, related_clip_id, status, author_id, author_type FROM tickets WHERE code = ?').bind(code).first();
   if (!t) return c.json({ error: 'not_found' }, 404);
   let body;
   try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
@@ -672,6 +701,16 @@ app.patch('/api/tickets/:code', async (c) => {
   sets.push("updated_at = datetime('now')");
   binds.push(code);
   await db.prepare(`UPDATE tickets SET ${sets.join(', ')} WHERE code = ?`).bind(...binds).run();
+  // 通知工单作者：状态变更（仅用户作者且非本人处理时推送，避免管理员改自己工单自通知）
+  try {
+    if (body.status && t.author_type === 'user' && t.author_id && String(t.author_id) !== String(identity.userId)) {
+      const label = TICKET_STATUS_LABEL[body.status] || body.status;
+      await createNotification(db, t.author_id, 'ticket',
+        '🛠 你的工单 ' + t.code + ' 状态更新为「' + label + '」',
+        (body.admin_note ? '处理说明：' + String(body.admin_note).slice(0, 120) : '管理员已处理该工单'),
+        '/tickets/' + t.code);
+    }
+  } catch (e) { /* 通知失败不影响主流程 */ }
   return c.json({ ok: true });
 });
 
@@ -1608,23 +1647,28 @@ app.get('/api/notifications', async (c) => {
       await db.prepare('UPDATE clipboards SET expiry_notified = 1 WHERE clip_id = ?').bind(row.clip_id).run();
     }
   } catch (e) { /* 通知懒生成失败不影响列表返回 */ }
-  // 列表
-  const cat = c.req.query('category');
-  const unreadOnly = c.req.query('unread') === '1';
-  let sql = 'SELECT id, category, title, body, link, is_read, created_at FROM notifications WHERE user_id = ?';
-  const params = [uid];
-  if (cat) { sql += ' AND category = ?'; params.push(cat); }
-  if (unreadOnly) { sql += ' AND is_read = 0'; }
-  sql += ' ORDER BY created_at DESC, id DESC LIMIT 50';
-  const rows = await db.prepare(sql).bind(...params).all();
-  const unreadRow = await db.prepare('SELECT COUNT(*) as cnt FROM notifications WHERE user_id = ? AND is_read = 0').bind(uid).first();
-  return c.json({
-    notifications: (rows.results || []).map((n) => ({
-      id: n.id, category: n.category, title: n.title, body: n.body, link: n.link,
-      is_read: !!n.is_read, created_at: n.created_at
-    })),
-    unread: unreadRow?.cnt || 0
-  });
+  // 列表（表缺失/异常时降级为空，绝不 500 拖垮铃铛刷新）
+  try {
+    const cat = c.req.query('category');
+    const unreadOnly = c.req.query('unread') === '1';
+    let sql = 'SELECT id, category, title, body, link, is_read, created_at FROM notifications WHERE user_id = ?';
+    const params = [uid];
+    if (cat) { sql += ' AND category = ?'; params.push(cat); }
+    if (unreadOnly) { sql += ' AND is_read = 0'; }
+    sql += ' ORDER BY created_at DESC, id DESC LIMIT 50';
+    const rows = await db.prepare(sql).bind(...params).all();
+    const unreadRow = await db.prepare('SELECT COUNT(*) as cnt FROM notifications WHERE user_id = ? AND is_read = 0').bind(uid).first();
+    return c.json({
+      notifications: (rows.results || []).map((n) => ({
+        id: n.id, category: n.category, title: n.title, body: n.body, link: n.link,
+        is_read: !!n.is_read, created_at: n.created_at
+      })),
+      unread: unreadRow?.cnt || 0
+    });
+  } catch (e) {
+    console.error('[notifications] GET list failed, degrade to empty:', e);
+    return c.json({ notifications: [], unread: 0 });
+  }
 });
 
 app.post('/api/notifications/:id/read', async (c) => {
@@ -1632,9 +1676,11 @@ app.post('/api/notifications/:id/read', async (c) => {
   const identity = await getIdentity(c);
   if (identity.type !== 'user') return c.json({ error: 'unauthorized' }, 401);
   const id = c.req.param('id');
-  const n = await db.prepare('SELECT id, user_id FROM notifications WHERE id = ?').bind(id).first();
-  if (!n || String(n.user_id) !== String(identity.userId)) return c.json({ error: 'not_found' }, 404);
-  await db.prepare('UPDATE notifications SET is_read = 1 WHERE id = ?').bind(id).run();
+  try {
+    const n = await db.prepare('SELECT id, user_id FROM notifications WHERE id = ?').bind(id).first();
+    if (!n || String(n.user_id) !== String(identity.userId)) return c.json({ error: 'not_found' }, 404);
+    await db.prepare('UPDATE notifications SET is_read = 1 WHERE id = ?').bind(id).run();
+  } catch (e) { /* 表缺失等异常：视为已读成功，不阻塞交互 */ }
   return c.json({ ok: true });
 });
 
@@ -1647,7 +1693,7 @@ app.post('/api/notifications/read-all', async (c) => {
   let sql = 'UPDATE notifications SET is_read = 1 WHERE user_id = ?';
   const params = [uid];
   if (cat) { sql += ' AND category = ?'; params.push(cat); }
-  await db.prepare(sql).bind(...params).run();
+  try { await db.prepare(sql).bind(...params).run(); } catch (e) { /* 表缺失等异常忽略 */ }
   return c.json({ ok: true });
 });
 
@@ -1707,6 +1753,16 @@ app.post('/api/comments/:clipId', async (c) => {
   await db.prepare(
     'INSERT INTO comments (clip_id, author_type, author_id, author_name, content) VALUES (?, \'user\', ?, ?, ?)'
   ).bind(clipId, String(identity.userId), identity.name || '用户', content).run();
+
+  // 通知剪贴板拥有者（仅登录用户拥有且评论者非本人时推送）
+  try {
+    if (clip.owner_type === 'user' && clip.owner_id && String(clip.owner_id) !== String(identity.userId)) {
+      await createNotification(db, clip.owner_id, 'comment',
+        '💬 你的剪贴板《' + (clip.title || '无标题') + '》收到新评论',
+        content.slice(0, 120),
+        '/c/' + clipId);
+    }
+  } catch (e) { /* 通知失败不影响主流程 */ }
 
   return c.json({ ok: true });
 });
