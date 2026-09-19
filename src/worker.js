@@ -19,7 +19,7 @@ const app = new Hono();
 
 const GUEST_LIMIT = 5;
 const PAGE_SIZE = 20;
-const VERSION = '4.13.2';
+const VERSION = '4.14.0';
 const SEARCH_MAX = 100;
 const RESERVED = new Set([
   'api', 'raw', 'new', 'edit', 'u', 'user', 'users', 'admin', 'login', 'logout',
@@ -506,73 +506,185 @@ app.delete('/api/announcements/:id', async (c) => {
   return c.json({ ok: true });
 });
 
-// ========== 官方反馈贴 API（Bug 反馈 / 意见反馈） ==========
-app.post('/api/feedback', async (c) => {
+// ========== 统一工单系统（合并「反馈」+「内容举报」，仿洛谷工单） ==========
+const TICKET_CATEGORY_LABEL = { bug: '程序缺陷', suggestion: '功能建议', report: '内容举报', other: '其他' };
+const TICKET_STATUS_LABEL = { open: '待处理', reviewing: '处理中', resolved: '已解决', rejected: '已驳回' };
+const TICKET_CATS = ['bug', 'suggestion', 'report', 'other'];
+const TICKET_STATUSES = ['open', 'reviewing', 'resolved', 'rejected'];
+
+async function genTicketCode(db) {
+  for (let i = 0; i < 8; i++) {
+    const code = 'TK' + Math.random().toString(16).slice(2, 10).toUpperCase();
+    const ex = await db.prepare('SELECT 1 FROM tickets WHERE code = ?').bind(code).first();
+    if (!ex) return code;
+  }
+  return 'TK' + Date.now().toString(16).toUpperCase().slice(-8);
+}
+
+// 创建工单（反馈 / 举报 统一入口）
+app.post('/api/tickets', async (c) => {
+  const db = c.env.db;
   let body;
   try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
-  const type = body.type === 'suggestion' ? 'suggestion' : 'bug';
+  const category = TICKET_CATS.includes(body.category) ? body.category : 'other';
   const content = (body.content || '').toString().slice(0, 5000);
   if (!content.trim()) return c.json({ error: 'empty_content' }, 400);
-  const env = (body.env || '').toString().slice(0, 500);
-  const situation = (body.situation || '').toString().slice(0, 2000);
-  const console_log = (body.console_log || '').toString().slice(0, 4000);
-  const contact = (body.contact || '').toString().slice(0, 200);
+  const title = (body.title || '').toString().slice(0, 100).trim() || (category === 'report' ? '内容举报' : '工单');
   const identity = await getIdentity(c);
+
+  let relatedClipId = '', relatedClipReason = '', finalContent = content;
+  if (category === 'report') {
+    const clipId = (body.clip_id || '').toString().trim();
+    if (!clipId) return c.json({ error: 'missing_clip' }, 400);
+    const clip = await db.prepare('SELECT clip_id, title FROM clipboards WHERE clip_id = ?').bind(clipId).first();
+    if (!clip) return c.json({ error: 'not_found' }, 404);
+    // 去重：同一用户对同一片段的未处理举报工单只计一次
+    const dup = await db.prepare("SELECT code FROM tickets WHERE category='report' AND related_clip_id=? AND author_id=? AND status='open'")
+      .bind(clipId, String(identity.userId || '')).first();
+    if (dup) return c.json({ ok: true, already: true, code: dup.code });
+    relatedClipId = clipId;
+    relatedClipReason = (body.reason || '').toString().slice(0, 50);
+    const reasonLabel = REPORT_REASON_LABEL[relatedClipReason] || relatedClipReason || '其他';
+    finalContent = '【举报原因】' + reasonLabel + (body.detail ? '\n' + (body.detail || '').toString().slice(0, 1000) : '');
+    if (identity.type !== 'user') return c.json({ error: 'login_required', message: '请先登录后再举报' }, 401);
+  }
+  if (identity.type === 'none') return c.json({ error: 'unauthorized' }, 401);
+
   let authorId = '', authorName = '匿名', authorType = 'guest';
   if (identity.type === 'user') { authorId = String(identity.userId); authorName = identity.name || '用户'; authorType = 'user'; }
   else if (identity.type === 'guest') { authorId = identity.guestId || ''; authorName = '游客'; authorType = 'guest'; }
-  const db = c.env.db;
-  const info = await db.prepare(
-    `INSERT INTO feedback (type, env, situation, console_log, content, contact, author_id, author_name, author_type, status, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', datetime('now'), datetime('now'))`
-  ).bind(type, env, situation, console_log, content, contact, authorId, authorName, authorType).run();
-  return c.json({ ok: true, id: info?.meta?.last_row_id ?? null });
+
+  const code = await genTicketCode(db);
+  await db.prepare(
+    `INSERT INTO tickets (code, category, title, content, author_id, author_name, author_type, status, related_clip_id, related_clip_reason, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, datetime('now'), datetime('now'))`
+  ).bind(code, category, title, finalContent, authorId, authorName, authorType, relatedClipId, relatedClipReason).run();
+  return c.json({ ok: true, code });
 });
 
-app.get('/api/feedback', async (c) => {
+// 工单列表（公开可读，支持状态/分类/我的/分页筛选）
+app.get('/api/tickets', async (c) => {
   const db = c.env.db;
   const identity = await getIdentity(c);
-  // v4.7.5 反馈 #4：普通用户也能看反馈（只读、脱敏、不含已驳回）
-  if (!(await isAdminIdentity(db, identity))) {
-    const pub = await db.prepare(
-      `SELECT id, type, status, situation, content, admin_note, author_name, created_at
-       FROM feedback WHERE status != 'rejected' ORDER BY created_at DESC LIMIT 100`
-    ).all();
-    return c.json({ feedback: pub.results, readonly: true });
+  const admin = await isAdminIdentity(db, identity);
+  const status = (c.req.query('status') || '').trim();
+  const category = (c.req.query('category') || '').trim();
+  const mine = c.req.query('mine') === '1';
+  const page = Math.max(1, parseInt(c.req.query('page') || '1', 10) || 1);
+  const where = [], binds = [];
+  if (status && TICKET_STATUSES.includes(status)) { where.push('t.status = ?'); binds.push(status); }
+  if (category && TICKET_CATS.includes(category)) { where.push('t.category = ?'); binds.push(category); }
+  if (mine && identity.type === 'user') { where.push('t.author_id = ?'); binds.push(String(identity.userId)); }
+  if (!admin) { where.push('t.is_public = 1'); where.push("t.status != 'rejected'"); }
+  const whereSql = where.length ? 'WHERE ' + where.join(' AND ') : '';
+  const rows = await db.prepare(
+    `SELECT t.id, t.code, t.category, t.title, t.author_name, t.status, t.created_at, t.updated_at,
+            (SELECT COUNT(*) FROM ticket_replies r WHERE r.ticket_id = t.id) AS reply_count
+     FROM tickets t ${whereSql} ORDER BY t.updated_at DESC LIMIT 30 OFFSET ?`
+  ).bind(...binds, (page - 1) * 30).all();
+  const total = await db.prepare(`SELECT COUNT(*) AS n FROM tickets t ${whereSql}`).bind(...binds).first();
+  return c.json({
+    tickets: rows.results.map((t) => ({
+      ...t, category_label: TICKET_CATEGORY_LABEL[t.category] || t.category,
+      status_label: TICKET_STATUS_LABEL[t.status] || t.status, reply_count: t.reply_count || 0
+    })),
+    total: total?.n || 0, page, admin
+  });
+});
+
+// 工单详情（公开可读，含回复流 + 关联片段信息）
+app.get('/api/tickets/:code', async (c) => {
+  const db = c.env.db;
+  const code = c.req.param('code');
+  const identity = await getIdentity(c);
+  const admin = await isAdminIdentity(db, identity);
+  const t = await db.prepare('SELECT * FROM tickets WHERE code = ?').bind(code).first();
+  if (!t) return c.json({ error: 'not_found' }, 404);
+  if (!t.is_public && !admin && !(identity.type === 'user' && String(identity.userId) === String(t.author_id)))
+    return c.json({ error: 'forbidden' }, 403);
+  const replies = await db.prepare(
+    'SELECT id, author_id, author_name, author_type, is_staff, content, created_at FROM ticket_replies WHERE ticket_id = ? ORDER BY created_at ASC'
+  ).bind(t.id).all();
+  let clip = null;
+  if (t.related_clip_id) {
+    const cl = await db.prepare('SELECT clip_id, title FROM clipboards WHERE clip_id = ?').bind(t.related_clip_id).first();
+    clip = cl ? { clip_id: cl.clip_id, title: cl.title, exists: true } : { clip_id: t.related_clip_id, title: '', exists: false };
   }
-  const status = c.req.query('status');
-  const rows = status
-    ? await db.prepare('SELECT * FROM feedback WHERE status = ? ORDER BY created_at DESC').bind(status).all()
-    : await db.prepare('SELECT * FROM feedback ORDER BY created_at DESC').all();
-  return c.json({ feedback: rows.results });
+  return c.json({
+    ticket: { ...t, category_label: TICKET_CATEGORY_LABEL[t.category] || t.category, status_label: TICKET_STATUS_LABEL[t.status] || t.status },
+    replies: replies.results, clip,
+    can_reply: identity.type !== 'none',
+    can_manage: admin,
+    is_author: identity.type === 'user' && String(identity.userId) === String(t.author_id)
+  });
 });
 
-app.patch('/api/feedback/:id', async (c) => {
+// 添加回复（登录即可；管理员回复记为官方回复）
+app.post('/api/tickets/:code/reply', async (c) => {
   const db = c.env.db;
+  const code = c.req.param('code');
   const identity = await getIdentity(c);
-  if (!(await isAdminIdentity(db, identity))) return c.json({ error: 'forbidden' }, 403);
+  if (identity.type === 'none') return c.json({ error: 'unauthorized' }, 401);
+  const t = await db.prepare('SELECT id, status FROM tickets WHERE code = ?').bind(code).first();
+  if (!t) return c.json({ error: 'not_found' }, 404);
   let body;
   try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
-  const id = c.req.param('id');
-  const allowed = ['open', 'reviewing', 'resolved', 'rejected'];
-  const sets = [], binds = [];
-  if (body.status) {
-    if (!allowed.includes(body.status)) return c.json({ error: 'bad_status' }, 400);
-    sets.push('status = ?'); binds.push(body.status);
-  }
-  if (body.admin_note !== undefined) { sets.push('admin_note = ?'); binds.push((body.admin_note || '').toString().slice(0, 2000)); }
-  if (!sets.length) return c.json({ error: 'nothing' }, 400);
-  sets.push("updated_at = datetime('now')");
-  binds.push(id);
-  await db.prepare(`UPDATE feedback SET ${sets.join(', ')} WHERE id = ?`).bind(...binds).run();
+  const content = (body.content || '').toString().slice(0, 3000);
+  if (!content.trim()) return c.json({ error: 'empty_content' }, 400);
+  const isStaff = await isAdminIdentity(db, identity);
+  const authorName = identity.type === 'user' ? (identity.name || '用户') : '游客';
+  await db.prepare(
+    "INSERT INTO ticket_replies (ticket_id, author_id, author_name, author_type, is_staff, content, created_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))"
+  ).bind(t.id, identity.type === 'user' ? String(identity.userId) : (identity.guestId || ''), authorName, identity.type === 'user' ? 'user' : 'guest', isStaff ? 1 : 0, content).run();
+  await db.prepare("UPDATE tickets SET updated_at = datetime('now') WHERE id = ?").bind(t.id).run();
   return c.json({ ok: true });
 });
 
-app.delete('/api/feedback/:id', async (c) => {
+// 管理员处理工单：改状态 / 处理说明 / 指派 / 删除关联内容
+app.patch('/api/tickets/:code', async (c) => {
   const db = c.env.db;
   const identity = await getIdentity(c);
   if (!(await isAdminIdentity(db, identity))) return c.json({ error: 'forbidden' }, 403);
-  await db.prepare('DELETE FROM feedback WHERE id = ?').bind(c.req.param('id')).run();
+  const code = c.req.param('code');
+  const t = await db.prepare('SELECT id, related_clip_id, status FROM tickets WHERE code = ?').bind(code).first();
+  if (!t) return c.json({ error: 'not_found' }, 404);
+  let body;
+  try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
+  const sets = [], binds = [];
+  if (body.status) {
+    if (!TICKET_STATUSES.includes(body.status)) return c.json({ error: 'bad_status' }, 400);
+    sets.push('status = ?'); binds.push(body.status);
+    if (body.status === 'resolved' || body.status === 'rejected') sets.push("resolved_at = datetime('now')");
+    else sets.push('resolved_at = NULL');
+  }
+  if (body.admin_note !== undefined) { sets.push('admin_note = ?'); binds.push((body.admin_note || '').toString().slice(0, 2000)); }
+  if (body.assignee_name !== undefined) { sets.push('assignee_name = ?'); binds.push((body.assignee_name || '').toString().slice(0, 60)); }
+  const action = body.action === 'delete_clip' ? 'delete_clip' : '';
+  if (action === 'delete_clip' && t.related_clip_id) {
+    const clipId = t.related_clip_id;
+    await db.prepare('DELETE FROM clipboards WHERE clip_id = ?').bind(clipId).run();
+    await db.prepare('DELETE FROM comments WHERE clip_id = ?').bind(clipId).run();
+    await db.prepare('DELETE FROM clip_readers WHERE clip_id = ?').bind(clipId).run();
+    await db.prepare('DELETE FROM clip_reports WHERE clip_id = ?').bind(clipId).run();
+    if (!sets.length) sets.push("updated_at = datetime('now')");
+  }
+  if (!sets.length) return c.json({ error: 'nothing' }, 400);
+  sets.push("updated_at = datetime('now')");
+  binds.push(code);
+  await db.prepare(`UPDATE tickets SET ${sets.join(', ')} WHERE code = ?`).bind(...binds).run();
+  return c.json({ ok: true });
+});
+
+// 管理员删除工单（连带回复）
+app.delete('/api/tickets/:code', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (!(await isAdminIdentity(db, identity))) return c.json({ error: 'forbidden' }, 403);
+  const code = c.req.param('code');
+  const t = await db.prepare('SELECT id FROM tickets WHERE code = ?').bind(code).first();
+  if (!t) return c.json({ error: 'not_found' }, 404);
+  await db.prepare('DELETE FROM ticket_replies WHERE ticket_id = ?').bind(t.id).run();
+  await db.prepare('DELETE FROM tickets WHERE id = ?').bind(t.id).run();
   return c.json({ ok: true });
 });
 
@@ -1094,33 +1206,7 @@ app.put('/api/clips/:clipId', async (c) => {
   return c.json({ ok: true, clip_id: newClipId, tags: parseTags(tagsStr) });
 });
 
-// ========== v4.13: 举报剪贴板 ==========
-app.post('/api/clips/:clipId/report', async (c) => {
-  const db = c.env.db;
-  const clipId = c.req.param('clipId');
-  const identity = await getIdentity(c);
-  if (identity.type !== 'user') return c.json({ error: 'login_required', message: '请先登录后再举报' }, 401);
-
-  const clip = await db.prepare('SELECT clip_id FROM clipboards WHERE clip_id = ?').bind(clipId).first();
-  if (!clip) return c.json({ error: 'not_found' }, 404);
-
-  let body;
-  try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
-  const reason = (body.reason || '').toString().trim();
-  const VALID = ['spam', 'porn', 'sensitive', 'illegal', 'other'];
-  if (!VALID.includes(reason)) return c.json({ error: 'bad_reason', message: '请选择举报原因' }, 400);
-  const detail = (body.detail || '').toString().slice(0, 1000);
-
-  // 去重：同一用户对同一剪贴板的未处理举报只计一次
-  const dup = await db.prepare("SELECT id FROM clip_reports WHERE clip_id = ? AND reporter_id = ? AND status = 'open'").bind(clipId, String(identity.userId)).first();
-  if (dup) return c.json({ ok: true, already: true, id: dup.id });
-
-  const ip = (c.req.raw.headers.get('CF-Connecting-IP') || c.req.raw.headers.get('X-Forwarded-For') || '').slice(0, 64);
-  await db.prepare(
-    "INSERT INTO clip_reports (clip_id, reporter_id, reporter_type, reporter_ip, reason, detail, status, created_at) VALUES (?, ?, 'user', ?, ?, ?, 'open', datetime('now'))"
-  ).bind(clipId, String(identity.userId), ip, reason, detail).run();
-  return c.json({ ok: true });
-});
+// ========== v4.14: 举报改为统一工单（见 /api/tickets，category=report） ==========
 
 // ========== 删除 ==========
 
@@ -2067,7 +2153,7 @@ app.get('/api/admin/clips', async (c) => {
   const rows = await db.prepare(
     `SELECT clip_id, title, content, owner_type, owner_id, owner_name, is_public, editable_by_anyone,
             password_hash, expires_at, max_views, views, created_at, updated_at, login_required, max_readers,
-            (SELECT COUNT(*) FROM clip_reports cr WHERE cr.clip_id = clipboards.clip_id AND cr.status = 'open') AS report_count
+            (SELECT COUNT(*) FROM tickets tk WHERE tk.category = 'report' AND tk.related_clip_id = clipboards.clip_id AND tk.status = 'open') AS report_count
      FROM clipboards ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`
   ).bind(...params, PAGE_SIZE, offset).all();
   return c.json({
@@ -2085,68 +2171,8 @@ app.get('/api/admin/clips', async (c) => {
   });
 });
 
-// ========== v4.13: 举报审核闭环（管理员/开发者） ==========
+// ========== v4.14: 举报审核已并入统一工单（见 /api/tickets，category=report） ==========
 const REPORT_REASON_LABEL = { spam: '恶意/垃圾', porn: '低俗色情', sensitive: '擦边内容', illegal: '违法违规', other: '其他' };
-
-app.get('/api/admin/clips/reports', async (c) => {
-  const db = c.env.db;
-  const identity = await getIdentity(c);
-  if (!(await isAdminIdentity(db, identity))) return c.json({ error: 'forbidden' }, 403);
-  const status = (c.req.query('status') || 'open').trim();
-  const validStatus = ['open', 'resolved', 'dismissed', 'all'];
-  const st = validStatus.includes(status) ? status : 'open';
-  const whereSql = st === 'all' ? '' : 'WHERE r.status = ?';
-  const params = st === 'all' ? [] : [st];
-  const rows = await db.prepare(
-    `SELECT r.id, r.clip_id, r.reporter_id, r.reporter_type, r.reason, r.detail, r.status, r.created_at, r.resolved_at, r.resolution,
-            c.title AS clip_title, c.owner_type AS clip_owner_type, c.owner_id AS clip_owner_id, c.owner_name AS clip_owner_name, c.is_public AS clip_is_public,
-            (SELECT COUNT(*) FROM clip_reports r2 WHERE r2.clip_id = r.clip_id AND r2.status = 'open') AS clip_open_reports
-     FROM clip_reports r LEFT JOIN clipboards c ON c.clip_id = r.clip_id ${whereSql} ORDER BY r.created_at DESC LIMIT 200`
-  ).bind(...params).all();
-  return c.json({
-    reports: rows.results.map((r) => ({
-      id: r.id, clip_id: r.clip_id, reporter_id: r.reporter_id, reporter_type: r.reporter_type,
-      reason: r.reason, reason_label: REPORT_REASON_LABEL[r.reason] || r.reason, detail: r.detail || '',
-      status: r.status, created_at: r.created_at, resolved_at: r.resolved_at || null, resolution: r.resolution || '',
-      clip: r.clip_title ? {
-        title: r.clip_title, owner_type: r.clip_owner_type, owner_id: r.clip_owner_id,
-        owner_name: r.clip_owner_name, is_public: !!r.clip_is_public, open_reports: r.clip_open_reports || 0
-      } : null
-    }))
-  });
-});
-
-app.patch('/api/admin/clips/reports/:id', async (c) => {
-  const db = c.env.db;
-  const identity = await getIdentity(c);
-  if (!(await isAdminIdentity(db, identity))) return c.json({ error: 'forbidden' }, 403);
-  const id = c.req.param('id');
-  const report = await db.prepare('SELECT id, clip_id, status FROM clip_reports WHERE id = ?').bind(id).first();
-  if (!report) return c.json({ error: 'not_found' }, 404);
-  if (report.status !== 'open') return c.json({ error: 'already_handled', message: '该举报已处理' }, 409);
-
-  let body;
-  try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
-  const status = (body.status || 'resolved').toString();
-  if (!['resolved', 'dismissed'].includes(status)) return c.json({ error: 'bad_status' }, 400);
-  const resolution = (body.resolution || '').toString().slice(0, 500);
-  const action = body.action === 'delete_clip' ? 'delete_clip' : '';
-
-  // 可选：连带删除被举报内容（及其评论/读者/其他举报）
-  if (action === 'delete_clip') {
-    const clipId = report.clip_id;
-    await db.prepare('DELETE FROM clipboards WHERE clip_id = ?').bind(clipId).run();
-    await db.prepare('DELETE FROM comments WHERE clip_id = ?').bind(clipId).run();
-    await db.prepare('DELETE FROM clip_readers WHERE clip_id = ?').bind(clipId).run();
-    await db.prepare('DELETE FROM clip_reports WHERE clip_id = ?').bind(clipId).run();
-    return c.json({ ok: true, deleted_clip: clipId });
-  }
-
-  await db.prepare(
-    "UPDATE clip_reports SET status = ?, resolved_at = datetime('now'), resolved_by = ?, resolution = ? WHERE id = ?"
-  ).bind(status, String(identity.userId), resolution, id).run();
-  return c.json({ ok: true, id: Number(id), status });
-});
 
 // OAuth 子路由
 app.route('/api/auth', oauthRoutes);
