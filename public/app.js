@@ -35,7 +35,22 @@ function copy(text, msg) {
 // 更新日志：随代码发布自动同步
 const CHANGELOG_MD = `# 📝 更新日志
 
-mdqp 的主要版本变动记录。当前部署版本 **v4.13.0**。
+mdqp 的主要版本变动记录。当前部署版本 **v4.13.2**。
+
+---
+
+## v4.13.2 · 2026-09-19（访客可只读查看评论）
+
+- 🆕 **访客可查看评论**：详情页评论区不再对未登录访客隐藏已有评论。访客现在能看到全部评论（只读），仅隐藏「发表评论」输入框；发表仍受服务端登录校验（\`POST /api/comments\` 非登录返回 401），后台读取接口本就不限登录。
+- 🐞 修复点：\`loadComments\` 原先对访客直接 \`return\` 只显示占位提示、从不拉取评论，现已改为先拉取并渲染评论列表，再按登录态决定是否显示输入框。
+
+---
+
+## v4.13.1 · 2026-09-19（修复长内容编辑器滚动乱跳）
+
+- 🐞 **修复长内容编辑时滚动乱跳/闪烁**：复制一大坨内容后，向上滚动编辑会闪一下跳回底部、用滚动条弄到顶部后稍微下滑又直接闪到底部。
+- 🔧 根因有二：① \`autoGrow\` 每次输入都把 textarea \`height:'auto'\` 塌缩再设回，重置了内部滚动位置；② 预览默认开启，每次输入 \`updatePreview\` 重建预览 \`innerHTML\` 清空 \`pv.scrollTop\`，经滚动同步把编辑器滚动位置拽走。
+- ✅ 修复：\`autoGrow\` 重算高度前保存/还原 \`scrollTop\`；\`updatePreview\` 重建前后保留预览滚动位置并临时屏蔽同步；\`setupScrollSync\` 改用程序化滚动屏蔽标志，且预览隐藏（\`no-preview\`）时不参与同步。
 
 ---
 
@@ -984,24 +999,24 @@ async function loadComments(clipId) {
   if (!box) return;
 
   const isLoggedIn = state.me?.type === 'user';
-  if (!isLoggedIn) {
-    box.innerHTML = `<div class="comments-wrap"><h3 class="comments-title">💬 评论</h3><p class="muted" style="padding:12px 0">登录后即可发表评论（支持 Markdown + @mention）</p></div>`;
-    return;
-  }
 
   const { data } = await api(`/api/comments/${encodeURIComponent(clipId)}`);
   const comments = data?.comments || [];
 
   let html = `<div class="comments-wrap">
-    <h3 class="comments-title">💬 评论 (${data?.total || 0})</h3>
-    <div class="comment-input-row">
+    <h3 class="comments-title">💬 评论 (${data?.total || 0})</h3>`;
+  if (isLoggedIn) {
+    html += `<div class="comment-input-row">
       <textarea id="commentInput" class="input comment-area" placeholder="写下你的评论…（支持 @mention 用户，50 等效字内）" maxlength="200" rows="2"></textarea>
       <div class="comment-input-foot">
         <span class="muted comment-char-count">0/50</span>
         <button class="btn btn-primary btn-sm" id="commentSubmitBtn">发送</button>
       </div>
-    </div>
-    <div class="comment-list">`;
+    </div>`;
+  } else {
+    html += `<p class="muted" style="padding:6px 0 12px">登录后即可发表评论（支持 Markdown + @mention）</p>`;
+  }
+  html += `<div class="comment-list">`;
 
   if (!comments.length) {
     html += '<p class="muted" style="padding:12px 0">暂无评论，来说点什么吧～</p>';
@@ -2326,12 +2341,20 @@ function setupDraft(clipId) {
 
 function updatePreview() {
   const v = $('#edContent').value;
-  if (v.trim()) renderMd($('#edPreview'), v); else $('#edPreview').innerHTML = '<p class="muted">预览区：左侧输入 Markdown，这里实时渲染。</p>';
+  const pv = $('#edPreview');
+  const pst = pv.scrollTop;          // 保存预览滚动位置
+  const visible = pv.offsetParent !== null;
+  if (visible) __scrollSyncSuppress = true; // 重建期间屏蔽同步，避免把编辑器滚动位置拽走
+  if (v.trim()) renderMd(pv, v); else pv.innerHTML = '<p class="muted">预览区：左侧输入 Markdown，这里实时渲染。</p>';
+  if (visible) {
+    pv.scrollTop = pst;              // 还原预览滚动位置（长内容编辑不再被归零）
+    requestAnimationFrame(() => requestAnimationFrame(() => { __scrollSyncSuppress = false; }));
+  }
   // v4.6: 等效字数统计（上限按信任等级分级）
   const cc = countChars(v); const limit = state.me?.char_limit || 1500;
   if (state.me?.unlimited_char || isVip() || isAdmin()) { $('#charCount').textContent = `${cc} 等效字 · 不限`; $('#charCount').style.color = 'var(--primary)'; }
   else { $('#charCount').textContent = `${cc}/${limit} 等效字`; $('#charCount').style.color = cc > limit ? 'var(--danger)' : ''; }
-  if (!$('#edToc').classList.contains('hidden')) $('#edToc').innerHTML = buildOutline($('#edPreview'));
+  if (!$('#edToc').classList.contains('hidden')) $('#edToc').innerHTML = buildOutline(pv);
 }
 
 function bindToolbar() {
@@ -2348,7 +2371,7 @@ function bindToolbar() {
 }
 
 /** 编辑器增强：自动撑高 / 快捷键 / 滚动同步 */
-function autoGrow(ta) { if (!ta) return; ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 720) + 'px'; }
+function autoGrow(ta) { if (!ta) return; const st = ta.scrollTop; ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 720) + 'px'; if (ta.scrollTop !== st) ta.scrollTop = st; }
 
 function wrapSelection(ta, pre, post, ph) {
   const s = ta.selectionStart, e = ta.selectionEnd; const sel = ta.value.slice(s, e) || ph;
@@ -2372,11 +2395,26 @@ function setupEditorShortcuts(ta) {
     else if (e.key === 'Tab') { e.preventDefault(); indentSelection(ta, e.shiftKey ? -1 : 1); updatePreview(); }
   });
 }
+let __scrollSyncSuppress = false; // 程序化滚动（同步/预览重建）期间屏蔽同步，避免把编辑器滚动位置拽走
 function setupScrollSync() {
   const ed = $('#edContent'), pv = $('#edPreview'); if (!ed || !pv) return;
-  let lock = null;
-  ed.addEventListener('scroll', () => { if (lock === 'pv') return; lock = 'ed'; const r = ed.scrollHeight - ed.clientHeight; if (r > 0) pv.scrollTop = pv.scrollHeight * (ed.scrollTop / r); requestAnimationFrame(() => { lock = null; }); });
-  pv.addEventListener('scroll', () => { if (lock === 'ed') return; lock = 'pv'; const r = pv.scrollHeight - pv.clientHeight; if (r > 0) ed.scrollTop = ed.scrollHeight * (pv.scrollTop / r); requestAnimationFrame(() => { lock = null; }); });
+  function syncTo(dst, val) {
+    __scrollSyncSuppress = true;
+    dst.scrollTop = val;
+    // 等浏览器派发完本次 scroll 事件后再解除屏蔽，避免回环
+    requestAnimationFrame(() => requestAnimationFrame(() => { __scrollSyncSuppress = false; }));
+  }
+  ed.addEventListener('scroll', () => {
+    if (__scrollSyncSuppress) return;
+    if (pv.offsetParent === null) return; // 预览隐藏（no-preview）时不参与同步
+    const r = ed.scrollHeight - ed.clientHeight;
+    if (r > 0) syncTo(pv, pv.scrollHeight * (ed.scrollTop / r));
+  });
+  pv.addEventListener('scroll', () => {
+    if (__scrollSyncSuppress) return;
+    const r = pv.scrollHeight - pv.clientHeight;
+    if (r > 0) syncTo(ed, ed.scrollHeight * (pv.scrollTop / r));
+  });
 }
 
 async function saveClip() {
