@@ -35,9 +35,16 @@ function copy(text, msg) {
 // 更新日志：随代码发布自动同步
 const CHANGELOG_MD = `# 📝 更新日志
 
-mdqp 的主要版本变动记录。当前部署版本 **v4.14.1**。
+mdqp 的主要版本变动记录。当前部署版本 **v4.14.2**。
 
 ---
+
+## v4.14.2 · 2026-09-19（公告加固 + 通知系统 + 举报适配）
+
+- 🛡 **公告接口加固**：\`PUT/DELETE /api/announcements\` 补齐 try/catch 与 D1 偶发抖动单次重试，失败返回友好 JSON 而非裸 500；后端错误上报补齐 HTTP method，消除此前「GET /api/announcements 500」误报（\`/admin\` 发布/删除公告不再静默崩）。
+- 🔔 **通知系统落地（工单 / 评论）**：你的工单被管理员处理（状态变更）、工单收到新回复、你的剪贴板收到新评论时，相关用户将收到站内通知（铃铛红点 + 未读角标 + 分类筛选）；通知相关接口全部加故障隔离，表缺失/异常降级为空、不再拖垮整站。
+- 🔧 **举报功能适配工单体系**：提交举报后不再强制跳转到公开工单页（避免暴露举报关系），改为停留原片段页并提示进度可在「工单」查看。
+- 🗄️ 数据库：\`notifications\` 表（v4.5 引入，此前迁移未实际落库，本次通过 \`migrate-notifications.mjs\` 补齐到生产 D1）支撑上述通知；管理后台公告发布/删除失败时 toast 显示真实错误信息。
 
 ## v4.14.0 · 2026-09-19（统一工单系统：举报 + 反馈合并，仿洛谷）
 
@@ -515,7 +522,7 @@ async function api(path, opts = {}) {
   let data = null; try { data = await res.json(); } catch { /* 非 JSON */ }
   // v4.5.2：服务端 5xx 也上报（4xx 属业务预期，不打扰用户）
   if (res.status >= 500) {
-    reportError({ kind: 'api', message: '接口 ' + res.status + ' 错误：' + path, extra: (data && (data.error || data.message)) || '' });
+    reportError({ kind: 'api', message: '接口 ' + res.status + ' 错误：' + (opts.method || 'GET') + ' ' + path, extra: (data && (data.error || data.message)) || '' });
   }
   return { ok: res.ok, status: res.status, data };
 }
@@ -2155,7 +2162,12 @@ function openReportModal(clipId) {
     const reason = m.body.querySelector('input[name=repReason]:checked')?.value;
     const detail = m.body.querySelector('#repDetail').value.trim();
     const r = await api('/api/tickets', { method: 'POST', body: JSON.stringify({ category: 'report', clip_id: clipId, reason, detail, title: '内容举报' }) });
-    if (r.ok) { toast(r.data?.already ? '你已举报过该内容' : '举报已提交，感谢反馈'); closeModal(); if (r.data?.code) go('/tickets/' + r.data.code); }
+    if (r.ok) {
+      closeModal();
+      if (r.data?.already) { toast('你已举报过该内容'); return; }
+      // v4.14.2：不再强制跳转到公开工单页（避免暴露举报关系），停留原片段页，进度可在「工单」查看
+      toast('举报已提交，感谢反馈' + (r.data?.code ? '（可在「工单」中查看进度）' : ''));
+    }
     else toast('提交失败：' + (r.data?.message || r.status), 'err');
   };
 }
@@ -2203,7 +2215,7 @@ async function loadAdminAnnouncements() {
     <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>内容预览</th><th>状态</th><th>时间</th><th>操作</th></tr></thead><tbody>${
     data.announcements.map((a) => `<tr><td>${esc(a.content.slice(0, 80))}${a.content.length > 80 ? '…' : ''}</td><td>${a.is_active ? '✅ 活跃' : '❌ 停用'}</td><td class="muted">${esc((a.updated_at || a.created_at || '').slice(0, 16))}</td><td><button class="btn btn-sm btn-danger" data-del-announce="${a.id}">删除</button></td></tr>`).join('')
   }</tbody></table></div>`;
-  $$('#adminBody [data-del-announce]').forEach((b) => { b.onclick = async () => { if (!confirm('删除公告？')) return; const r = await api(`/api/announcements/${b.dataset.delAnnounce}`, { method: 'DELETE' }); if (r.ok) { toast('已删除'); loadAdminAnnouncements(); } else toast('失败', 'err'); }; });
+  $$('#adminBody [data-del-announce]').forEach((b) => { b.onclick = async () => { if (!confirm('删除公告？')) return; const r = await api(`/api/announcements/${b.dataset.delAnnounce}`, { method: 'DELETE' }); if (r.ok) { toast('已删除'); loadAdminAnnouncements(); } else toast(r.data?.message || '删除失败', 'err'); }; });
   $('#addAnnounceBtn').onclick = () => {
     const body = `<textarea id="annContent" class="input bio-input" style="min-height:120px" placeholder="输入公告内容（支持 Markdown）"></textarea>
       <div class="ann-preview"><b>预览：</b><div id="annPrev" class="markdown-body"></div></div>`;
@@ -2216,7 +2228,7 @@ async function loadAdminAnnouncements() {
     m.foot.querySelector('#annSave').onclick = async () => {
       const content = ta.value.trim(); if (!content) return toast('内容不能为空', 'err');
       const r = await api('/api/announcements', { method: 'PUT', body: JSON.stringify({ content }) });
-      if (r.ok) { toast('公告已发布'); closeModal(); loadAdminAnnouncements(); } else toast('发布失败', 'err');
+      if (r.ok) { toast('公告已发布'); closeModal(); loadAdminAnnouncements(); } else toast(r.data?.message || '发布失败', 'err');
     };
   };
 }
@@ -3553,7 +3565,9 @@ const NOTIF_CATS = {
   trust: { label: '信用', cls: 'notif-cat-trust' },
   clip_expiry: { label: '到期', cls: 'notif-cat-expiry' },
   clip_visited: { label: '访问', cls: 'notif-cat-visited' },
-  admin: { label: '管理', cls: 'notif-cat-admin' }
+  admin: { label: '管理', cls: 'notif-cat-admin' },
+  ticket: { label: '工单', cls: 'notif-cat-ticket' },
+  comment: { label: '评论', cls: 'notif-cat-comment' }
 };
 function notifCatTag(cat) {
   const m = NOTIF_CATS[cat] || { label: cat || '其它', cls: '' };
