@@ -35,7 +35,18 @@ function copy(text, msg) {
 // 更新日志：随代码发布自动同步
 const CHANGELOG_MD = `# 📝 更新日志
 
-mdqp 的主要版本变动记录。当前部署版本 **v4.13.2**。
+mdqp 的主要版本变动记录。当前部署版本 **v4.14.0**。
+
+---
+
+## v4.14.0 · 2026-09-19（统一工单系统：举报 + 反馈合并，仿洛谷）
+
+- 🆕 **举报与反馈合并为统一工单系统**：新增 \`/tickets\` 工单中心（洛谷式卡片列表 + 详情页），所有用户均可**公开查看**工单与处理进度，管理员可在详情页改状态、写处理说明、回复（标记为官方回复）、删除关联违规内容或删除工单。
+- 🆕 工单分类：\`程序缺陷 / 功能建议 / 内容举报 / 其他\`；状态：\`待处理 / 处理中 / 已解决 / 已驳回\`（已驳回仅管理员可见）。
+- 🆕 **发起工单**：原「反馈」页升级为工单中心，支持分类发起；原片段页「⚠ 举报」入口改为提交「内容举报」类工单（关联片段，管理员可一键删除违规内容）。
+- 🗄️ 数据库：\`migrate_v4.14.sql\` 新建 \`tickets\` + \`ticket_replies\` 表，并把旧 \`feedback\` 与 \`clip_reports\` 数据**回灌**为工单（幂等，不会重复）。旧两表保留为归档、不再写入。
+- 🔧 接口：\`/api/tickets\`（POST 创建 / GET 列表 / GET :code 详情 / POST :code/reply 回复 / PATCH :code 管理员处理 / DELETE :code 删除）替换旧的 \`/api/feedback*\` 与 \`/api/clips/:id/report\`、\`/api/admin/clips/reports*\`。
+- 🎨 UI：洛谷风工单卡片（工单号 #TKxxxx / 分类 / 状态 / 提交人 / 时间 / 回复数）+ 详情页（描述 + 处理记录时间线 + 管理员操作区）。
 
 ---
 
@@ -662,7 +673,7 @@ function showView(id) { state._view = id; $$('.view').forEach((v) => v.classList
 function closeNav() { document.body.classList.remove('nav-open'); }
 function updateNav() {
   const p = location.pathname.replace(/\/+$/, '') || '/'; const seg = p.split('/').filter(Boolean);
-  const map = { home: p === '/', new: p === '/new' || (seg[0] === 'edit' && seg[1]), me: p === '/me', admin: seg[0] === 'admin', help: p === '/help', about: p === '/about', changelog: p === '/changelog', feedback: p === '/feedback', invite: seg[0] === 'invite' };
+  const map = { home: p === '/', new: p === '/new' || (seg[0] === 'edit' && seg[1]), me: p === '/me', admin: seg[0] === 'admin', help: p === '/help', about: p === '/about', changelog: p === '/changelog', tickets: p === '/tickets' || seg[0] === 'tickets', invite: seg[0] === 'invite' };
   $$('.nav-item').forEach((el) => { const key = el.dataset.nav; if (key && map[key]) el.classList.add('active'); else el.classList.remove('active'); });
 }
 
@@ -683,7 +694,9 @@ async function render() {
     if (seg[0] === 'invite' && seg[1]) return renderInviteLanding(seg[1]);
     if (p === '/invite') return renderInvitePage();
     if (p === '/vip') return renderVipPage();
-    if (p === '/feedback') return renderFeedback();
+    if (p === '/feedback') return renderTickets();          // 旧 /feedback 别名 → 工单中心
+    if (p === '/tickets') return renderTickets();
+    if (seg[0] === 'tickets' && seg[1]) return renderTicketDetail(seg[1]);
     // 系统错误页 / 404 页：复用剪贴板文稿（本身即 📋），不加 /c/ 前缀以便与片段区分
     if (seg[0] === 'error') return renderClip('error');
     if (seg[0] === '404') return renderClip('404');
@@ -1775,14 +1788,10 @@ async function savePage() { const content = $('#edContent').value; if (!content.
 // ==================== 管理后台（v4.0 扩展 tab） ====================
 async function renderAdmin() {
   showView('admin'); await loadMe(); if (!isAdmin()) { $('#adminBox').innerHTML = emptyHTML('admin', '🚫 无权访问', `<p class="muted" style="margin:0">管理后台仅对站点管理员开放</p><a class="btn btn-primary btn-sm" href="/" data-link>回首页</a>`); return; }
-  // v4.13: 待审举报数（用于 tab 角标）
-  let pendingReports = 0;
-  try { const { data } = await api('/api/admin/clips/reports?status=open'); pendingReports = data?.reports?.length || 0; } catch { /* ignore */ }
   $('#adminBox').innerHTML = `<h1 class="clip-title">🛡 管理后台</h1><p class="muted">${state.me.role === 'developer' ? '你是本站开发者，拥有一切权限。' : '你是管理员：可管理用户与所有剪贴板、编辑站点页面、发布公告、管理邀请/VIP/评论。'}</p>
     <div class="admin-tabs">
       <button class="btn btn-sm ${state.adminTab === 'users' ? 'btn-primary' : ''}" data-tab="users">👥 用户</button>
       <button class="btn btn-sm ${state.adminTab === 'clips' ? 'btn-primary' : ''}" data-tab="clips">📋 全部剪贴板</button>
-      <button class="btn btn-sm ${state.adminTab === 'reports' ? 'btn-primary' : ''}" data-tab="reports">⚠️ 内容审核${pendingReports ? ` <span class="badge" style="background:rgba(220,38,38,.15);color:#e0524f;border:1px solid rgba(220,38,38,.4)">${pendingReports}</span>` : ''}</button>
       <button class="btn btn-sm ${state.adminTab === 'pages' ? 'btn-primary' : ''}" data-tab="pages">📄 站点页面</button>
       <button class="btn btn-sm ${state.adminTab === 'announcements' ? 'btn-primary' : ''}" data-tab="announcements">📢 公告</button>
       <button class="btn btn-sm ${state.adminTab === 'invites' ? 'btn-primary' : ''}" data-tab="invites">🎁 邀请</button>
@@ -1792,7 +1801,6 @@ async function renderAdmin() {
   $$('#adminBox [data-tab]').forEach((b) => { b.onclick = () => { state.adminTab = b.dataset.tab; renderAdmin(); }; });
   if (state.adminTab === 'users') return loadAdminUsers();
   if (state.adminTab === 'clips') return loadAdminClips();
-  if (state.adminTab === 'reports') return loadAdminReports();
   if (state.adminTab === 'pages') return loadAdminPages();
   if (state.adminTab === 'announcements') return loadAdminAnnouncements();
   if (state.adminTab === 'invites') return loadAdminInvites();
@@ -2139,8 +2147,8 @@ function openReportModal(clipId) {
   m.foot.querySelector('#repSave').onclick = async () => {
     const reason = m.body.querySelector('input[name=repReason]:checked')?.value;
     const detail = m.body.querySelector('#repDetail').value.trim();
-    const r = await api('/api/clips/' + encodeURIComponent(clipId) + '/report', { method: 'POST', body: JSON.stringify({ reason, detail }) });
-    if (r.ok) { toast(r.data?.already ? '你已举报过该内容' : '举报已提交，感谢反馈'); closeModal(); }
+    const r = await api('/api/tickets', { method: 'POST', body: JSON.stringify({ category: 'report', clip_id: clipId, reason, detail, title: '内容举报' }) });
+    if (r.ok) { toast(r.data?.already ? '你已举报过该内容' : '举报已提交，感谢反馈'); closeModal(); if (r.data?.code) go('/tickets/' + r.data.code); }
     else toast('提交失败：' + (r.data?.message || r.status), 'err');
   };
 }
@@ -2166,42 +2174,6 @@ async function loadAdminClips() {
     if (!confirm('删除该剪贴板？')) return;
     const r = await api('/api/clips/' + b.dataset.delclip, { method: 'DELETE' });
     if (r.ok) { toast('已删除'); loadAdminClips(); } else toast('失败', 'err');
-  });
-}
-
-async function loadAdminReports() {
-  const box = $('#adminBody'); box.innerHTML = '加载中…';
-  const { data } = await api('/api/admin/clips/reports?status=open');
-  if (!data?.reports) return (box.innerHTML = emptyHTML('admin', '加载失败（需要管理员权限）', ''));
-  const reports = data.reports;
-  const REASONS = { spam: '恶意/垃圾', porn: '低俗色情', sensitive: '擦边内容', illegal: '违法违规', other: '其他' };
-  if (!reports.length) return (box.innerHTML = `<div class="list-head"><h2>⚠️ 内容审核</h2></div><div class="empty">🎉 暂无待处理举报</div>`);
-  const rows = reports.map((r) => {
-    const clip = r.clip;
-    const delLabel = clip ? '删除内容' : '清理举报';
-    return `<tr>
-      <td><b>${esc(r.reason_label || REASONS[r.reason] || r.reason)}</b>${r.detail ? `<div class="muted" style="font-size:12px;max-width:260px">${esc(r.detail)}</div>` : ''}</td>
-      <td>${clip ? `<a href="/c/${esc(clip.clip_id)}" data-link>${esc(clip.title || '无标题')}</a>${clip.open_reports > 1 ? ` <span class="badge" style="background:rgba(220,38,38,.12);color:#e0524f">${clip.open_reports} 条举报</span>` : ''}` : `<span class="muted">内容已删除</span><div class="muted" style="font-size:11px">clip_id: ${esc(r.clip_id)}</div>`}</td>
-      <td>${clip ? (clip.owner_type === 'user' ? `<a href="/u/${esc(clip.owner_id)}" data-link>${esc(clip.owner_name || clip.owner_id)}</a>` : esc(clip.owner_name || '游客')) : '—'}</td>
-      <td class="muted" style="font-size:12px">${esc((r.created_at || '').slice(0, 16))}<br>举报人 #${r.reporter_id || '游客'}</td>
-      <td class="admin-actions">
-        <button class="btn btn-sm btn-danger" data-del-report="${r.id}" data-clip="${esc(r.clip_id)}">${delLabel}</button>
-        <button class="btn btn-sm" data-dismiss-report="${r.id}">忽略</button>
-      </td>
-    </tr>`;
-  }).join('');
-  box.innerHTML = `<div class="list-head"><h2>⚠️ 内容审核（${reports.length} 条待处理）</h2><p class="muted">处理举报：可删除违规内容（连带评论/读者/其它举报）或标记为已忽略。</p></div>
-    <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>举报原因</th><th>被举报内容</th><th>作者</th><th>时间</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>`;
-
-  $$('#adminBody [data-del-report]').forEach((b) => b.onclick = async () => {
-    if (!confirm('确认删除该内容？将一并删除其评论、读者记录及其它举报，不可恢复。')) return;
-    const r = await api('/api/admin/clips/reports/' + b.dataset.delReport, { method: 'PATCH', body: JSON.stringify({ status: 'resolved', action: 'delete_clip', resolution: '举报成立，内容已删除' }) });
-    if (r.ok) { toast('已删除内容'); loadAdminReports(); } else toast('失败：' + (r.data?.message || r.status), 'err');
-  });
-  $$('#adminBody [data-dismiss-report]').forEach((b) => b.onclick = async () => {
-    if (!confirm('标记为已忽略？')) return;
-    const r = await api('/api/admin/clips/reports/' + b.dataset.dismissReport, { method: 'PATCH', body: JSON.stringify({ status: 'dismissed', resolution: '举报不成立，已忽略' }) });
-    if (r.ok) { toast('已忽略'); loadAdminReports(); } else toast('失败', 'err');
   });
 }
 
@@ -2551,12 +2523,11 @@ function reportError(info) {
 function goReportError(err) {
   const full = buildReportText(err || lastErr || { kind: 'manual', kindLabel: '手动上报', message: '（无自动捕获到的报错，请手动描述）', time: new Date().toLocaleString('zh-CN'), url: location.pathname + location.search });
   pendingBug = {
-    env: collectEnv(),
-    situation: `【自动上报】${(err || lastErr || {}).kindLabel || '问题反馈'}\n错误：${(err || lastErr || {}).message || '（未捕获到具体错误）'}\n页面：${(err || lastErr || {}).url || location.pathname}\n时间：${(err || lastErr || {}).time || new Date().toLocaleString('zh-CN')}\n\n我当时的操作：（请补充）\n期望结果：（请补充）`,
-    console_log: full
+    category: 'bug',
+    content: `【自动上报】${(err || lastErr || {}).kindLabel || '问题反馈'}\n错误：${(err || lastErr || {}).message || '（未捕获到具体错误）'}\n页面：${(err || lastErr || {}).url || location.pathname}\n环境：${collectEnv()}\n控制台：${full}\n\n我当时的操作：（请补充）\n期望结果：（请补充）`
   };
   closeErrModal();
-  go('/feedback');
+  go('/tickets');
 }
 
 function installErrorReporter() {
@@ -2637,173 +2608,194 @@ function installErrorReporter() {
 }
 
 // ==================== 官方反馈贴 ====================
-async function renderFeedback() {
-  showView('feedback');
-  const box = $('#feedbackBox');
+async function renderTickets() {
+  showView('tickets');
+  const box = $('#ticketBox'); if (!box) return;
   box.innerHTML = `
-    <h1 class="clip-title">💬 官方反馈</h1>
-    <p class="muted">遇到问题或有好点子？在这里提交 Bug 反馈或意见反馈，站长会亲自查看。</p>
-    <div class="fb-card">
-      <div class="fb-type" id="fbType">
-        <button type="button" class="fb-type-btn active" data-type="bug">🐞 Bug 反馈</button>
-        <button type="button" class="fb-type-btn" data-type="suggestion">💡 意见反馈</button>
+    <div class="tk-head">
+      <div>
+        <h1 class="clip-title">🎫 工单中心</h1>
+        <p class="muted">遇到问题、有好点子、发现违规内容？提交工单，所有人都能看到处理进度，管理员会逐一处理。</p>
       </div>
-      <form id="fbForm" class="fb-form">
-        <div class="fb-fields" id="fbBugFields">
-          <label class="fb-label">发生环境<span class="muted">（浏览器 / 系统 / 设备）</span>
-            <input class="input" id="fbEnv" placeholder="例如：Chrome 128 / Windows 11 / 机房电脑" maxlength="500">
-          </label>
-          <label class="fb-label">具体情况<span class="fb-req">*</span>
-            <textarea class="input fb-textarea" id="fbSituation" placeholder="描述你做了什么、期望怎样、实际怎样" maxlength="2000"></textarea>
-          </label>
-          <label class="fb-label">F12 报错信息<span class="muted">（选填，可在控制台复制）</span>
-            <textarea class="input fb-textarea fb-mono" id="fbConsole" placeholder="粘贴控制台 / Network 里的报错" maxlength="4000"></textarea>
-          </label>
-        </div>
-        <div class="fb-fields hidden" id="fbSuggestFields">
-          <label class="fb-label">你的建议<span class="fb-req">*</span>
-            <textarea class="input fb-textarea" id="fbContentSug" placeholder="随便说，内容不限" maxlength="5000"></textarea>
-          </label>
-        </div>
-        <label class="fb-label">联系方式<span class="muted">（选填，方便回访）</span>
-          <input class="input" id="fbContact" placeholder="邮箱 / QQ / 微信 任选" maxlength="200">
-        </label>
-        <div class="fb-actions">
-          <button type="submit" class="btn btn-primary" id="fbSubmit">🚀 提交反馈</button>
-          <span class="muted" id="fbHint"></span>
-        </div>
-      </form>
+      <button class="btn btn-primary" id="newTicketBtn">＋ 发起工单</button>
     </div>
-    <div id="fbAdmin" class="fb-admin hidden"></div>
-  `;
-  let curType = 'bug';
-  $$('#fbType .fb-type-btn').forEach((b) => b.onclick = () => {
-    curType = b.dataset.type;
-    $$('#fbType .fb-type-btn').forEach((x) => x.classList.toggle('active', x === b));
-    $('#fbBugFields').classList.toggle('hidden', curType !== 'bug');
-    $('#fbSuggestFields').classList.toggle('hidden', curType !== 'suggestion');
-  });
-  $('#fbForm').onsubmit = async (e) => {
-    e.preventDefault();
-    const env = $('#fbEnv').value.trim();
-    const situation = $('#fbSituation').value.trim();
-    const console_log = $('#fbConsole').value.trim();
-    const contact = $('#fbContact').value.trim();
-    const content = curType === 'bug' ? situation : $('#fbContentSug').value.trim();
-    if (!content) { const h = $('#fbHint'); h.textContent = curType === 'bug' ? '请填写具体情况' : '请填写你的建议'; h.style.color = 'var(--danger)'; return; }
-    const btn = $('#fbSubmit'); btn.disabled = true; btn.textContent = '提交中…';
-    const { ok, data } = await api('/api/feedback', { method: 'POST', body: JSON.stringify({ type: curType, env, situation, console_log, content, contact }) });
-    btn.disabled = false; btn.textContent = '🚀 提交反馈';
-    if (ok) {
-      toast('感谢反馈，已提交！', 'ok');
-      $('#fbForm').reset(); curType = 'bug';
-      $$('#fbType .fb-type-btn').forEach((x) => x.classList.toggle('active', x.dataset.type === 'bug'));
-      $('#fbBugFields').classList.remove('hidden'); $('#fbSuggestFields').classList.add('hidden');
-      if (isAdmin()) loadFeedbackAdmin(); else loadFeedbackPublic();
-    } else toast(data?.message || data?.error || '提交失败', 'err');
-  };
-  // v4.5.2：从报错弹窗跳转过来时自动预填环境 / 报错 / 控制台日志
-  if (pendingBug) {
-    const p = pendingBug; pendingBug = null;
-    curType = 'bug';
-    $$('#fbType .fb-type-btn').forEach((x) => x.classList.toggle('active', x.dataset.type === 'bug'));
-    $('#fbBugFields').classList.remove('hidden'); $('#fbSuggestFields').classList.add('hidden');
-    const envEl = $('#fbEnv'), sitEl = $('#fbSituation'), logEl = $('#fbConsole'), hintEl = $('#fbHint');
-    if (envEl) envEl.value = (p.env || '').slice(0, 500);
-    if (sitEl) sitEl.value = (p.situation || '').slice(0, 2000);
-    if (logEl) logEl.value = (p.console_log || '').slice(0, 4000);
-    if (hintEl) { hintEl.textContent = '已自动填入报错信息与运行环境，补充「具体情况」后提交即可'; hintEl.style.color = ''; }
-  } else if (window.sessionStorage) {
-    // v4.7.3：从兜底横幅（脚本没启动 / 资源被拦截）跳来时，自动带上已捕获的错误
-    try {
-      const be = sessionStorage.getItem('mdqp_boot_error');
-      if (be) {
-        sessionStorage.removeItem('mdqp_boot_error');
-        curType = 'bug';
-        $$('#fbType .fb-type-btn').forEach((x) => x.classList.toggle('active', x.dataset.type === 'bug'));
-        $('#fbBugFields').classList.remove('hidden'); $('#fbSuggestFields').classList.add('hidden');
-        const sitEl2 = $('#fbSituation'), hintEl2 = $('#fbHint');
-        if (sitEl2) sitEl2.value = ('【页面加载失败·自动附带】' + be + '\n\n我当时的操作：（请补充）\n期望结果：页面正常显示').slice(0, 2000);
-        if (hintEl2) { hintEl2.textContent = '已自动填入页面加载失败的信息，补充「具体情况」后提交即可'; hintEl2.style.color = ''; }
-      }
-    } catch (e) {}
+    <div class="tk-filters">
+      <select class="input-sm" id="tkStatus">
+        <option value="">全部状态</option>
+        <option value="open">待处理</option>
+        <option value="reviewing">处理中</option>
+        <option value="resolved">已解决</option>
+        <option value="rejected">已驳回</option>
+      </select>
+      <select class="input-sm" id="tkCat">
+        <option value="">全部分类</option>
+        <option value="bug">程序缺陷</option>
+        <option value="suggestion">功能建议</option>
+        <option value="report">内容举报</option>
+        <option value="other">其他</option>
+      </select>
+      ${state.me?.type === 'user' ? '<label class="tk-mine"><input type="checkbox" id="tkMine"> 只看我的</label>' : ''}
+      <span class="muted" id="tkCount"></span>
+    </div>
+    <div id="tkList" class="tk-list"><div class="loading">加载中…</div></div>`;
+  $('#newTicketBtn').onclick = () => openNewTicketModal();
+  const reload = () => loadTicketList();
+  $('#tkStatus').onchange = reload;
+  $('#tkCat').onchange = reload;
+  const mine = $('#tkMine'); if (mine) mine.onchange = reload;
+  if (pendingBug) { const p = pendingBug; pendingBug = null; openNewTicketModal(p); }
+  await loadTicketList();
+}
+
+async function loadTicketList() {
+  const el = $('#tkList'); if (!el) return;
+  const st = $('#tkStatus')?.value || '';
+  const cat = $('#tkCat')?.value || '';
+  const mine = $('#tkMine')?.checked ? '1' : '';
+  const q = new URLSearchParams();
+  if (st) q.set('status', st); if (cat) q.set('category', cat); if (mine) q.set('mine', '1');
+  const { ok, data } = await api('/api/tickets?' + q.toString());
+  if (!ok || !data?.tickets) { el.innerHTML = '<div class="empty">加载失败</div>'; return; }
+  const list = data.tickets;
+  const cnt = $('#tkCount'); if (cnt) cnt.textContent = '共 ' + (data.total || 0) + ' 条';
+  if (!list.length) { el.innerHTML = '<div class="empty">🎉 暂时没有工单，点右上角发起一个吧</div>'; return; }
+  el.innerHTML = list.map((t) => `
+    <a class="tk-card" href="/tickets/${esc(t.code)}" data-link>
+      <div class="tk-card-row tk-card-top">
+        <span class="tk-title">${esc(t.title || '未命名工单')}</span>
+        ${t.reply_count ? `<span class="badge tk-replies">💬 ${t.reply_count}</span>` : ''}
+      </div>
+      <div class="tk-card-row tk-card-meta">
+        <span class="badge badge-collab">${esc(t.category_label)}</span>
+        <span class="badge fb-status fb-status-${t.status}">${esc(t.status_label)}</span>
+        <span class="muted">#${esc(t.code)}</span>
+        <span class="muted">${esc(t.author_name || '匿名')}</span>
+        <span class="muted">${esc(timeAgo(t.created_at))}</span>
+      </div>
+    </a>`).join('');
+}
+
+
+async function renderTicketDetail(code) {
+  showView('tickets');
+  const box = $('#ticketBox'); if (!box) return;
+  box.innerHTML = `<div class="tk-detail"><div class="loading">加载中…</div></div>`;
+  const { ok, data } = await api('/api/tickets/' + encodeURIComponent(code));
+  if (!ok || !data?.ticket) {
+    box.innerHTML = `<div class="crumb"><a href="/tickets" data-link>← 工单中心</a></div><div class="empty">${esc(data?.error === 'forbidden' ? '该工单不可见' : '工单不存在')}</div>`;
+    return;
   }
-  if (isAdmin()) loadFeedbackAdmin(); else loadFeedbackPublic();
-}
-
-// v4.7.5 反馈 #4：非管理员也能看到反馈列表（只读、脱敏、无审核操作）
-async function loadFeedbackPublic() {
-  const el = $('#fbAdmin'); if (!el) return;
-  const { ok, data } = await api('/api/feedback');
-  if (!ok || !data?.feedback) { el.classList.add('hidden'); return; }
-  const list = data.feedback;
-  if (!list.length) { el.classList.add('hidden'); return; }
-  const statusLabel = { open: '待处理', reviewing: '处理中', resolved: '已解决', rejected: '已驳回' };
-  el.classList.remove('hidden');
-  el.innerHTML = '<div class="fb-admin-head"><h2>📋 反馈一览（' + list.length + '）</h2></div>'
-    + '<p class="muted" style="font-size:13px;margin:0 0 12px">下面是大家已经提过的问题与处理进度（已隐藏联系方式等隐私信息）。有重复的不必再提，看状态即可。</p>'
-    + list.map((f) => {
-      const isBug = f.type === 'bug';
-      return `<div class="fb-item">
-        <div class="fb-item-head">
-          <span class="badge ${isBug ? 'badge-lock' : 'badge-collab'}">${isBug ? '🐞 Bug' : '💡 建议'}</span>
-          <span class="badge fb-status fb-status-${f.status}">${statusLabel[f.status] || f.status}</span>
-          <span class="muted">${esc(f.author_name || '匿名')} · ${esc(timeAgo(f.created_at))}</span>
+  const t = data.ticket, replies = data.replies || [], clip = data.clip;
+  const canReply = data.can_reply, canManage = data.can_manage;
+  box.innerHTML = `
+    <div class="tk-detail">
+      <div class="crumb"><a href="/tickets" data-link>← 工单中心</a></div>
+      <div class="tk-banner">
+        <div class="tk-banner-top">
+          <h1 class="tk-detail-title">${esc(t.title || '未命名工单')}</h1>
+          <span class="badge fb-status fb-status-${t.status}">${esc(t.status_label)}</span>
         </div>
-        ${f.situation ? `<div class="fb-meta"><b>情况：</b>${esc(f.situation)}</div>` : ''}
-        <div class="fb-content">${esc(f.content)}</div>
-        ${f.admin_note ? `<div class="fb-meta fb-note"><b>处理备注：</b>${esc(f.admin_note)}</div>` : ''}
-      </div>`;
-    }).join('');
+        <div class="tk-banner-meta">
+          <span class="badge badge-collab">${esc(t.category_label)}</span>
+          <span class="muted">#${esc(t.code)}</span>
+          <span class="muted">创建者：${esc(t.author_name || '匿名')}</span>
+          ${t.assignee_name ? `<span class="muted">责任人：${esc(t.assignee_name)}</span>` : ''}
+          <span class="muted">创建于 ${esc((t.created_at || '').slice(0, 16))}</span>
+          ${t.resolved_at ? `<span class="muted">处理于 ${esc((t.resolved_at || '').slice(0, 16))}</span>` : ''}
+        </div>
+        ${clip ? `<div class="tk-clip">关联内容：<a href="/c/${esc(clip.clip_id)}" data-link>${esc(clip.title || clip.clip_id)}</a> ${clip.exists ? '' : '<span class="muted">（内容已删除）</span>'}</div>` : ''}
+      </div>
+      <div class="tk-section"><h3 class="tk-h3">工单描述</h3><div class="tk-desc">${esc(t.content)}</div></div>
+      ${t.admin_note ? `<div class="tk-note"><b>处理说明：</b>${esc(t.admin_note)}</div>` : ''}
+      <div class="tk-section"><h3 class="tk-h3">处理记录（${replies.length}）</h3>
+        <div class="tk-replies">${replies.length ? replies.map((r) => `
+          <div class="tk-reply ${r.is_staff ? 'tk-reply-staff' : ''}">
+            <div class="tk-reply-head">
+              <span class="tk-reply-author">${esc(r.author_name || '匿名')}</span>
+              ${r.is_staff ? '<span class="badge tk-staff">官方</span>' : ''}
+              <span class="muted tk-reply-time">${esc(timeAgo(r.created_at))}</span>
+            </div>
+            <div class="tk-reply-content">${esc(r.content)}</div>
+          </div>`).join('') : '<div class="muted">暂无回复</div>'}
+        </div>
+      </div>
+      ${canReply ? `
+      <div class="tk-reply-editor">
+        <textarea id="tkReply" class="input" rows="3" placeholder="${canManage ? '以管理员身份回复（将标记为官方回复）…' : '补充信息或追问…'}" maxlength="3000"></textarea>
+        <div class="tk-reply-foot"><button class="btn btn-primary btn-sm" id="tkReplyBtn">回复</button></div>
+      </div>` : '<p class="muted">登录后即可参与工单讨论。</p>'}
+      ${canManage ? `
+      <div class="tk-admin">
+        <h3 class="tk-h3">管理员处理</h3>
+        <div class="tk-admin-row">
+          <label>状态
+            <select id="tkStatusSel" class="input-sm">
+              <option value="open" ${t.status === 'open' ? 'selected' : ''}>待处理</option>
+              <option value="reviewing" ${t.status === 'reviewing' ? 'selected' : ''}>处理中</option>
+              <option value="resolved" ${t.status === 'resolved' ? 'selected' : ''}>已解决</option>
+              <option value="rejected" ${t.status === 'rejected' ? 'selected' : ''}>已驳回</option>
+            </select>
+          </label>
+          <label>处理说明
+            <input id="tkNote" class="input-sm" placeholder="处理结论 / 反馈文字" value="${esc(t.admin_note || '')}">
+          </label>
+          <button class="btn btn-sm btn-primary" id="tkSaveBtn">保存</button>
+        </div>
+        ${clip && clip.exists ? `<button class="btn btn-sm btn-danger" id="tkDelClipBtn">删除关联内容（连带评论/读者/其它举报）</button>` : ''}
+        <button class="btn btn-sm btn-ghost" id="tkDelBtn">删除工单</button>
+      </div>` : ''}
+    </div>`;
+  const rb = $('#tkReplyBtn'); if (rb) rb.onclick = async () => {
+    const v = $('#tkReply').value.trim(); if (!v) return toast('回复不能为空');
+    rb.disabled = true;
+    const r = await api('/api/tickets/' + encodeURIComponent(code) + '/reply', { method: 'POST', body: JSON.stringify({ content: v }) });
+    rb.disabled = false;
+    if (r.ok) { toast('已回复', 'ok'); renderTicketDetail(code); } else toast(r.data?.message || '回复失败', 'err');
+  };
+  const sb = $('#tkSaveBtn'); if (sb) sb.onclick = async () => {
+    const r = await api('/api/tickets/' + encodeURIComponent(code), { method: 'PATCH', body: JSON.stringify({ status: $('#tkStatusSel').value, admin_note: $('#tkNote').value }) });
+    if (r.ok) { toast('已更新', 'ok'); renderTicketDetail(code); } else toast('更新失败', 'err');
+  };
+  const dcb = $('#tkDelClipBtn'); if (dcb) dcb.onclick = async () => {
+    if (!confirm('确认删除关联内容？将一并删除其评论、读者记录及其它举报，不可恢复。')) return;
+    const r = await api('/api/tickets/' + encodeURIComponent(code), { method: 'PATCH', body: JSON.stringify({ action: 'delete_clip' }) });
+    if (r.ok) { toast('已删除内容', 'ok'); renderTicketDetail(code); } else toast('删除失败', 'err');
+  };
+  const db = $('#tkDelBtn'); if (db) db.onclick = async () => {
+    if (!confirm('确认删除这条工单？不可恢复。')) return;
+    const r = await api('/api/tickets/' + encodeURIComponent(code), { method: 'DELETE' });
+    if (r.ok) { toast('已删除', 'ok'); go('/tickets'); } else toast('删除失败', 'err');
+  };
 }
 
-async function loadFeedbackAdmin() {
-  const el = $('#fbAdmin'); if (!el) return;
-  const { ok, data } = await api('/api/feedback');
-  if (!ok || !data?.feedback) { el.classList.add('hidden'); return; }
-  const list = data.feedback;
-  el.classList.remove('hidden');
-  if (!list.length) { el.innerHTML = '<div class="fb-admin-head"><h2>🛡 管理：反馈审核</h2></div><p class="muted">还没有任何反馈。</p>'; return; }
-  const statusLabel = { open: '待处理', reviewing: '处理中', resolved: '已解决', rejected: '已驳回' };
-  el.innerHTML = '<div class="fb-admin-head"><h2>🛡 管理：反馈审核（' + list.length + '）</h2></div>' + list.map((f) => {
-    const isBug = f.type === 'bug';
-    return `<div class="fb-item" data-id="${f.id}">
-      <div class="fb-item-head">
-        <span class="badge ${isBug ? 'badge-lock' : 'badge-collab'}">${isBug ? '🐞 Bug' : '💡 建议'}</span>
-        <span class="badge fb-status fb-status-${f.status}">${statusLabel[f.status] || f.status}</span>
-        <span class="muted">${esc(f.author_name || '匿名')} · ${esc(timeAgo(f.created_at))}</span>
-      </div>
-      ${isBug ? `<div class="fb-meta"><b>环境：</b>${esc(f.env || '—')}</div><div class="fb-meta"><b>情况：</b>${esc(f.situation || '—')}</div>${f.console_log ? `<div class="fb-meta"><b>F12：</b><pre class="fb-pre">${esc(f.console_log)}</pre></div>` : ''}` : ''}
-      <div class="fb-content">${esc(f.content)}</div>
-      ${f.contact ? `<div class="fb-meta muted">联系方式：${esc(f.contact)}</div>` : ''}
-      ${f.admin_note ? `<div class="fb-meta fb-note"><b>处理备注：</b>${esc(f.admin_note)}</div>` : ''}
-      <div class="fb-item-actions">
-        <select class="input-sm fb-status-sel" data-id="${f.id}">
-          <option value="open" ${f.status === 'open' ? 'selected' : ''}>待处理</option>
-          <option value="reviewing" ${f.status === 'reviewing' ? 'selected' : ''}>处理中</option>
-          <option value="resolved" ${f.status === 'resolved' ? 'selected' : ''}>已解决</option>
-          <option value="rejected" ${f.status === 'rejected' ? 'selected' : ''}>已驳回</option>
-        </select>
-        <input class="input-sm fb-note-in" data-id="${f.id}" placeholder="处理备注（选填）" value="${esc(f.admin_note || '')}">
-        <button class="btn btn-sm btn-primary fb-save" data-id="${f.id}">保存</button>
-        <button class="btn btn-sm btn-ghost fb-del" data-id="${f.id}">删除</button>
-      </div>
-    </div>`;
-  }).join('');
-  $$('#fbAdmin .fb-save').forEach((b) => b.onclick = async () => {
-    const id = b.dataset.id;
-    const status = $(`#fbAdmin .fb-status-sel[data-id="${id}"]`).value;
-    const note = $(`#fbAdmin .fb-note-in[data-id="${id}"]`).value;
-    const { ok } = await api('/api/feedback/' + id, { method: 'PATCH', body: JSON.stringify({ status, admin_note: note }) });
-    if (ok) { toast('已更新', 'ok'); loadFeedbackAdmin(); } else toast('更新失败', 'err');
-  });
-  $$('#fbAdmin .fb-del').forEach((b) => b.onclick = async () => {
-    const id = b.dataset.id;
-    if (!confirm('确认删除这条反馈？')) return;
-    const { ok } = await api('/api/feedback/' + id, { method: 'DELETE' });
-    if (ok) { toast('已删除', 'ok'); loadFeedbackAdmin(); } else toast('删除失败', 'err');
-  });
+function openNewTicketModal(prefill) {
+  const p = prefill || {};
+  const body = `
+    <div class="form-row"><label>分类
+      <select id="ntCat" class="input-sm">
+        <option value="bug">程序缺陷</option>
+        <option value="suggestion">功能建议</option>
+        <option value="other">其他</option>
+      </select></label></div>
+    <div class="form-row"><label>标题（选填）<input id="ntTitle" class="input" placeholder="一句话概括" maxlength="100"></label></div>
+    <div class="form-row"><label>详细描述 <span class="muted">（必填）</span>
+      <textarea id="ntContent" class="input" rows="6" placeholder="描述你的问题、建议或遇到的情况" maxlength="5000">${esc(p.content || '')}</textarea></label></div>`;
+  const m = openModal('发起工单', body);
+  if (p.category && ['bug', 'suggestion', 'other'].includes(p.category)) m.body.querySelector('#ntCat').value = p.category;
+  m.foot.innerHTML = `<button class="btn btn-sm" id="ntCancel">取消</button><button class="btn btn-sm btn-primary" id="ntSave">提交工单</button>`;
+  m.foot.querySelector('#ntCancel').onclick = closeModal;
+  m.foot.querySelector('#ntSave').onclick = async () => {
+    const category = m.body.querySelector('#ntCat').value;
+    const title = m.body.querySelector('#ntTitle').value.trim();
+    const content = m.body.querySelector('#ntContent').value.trim();
+    if (!content) return toast('请填写详细描述', 'err');
+    const r = await api('/api/tickets', { method: 'POST', body: JSON.stringify({ category, title, content }) });
+    if (r.ok) { toast('工单已提交', 'ok'); closeModal(); go('/tickets/' + r.data.code); }
+    else toast(r.data?.message || r.data?.error || '提交失败', 'err');
+  };
 }
+
+
 
 // ==================== 查看代码 / 在线编辑 / 审批部署 ====================
 function diffLines(a, b) {
@@ -3010,7 +3002,7 @@ function buildCmds() {
     { icon: '＋', label: '新建剪贴板', hint: 'New', run: () => go('/new') },
     { icon: '👤', label: '我的', hint: 'Me', run: () => go('/me') },
     { icon: '❓', label: '帮助', hint: 'Help', run: () => go('/help') },
-    { icon: '💬', label: '反馈', hint: 'Feedback', run: () => go('/feedback') },
+    { icon: '💬', label: '工单', hint: 'Tickets', run: () => go('/tickets') },
     { icon: '🐞', label: '上报最近一次报错', hint: 'Bug', run: () => goReportError(lastErr) },
     { icon: 'ℹ️', label: '关于', hint: 'About', run: () => go('/about') },
     { icon: '📝', label: '更新日志', hint: 'Log', run: () => go('/changelog') },
