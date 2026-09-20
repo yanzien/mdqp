@@ -35,9 +35,18 @@ function copy(text, msg) {
 // 更新日志：随代码发布自动同步
 const CHANGELOG_MD = `# 📝 更新日志
 
-mdqp 的主要版本变动记录。当前部署版本 **v4.14.2**。
+mdqp 的主要版本变动记录。当前部署版本 **v4.14.4**。
 
 ---
+
+## v4.14.4 · 2026-09-20（公告彻底加固 + 工单内容预览）
+
+- 🛡 **公告接口再次加固**：\`PUT/DELETE /api/announcements\` 的身份校验（\`getIdentity\`/\`isAdminIdentity\`）原本在 try/catch 之外，一旦身份解析偶发异常会裸 500 拖垮 \`/admin\`。现已统一包裹，任何异常都判为未授权（403）而非 500；清理「保留最新 5 条」逻辑改为非致命——即便清理失败，已发布的公告不受影响、接口仍返回成功。杜绝任何来源的裸 500。
+- 👁 **工单列表内容预览**：工单中心每张卡片「下面小字」新增内容开头一段预览（最多 100 字、两行截断），列表接口同步返回 \`content\` 字段，一眼看清工单大意。
+
+## v4.14.3 · 2026-09-19（修复举报提交 400）
+
+- 🐛 **修复举报提交返回 HTTP 400**：\`POST /api/tickets\` 在 \`category=report\` 时由 \`reason\`+\`detail\` 拼装内容，但服务端在拼装前先校验 \`content\` 非空，而举报请求不带 \`content\` 字段，导致每次举报都被 \`empty_content\` 拒绝（返回 25 字节 \`{"error":"empty_content"}\`）。已将举报类豁免出该空内容校验，举报恢复正常。
 
 ## v4.14.2 · 2026-09-19（公告加固 + 通知系统 + 举报适配）
 
@@ -2709,7 +2718,9 @@ async function loadTicketList() {
   const list = data.tickets;
   const cnt = $('#tkCount'); if (cnt) cnt.textContent = '共 ' + (data.total || 0) + ' 条';
   if (!list.length) { el.innerHTML = '<div class="empty">🎉 暂时没有工单，点右上角发起一个吧</div>'; return; }
-  el.innerHTML = list.map((t) => `
+  el.innerHTML = list.map((t) => {
+    const preview = (t.content || '').replace(/\s+/g, ' ').trim().slice(0, 100);
+    return `
     <a class="tk-card" href="/tickets/${esc(t.code)}" data-link>
       <div class="tk-card-row tk-card-top">
         <span class="tk-title">${esc(t.title || '未命名工单')}</span>
@@ -2722,7 +2733,9 @@ async function loadTicketList() {
         <span class="muted">${esc(t.author_name || '匿名')}</span>
         <span class="muted">${esc(timeAgo(t.created_at))}</span>
       </div>
-    </a>`).join('');
+      ${preview ? `<div class="tk-card-desc muted">${esc(preview)}${preview.length >= 100 ? '…' : ''}</div>` : ''}
+    </a>`;
+  }).join('');
 }
 
 
