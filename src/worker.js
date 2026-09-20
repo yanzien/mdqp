@@ -19,7 +19,7 @@ const app = new Hono();
 
 const GUEST_LIMIT = 5;
 const PAGE_SIZE = 20;
-const VERSION = '4.14.2';
+const VERSION = '4.14.4';
 const SEARCH_MAX = 100;
 const RESERVED = new Set([
   'api', 'raw', 'new', 'edit', 'u', 'user', 'users', 'admin', 'login', 'logout',
@@ -479,16 +479,27 @@ async function publishAnnouncement(db, content, updatedBy) {
     `INSERT INTO announcements (content, is_active, pinned, updated_at, updated_by)
      VALUES (?, 1, 1, datetime('now'), ?)`
   ).bind(content, updatedBy).run();
-  // 保留最新 N 条公告（默认最多 5 条活跃）
-  await db.exec(`DELETE FROM announcements WHERE id NOT IN (
-    SELECT id FROM announcements WHERE is_active = 1 ORDER BY created_at DESC LIMIT 5
-  ) AND is_active = 1`);
+  // 保留最新 N 条公告（默认最多 5 条活跃）。清理失败不影响已发布的公告，故非致命。
+  try {
+    await db.exec(`DELETE FROM announcements WHERE id NOT IN (
+      SELECT id FROM announcements WHERE is_active = 1 ORDER BY created_at DESC LIMIT 5
+    ) AND is_active = 1`);
+  } catch (e) {
+    console.error('[announcements] cleanup skipped (non-fatal):', e);
+  }
+}
+
+// 身份校验统一包裹：任何异常都判为未授权（401/403），绝不裸 500 拖垮 /admin
+async function requireAdmin(c) {
+  let identity;
+  try { identity = await getIdentity(c); } catch (e) { console.error('[announcements] getIdentity failed:', e); return null; }
+  if (!identity || identity.type !== 'user') return null;
+  try { return (await isAdminIdentity(c.env.db, identity)) ? identity : null; } catch (e) { console.error('[announcements] isAdminIdentity failed:', e); return null; }
 }
 
 app.put('/api/announcements', async (c) => {
-  const db = c.env.db;
-  const identity = await getIdentity(c);
-  if (!(await isAdminIdentity(db, identity))) return c.json({ error: 'forbidden' }, 403);
+  const identity = requireAdmin(c);
+  if (!identity) return c.json({ error: 'forbidden' }, 403);
 
   let body;
   try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
@@ -499,12 +510,12 @@ app.put('/api/announcements', async (c) => {
   const updatedBy = identity.name || String(identity.userId);
 
   try {
-    await publishAnnouncement(db, content, updatedBy);
+    await publishAnnouncement(c.env.db, content, updatedBy);
     return c.json({ ok: true });
   } catch (e) {
     // 重试一次（D1 偶发抖动）：多数瞬时失败重试即可成功，避免 /admin 误报 500
     try {
-      await publishAnnouncement(db, content, updatedBy);
+      await publishAnnouncement(c.env.db, content, updatedBy);
       return c.json({ ok: true });
     } catch (e2) {
       console.error('[announcements] PUT failed after retry:', e2);
@@ -514,11 +525,10 @@ app.put('/api/announcements', async (c) => {
 });
 
 app.delete('/api/announcements/:id', async (c) => {
-  const db = c.env.db;
-  const identity = await getIdentity(c);
-  if (!(await isAdminIdentity(db, identity))) return c.json({ error: 'forbidden' }, 403);
+  const identity = requireAdmin(c);
+  if (!identity) return c.json({ error: 'forbidden' }, 403);
   try {
-    await db.prepare('DELETE FROM announcements WHERE id = ?').bind(c.req.param('id')).run();
+    await c.env.db.prepare('DELETE FROM announcements WHERE id = ?').bind(c.req.param('id')).run();
     return c.json({ ok: true });
   } catch (e) {
     console.error('[announcements] DELETE failed:', e);
@@ -548,7 +558,8 @@ app.post('/api/tickets', async (c) => {
   try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
   const category = TICKET_CATS.includes(body.category) ? body.category : 'other';
   const content = (body.content || '').toString().slice(0, 5000);
-  if (!content.trim()) return c.json({ error: 'empty_content' }, 400);
+  // 举报类由 reason/detail 拼装 finalContent（见下），本身无 content 字段，跳过此校验
+  if (category !== 'report' && !content.trim()) return c.json({ error: 'empty_content' }, 400);
   const title = (body.title || '').toString().slice(0, 100).trim() || (category === 'report' ? '内容举报' : '工单');
   const identity = await getIdentity(c);
 
@@ -598,7 +609,7 @@ app.get('/api/tickets', async (c) => {
   if (!admin) { where.push('t.is_public = 1'); where.push("t.status != 'rejected'"); }
   const whereSql = where.length ? 'WHERE ' + where.join(' AND ') : '';
   const rows = await db.prepare(
-    `SELECT t.id, t.code, t.category, t.title, t.author_name, t.status, t.created_at, t.updated_at,
+    `SELECT t.id, t.code, t.category, t.title, t.content, t.author_name, t.status, t.created_at, t.updated_at,
             (SELECT COUNT(*) FROM ticket_replies r WHERE r.ticket_id = t.id) AS reply_count
      FROM tickets t ${whereSql} ORDER BY t.updated_at DESC LIMIT 30 OFFSET ?`
   ).bind(...binds, (page - 1) * 30).all();
