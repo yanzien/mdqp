@@ -828,6 +828,7 @@ main { max-width: 960px; width: 100%; margin: 0 auto; padding: 26px 22px 60px; f
 .tk-card-top { margin-bottom: 8px; }
 .tk-title { font-size: 15px; font-weight: 700; color: var(--text); }
 .tk-card-meta { font-size: 12px; }
+.tk-card-desc { margin-top: 8px; font-size: 12.5px; line-height: 1.5; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .tk-replies { background: var(--surface-2); color: var(--muted); }
 .tk-detail .crumb { margin-bottom: 12px; }
 .tk-banner { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 18px; margin-bottom: 16px; }
