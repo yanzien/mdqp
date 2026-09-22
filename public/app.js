@@ -35,9 +35,17 @@ function copy(text, msg) {
 // 更新日志：随代码发布自动同步
 const CHANGELOG_MD = `# 📝 更新日志
 
-mdqp 的主要版本变动记录。当前部署版本 **v4.14.4**。
+mdqp 的主要版本变动记录。当前部署版本 **v4.15.0**。
 
 ---
+
+## v4.15.0 · 2026-09-19（管理员权限细粒化 + 层级管控）
+
+- 🐛 **修复 \`/admin/code\` 代码查看页崩溃（工单 TK6CA56C02）**：拥有 \`view_code\` 但无 \`edit_code\` 权限的用户打开代码查看页时，\`renderCodeViewer\` 在无「编辑」按钮的情况下仍对其 \`onclick\` 赋值，触发 \`can't access property "onclick", $(...) is null\`。已加空判：按钮不存在则跳过绑定。
+- 🔑 **修复「修改代码」权限设了不生效**：后端 \`ALL_PERMS\` 白名单此前缺失 \`edit_code\`，保存时被过滤丢弃，但校验点仍在查 \`edit_code\`，导致「授予了却没生效」。前后端权限位统一补齐为 15 项（封禁 / 删除 / 限制 / VIP / 功能 / 各内容管理 / 查看 / 编辑代码 / 管理管理员），并新增旧键映射兼容历史数据。
+- 🧩 **管理员权限细粒化（前后端）**：管理后台「升管 / 修改权限」弹窗改为**分组勾选**（👥 用户管理 / 📚 内容管理 / 💻 代码管理），一次可精细授予封禁用户、修改其他用户功能、管理 VIP、管理工单/公告/评论/邀请/设置等独立权限；支持**直接修改现有管理员权限**，不再需要先「撤管」再「升管」。
+- 🪜 **层级管控（admin_level 1–5，开发者 99）**：新增 \`admin_level\` 字段与 \`migrate_v4.15.sql\`；管理员只能管理**层级低于自己**的用户，同级或更高（含开发者）不可动；授予他人时层级被自动压到「操作者层级 − 1」封顶；用户列表对所有管理员可见（无操作权限仅按钮置灰）；管理员徽章按层级着色（蓝<绿<橙<红<紫）。
+- 🔐 **接口权限重绑**：公告 / 工单管理端点由笼统的 \`isAdminIdentity\` 改为逐项 \`hasAdminPerm\`（manage_announcements / manage_tickets），\`/api/me\` 与 \`GET /api/admin/users\` 如实返回 \`admin_level\` 与归一化 \`admin_permissions\`，供前端做层级与按钮置灰。
 
 ## v4.14.4 · 2026-09-20（公告彻底加固 + 工单内容预览）
 
@@ -1186,9 +1194,55 @@ function insertMention(username, displayName) {
 function hideMentionPopup() { const p = $('#mentionPopup'); if (p) p.classList.add('hidden'); mentionState.open = false; }
 
 // ==================== 用户主页（扩展：VIP/邀请/功能状态） ====================
-const PERM_LABELS = { delete_user: '删除用户账号', set_clip_limit: '设置剪贴板限制', edit_pages: '编辑站点文章', edit_public_clips: '修改公开剪贴板', edit_private_clips: '修改私有剪贴板', view_code: '查看源码（只读）', edit_code: '编辑并提交代码' };
+// v4.15: 细粒化权限——与后端 ALL_PERMS 完全一致
+const PERM_LABELS = {
+  ban_user: '封禁 / 解封用户',
+  delete_user: '删除用户账号',
+  set_clip_limit: '设置剪贴板数量限制',
+  manage_feature: '修改用户功能开关',
+  manage_vip: '授予 / 撤销 VIP',
+  manage_clips: '管理剪贴板（删除他人板）',
+  manage_comments: '管理评论（删除他人评论）',
+  manage_pages: '编辑站点页面',
+  manage_announcements: '发布公告 / 删除',
+  manage_tickets: '处理工单（改状态 / 删除）',
+  manage_invites: '管理邀请',
+  manage_settings: '站点设置',
+  view_code: '查看源码（只读）',
+  edit_code: '编辑并提交代码',
+  manage_admins: '管理其他管理员（授权 / 调整层级）'
+};
 const FEATURE_LABELS = { custom_slug: '自定义短链', max_views: '阅读次数上限', password: '密码保护', expiry: '定时过期', collaboration: '协作模式', login_required: '登录可见', max_readers: '读者数限制', comments: '评论功能' };
-const ALL_PERMS = ['delete_user', 'set_clip_limit', 'edit_pages', 'edit_public_clips', 'edit_private_clips', 'view_code', 'edit_code'];
+const ALL_PERMS = ['ban_user', 'delete_user', 'set_clip_limit', 'manage_feature', 'manage_vip', 'manage_clips', 'manage_comments', 'manage_pages', 'manage_announcements', 'manage_tickets', 'manage_invites', 'manage_settings', 'view_code', 'edit_code', 'manage_admins'];
+// 权限分组（用于弹窗分组展示）
+const PERM_GROUPS = [
+  { title: '👥 用户管理', perms: ['ban_user', 'delete_user', 'set_clip_limit', 'manage_feature', 'manage_vip', 'manage_admins'] },
+  { title: '📚 内容管理', perms: ['manage_clips', 'manage_comments', 'manage_pages', 'manage_announcements', 'manage_tickets', 'manage_invites', 'manage_settings'] },
+  { title: '💻 代码管理', perms: ['view_code', 'edit_code'] }
+];
+
+// v4.15: 层级与权限辅助（前端仅用于按钮置灰 / 颜色，最终以服务端校验为准）
+function myLevel() {
+  if (!state.me) return 0;
+  if (state.me.role === 'developer') return 99;
+  if (state.me.role === 'admin') return state.me.admin_level || 1;
+  return 0;
+}
+function myPerm(p) {
+  if (!state.me) return false;
+  if (state.me.role === 'developer') return true;
+  return !!(state.me.admin_permissions && state.me.admin_permissions[p]);
+}
+function targetLevel(u) {
+  if (u.role === 'developer') return 99;
+  if (u.role === 'admin') return u.admin_level || 1;
+  return 0;
+}
+// 能否管理目标：开发者不可碰；同级或更高层级不可管；自己不可管自己（角色/权限类）
+function canManageTarget(u) {
+  if (u.role === 'developer') return false;
+  return targetLevel(u) < myLevel();
+}
 
 function promptAdminPermsDialog() {
   const keys = Object.keys(PERM_LABELS); const checked = keys.map(k => k + ':1').join('\n');
@@ -1222,17 +1276,36 @@ function openModal(title, bodyHtml) {
 }
 function closeModal() { const ov = $('#modalOverlay'); if (ov) ov.classList.remove('show'); }
 
-// 册封管理员：勾选权限的弹窗，返回 Promise<perms|null>
-function openPermsModal(displayName) {
+// v4.15: 我可授予的最高层级（开发者可到 5，普通管理员只能授比自己低一级）
+function permsModalMaxLevel() {
+  const ml = myLevel();
+  return ml === 99 ? 5 : Math.max(0, Math.min(5, ml - 1));
+}
+// 册封 / 修改管理员权限弹窗，分组展示 + 层级选择，返回 Promise<{perms, level}|null>
+// current: 可选，{ perms, level } 用于预填（修改权限场景）
+function openPermsModal(displayName, current) {
   return new Promise((resolve) => {
+    const maxLvl = permsModalMaxLevel();
+    const curPerms = (current && current.perms) || {};
+    const curLvl = Math.max(1, Math.min(maxLvl || 1, (current && current.level) || 1));
+    const lvlOpts = [];
+    for (let i = 1; i <= maxLvl; i++) lvlOpts.push(i);
+    const levelHtml = maxLvl >= 1
+      ? `<div class="form-row" style="margin:10px 0 4px"><label>管理员层级（你最高可授予 <b>${maxLvl}</b> 级）：</label>
+         <select id="promLevel" class="input input-sm">${lvlOpts.map((l) => `<option value="${l}"${l === curLvl ? ' selected' : ''}>${l} 级${l === maxLvl ? '（最高可授）' : ''}</option>`).join('')}</select></div>`
+      : `<p class="muted" style="margin:10px 0 4px">⚠️ 你是最低层级，无法授予或调整管理员身份。</p>`;
+    const groupsHtml = PERM_GROUPS.map((g) => `<div class="perm-group"><div class="perm-group-title">${g.title}</div>${g.perms.map((p) => `<label class="ff-item"><input type="checkbox" data-perm="${p}" ${curPerms[p] ? 'checked' : ''}> <span>${PERM_LABELS[p] || p}</span></label>`).join('')}</div>`).join('');
     const body = `<p class="muted" style="margin:0 0 8px">为 <b>${esc(displayName)}</b> 设置管理员权限（可多选）：</p>
-      <div class="ff-grid">${ALL_PERMS.map((p) => `<label class="ff-item ${p === 'view_code' ? 'ff-view' : p === 'edit_code' ? 'ff-edit' : ''}"><input type="checkbox" data-perm="${p}" checked> <span>${PERM_LABELS[p] || p}</span></label>`).join('')}</div>`;
-    const m = openModal('册封管理员', body);
-    m.foot.innerHTML = `<button class="btn btn-sm" id="promCancel">取消</button><button class="btn btn-sm btn-primary" id="promSave">确认册封</button>`;
+      <div class="perm-groups">${groupsHtml}</div>${levelHtml}`;
+    const canSave = maxLvl >= 1;
+    const m = openModal('管理员权限设置', body);
+    m.foot.innerHTML = `<button class="btn btn-sm" id="promCancel">取消</button><button class="btn btn-sm btn-primary" id="promSave"${canSave ? '' : ' disabled'}>确认</button>`;
     m.foot.querySelector('#promCancel').onclick = () => { closeModal(); resolve(null); };
     m.foot.querySelector('#promSave').onclick = () => {
+      if (!canSave) return;
       const perms = {}; m.body.querySelectorAll('[data-perm]').forEach((c) => { perms[c.dataset.perm] = c.checked; });
-      closeModal(); resolve(perms);
+      const level = parseInt(m.body.querySelector('#promLevel')?.value || '1', 10) || 1;
+      closeModal(); resolve({ perms, level });
     };
   });
 }
@@ -1363,7 +1436,7 @@ async function renderUser(uid) {
   $$('#profile [data-role-act]').forEach((b) => {
     b.onclick = async () => {
       const role = b.dataset.roleAct;
-      if (role === 'admin') { const perms = await openPermsModal(u.display_name); if (!perms) return; const r = await api('/api/admin/users/' + b.dataset.uid, { method: 'PATCH', body: JSON.stringify({ role, admin_permissions: perms }) }); if (r.ok) { toast('已册封'); renderUser(uid); } else toast('失败：' + (r.data?.message || r.status), 'err'); }
+      if (role === 'admin') { const res = await openPermsModal(u.display_name); if (!res) return; const r = await api('/api/admin/users/' + b.dataset.uid, { method: 'PATCH', body: JSON.stringify({ role, admin_permissions: res.perms, admin_level: res.level }) }); if (r.ok) { toast('已册封管理员'); renderUser(uid); } else toast('失败：' + (r.data?.message || r.status), 'err'); }
       else { if (!confirm(role === 'admin' ? '确认册封？' : '确认撤下？')) return; const r = await api('/api/admin/users/' + b.dataset.uid, { method: 'PATCH', body: JSON.stringify({ role }) }); if (r.ok) { toast('已更新'); renderUser(uid); } else toast('失败：' + (r.data?.error || r.status), 'err'); }
     };
   });
@@ -2020,25 +2093,41 @@ async function loadAdminUsers() {
   const users = data.users;
   const srcOpts = `<option value="">来源:全部</option><option value="unset">未填写</option>${SOURCE_OPTIONS.map((o) => `<option value="${o.code}">${esc(o.label)}</option>`).join('')}`;
   const rows = users.map((u) => {
-    const lvl = u.role === 'admin' ? Math.max(1, Math.min(5, Object.values(u.admin_permissions || {}).filter(Boolean).length)) : 0;
+    const lvl = u.role === 'admin' ? Math.max(1, Math.min(5, u.admin_level || 1)) : 0;
     const roleHtml = u.role === 'developer' ? roleBadge('developer') : u.role === 'admin' ? roleBadge('admin', { permLevel: lvl }) : '';
     const vipHtml = u.is_vip ? roleBadge('user', { is_vip: true }) : '';
     const banHtml = u.banned ? `<span class="badge" style="background:rgba(220,38,38,.15);color:#e0524f;border:1px solid rgba(220,38,38,.4)">🚫 封禁${u.ban_until ? ' 至 ' + esc((u.ban_until || '').slice(0, 10)) : '（永久）'}</span>` : '';
     const ff = u.feature_flags || {};
     const ffOn = Object.keys(FEATURE_LABELS).filter((k) => ff[k]).map((k) => FEATURE_LABELS[k]);
+    const isSelf = String(u.id) === String(state.me?.userId);
+    const mgr = canManageTarget(u);            // 层级高于目标
+    const cBan = myPerm('ban_user') && mgr && !isSelf;
+    const cDel = myPerm('delete_user') && mgr && !isSelf;
+    const cPerms = myPerm('manage_admins') && mgr && !isSelf;
+    const cClip = myPerm('set_clip_limit') && mgr;
+    const cVip = myPerm('manage_vip') && mgr;
+    const cFeat = myPerm('manage_feature') && mgr;
+    const dis = (ok, why) => ok ? '' : ' disabled title="' + esc(why) + '"';
+    const mute = (ok) => ok ? '' : ' style="opacity:.45;cursor:not-allowed"';
     return `<tr>
       <td><a href="/u/${u.id}" data-link>${avatarHtml(u.avatar, u.display_name)} <b>${esc(u.display_name)}</b></a><div class="muted" style="font-size:12px">@${esc(u.username)} · #${u.id}</div><div class="muted" style="font-size:12px">📅 ${esc((u.created_at || '').slice(0, 10))}</div></td>
-      <td>${roleHtml} ${vipHtml} ${banHtml}</td>
+      <td>${roleHtml} ${vipHtml} ${banHtml}${lvl ? `<div class="muted" style="font-size:11px">层级 ${lvl}/5</div>` : ''}</td>
       <td>${u.clip_count}</td>
       <td>${u.invite_count}</td>
       <td class="muted" style="font-size:12px;max-width:170px">${ffOn.length ? ffOn.join('、') : '—'}</td>
       <td class="muted" style="font-size:12px">${u.source ? (SOURCE_LABEL[u.source] || esc(u.source)) : '<span class="muted">未填</span>'}${u.source_detail ? `<div style="font-size:11px;opacity:.7">${esc(u.source_detail)}</div>` : ''}</td>
       <td class="admin-actions">
-        <button class="btn btn-sm" data-vip="${u.id}">⭐ VIP</button>
-        <button class="btn btn-sm" data-ff="${u.id}">功能</button>
-        ${u.role === 'developer' ? '<span class="muted">开发者</span>' : `<button class="btn btn-sm" data-role="${u.id}">${u.role === 'admin' ? '撤管' : '升管'}</button>`}
-        ${u.banned ? `<button class="btn btn-sm" data-unban="${u.id}">解封</button>` : `<button class="btn btn-sm btn-danger" data-ban="${u.id}">封禁</button>`}
-        <button class="btn btn-sm btn-danger" data-deluser="${u.id}">删除</button>
+        <button class="btn btn-sm" data-vip="${u.id}"${dis(cVip, '无 manage_vip 权限或层级不足')}${mute(cVip)}>⭐ VIP</button>
+        <button class="btn btn-sm" data-ff="${u.id}"${dis(cFeat, '无 manage_feature 权限或层级不足')}${mute(cFeat)}>功能</button>
+        ${u.role === 'developer'
+          ? '<span class="muted">开发者</span>'
+          : (u.role === 'admin'
+              ? `<button class="btn btn-sm" data-perms="${u.id}"${dis(cPerms, '需 manage_admins 且层级更高')}${mute(cPerms)}>修改权限</button><button class="btn btn-sm" data-role="${u.id}"${dis(cPerms, '需 manage_admins 且层级更高')}${mute(cPerms)}>撤管</button>`
+              : `<button class="btn btn-sm" data-role="${u.id}"${dis(cPerms, '需 manage_admins 且层级更高')}${mute(cPerms)}>升管</button>`)}
+        ${u.banned
+          ? `<button class="btn btn-sm" data-unban="${u.id}"${dis(cBan, '无 ban_user 权限或层级不足')}${mute(cBan)}>解封</button>`
+          : `<button class="btn btn-sm btn-danger" data-ban="${u.id}"${dis(cBan, '无 ban_user 权限或层级不足')}${mute(cBan)}>封禁</button>`}
+        <button class="btn btn-sm btn-danger" data-deluser="${u.id}"${dis(cDel, '无 delete_user 权限或层级不足')}${mute(cDel)}>删除</button>
       </td>
     </tr>`;
   }).join('');
@@ -2085,13 +2174,21 @@ async function loadAdminUsers() {
     if (u.role === 'admin') {
       if (!confirm('确认撤下该用户的管理员身份？')) return;
       const r = await api('/api/admin/users/' + b.dataset.role, { method: 'PATCH', body: JSON.stringify({ role: 'user' }) });
-      if (r.ok) loadAdminUsers(); else toast('失败', 'err');
+      if (r.ok) loadAdminUsers(); else toast('失败：' + (r.data?.message || r.status), 'err');
       return;
     }
-    const perms = await openPermsModal(u.display_name);
-    if (!perms) return;
-    const r = await api('/api/admin/users/' + b.dataset.role, { method: 'PATCH', body: JSON.stringify({ role: 'admin', admin_permissions: perms }) });
-    if (r.ok) { toast('已册封'); loadAdminUsers(); } else toast('失败', 'err');
+    const res = await openPermsModal(u.display_name);
+    if (!res) return;
+    const r = await api('/api/admin/users/' + b.dataset.role, { method: 'PATCH', body: JSON.stringify({ role: 'admin', admin_permissions: res.perms, admin_level: res.level }) });
+    if (r.ok) { toast('已册封管理员'); loadAdminUsers(); } else toast('失败：' + (r.data?.message || r.status), 'err');
+  });
+  // v4.15: 直接修改现有管理员权限 / 层级，免撤管再升管
+  $$('#adminBody [data-perms]').forEach((b) => b.onclick = async () => {
+    const u = users.find((x) => String(x.id) === b.dataset.perms);
+    const res = await openPermsModal(u.display_name, { perms: u.admin_permissions || {}, level: u.admin_level || 1 });
+    if (!res) return;
+    const r = await api('/api/admin/users/' + b.dataset.perms, { method: 'PATCH', body: JSON.stringify({ role: 'admin', admin_permissions: res.perms, admin_level: res.level }) });
+    if (r.ok) { toast('权限已更新'); loadAdminUsers(); } else toast('失败：' + (r.data?.message || r.status), 'err');
   });
   $$('#adminBody [data-ban]').forEach((b) => b.onclick = () => {
     const u = users.find((x) => String(x.id) === b.dataset.ban);
@@ -3026,7 +3123,9 @@ function renderCodeViewer() {
     const pre = `<pre class="code-pre"><code class="language-${lang}" id="codeCode">${esc(cur.content)}</code></pre>`;
     view.innerHTML = pre;
     if (window.hljs) { try { window.hljs.highlightElement($('#codeCode')); } catch {} }
-    $('#codeEditBtn').onclick = () => { state.codeEditing = true; renderCodeViewer(); };
+    // v4.15: #codeEditBtn 仅在 canEdit 时渲染；view_code 但无 edit_code 的用户没有该按钮，必须判空，否则 null.onclick 崩溃
+    const editBtn = $('#codeEditBtn');
+    if (editBtn) editBtn.onclick = () => { state.codeEditing = true; renderCodeViewer(); };
   }
 }
 
