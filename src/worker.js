@@ -19,7 +19,7 @@ const app = new Hono();
 
 const GUEST_LIMIT = 5;
 const PAGE_SIZE = 20;
-const VERSION = '4.14.4';
+const VERSION = '4.15.0';
 const SEARCH_MAX = 100;
 const RESERVED = new Set([
   'api', 'raw', 'new', 'edit', 'u', 'user', 'users', 'admin', 'login', 'logout',
@@ -183,10 +183,12 @@ async function isAdminIdentity(db, identity) {
 /** 检查管理员是否有某项管理权限 */
 async function hasAdminPerm(db, identity, perm) {
   if (!(await isAdminIdentity(db, identity))) return false;
+  if (!ALL_PERMS.includes(perm)) return false; // 未知权限一律拒绝
   const u = await db.prepare('SELECT role, admin_permissions FROM users WHERE id = ?').bind(String(identity.userId)).first();
   if (!u) return false;
   if (u.role === 'developer') return true; // 开发者拥有所有权限
-  try { const perms = JSON.parse(u.admin_permissions || '{}'); return !!perms[perm]; } catch { return false; }
+  const perms = readPerms(u.admin_permissions);
+  return !!perms[perm];
 }
 
 function parseLinkedAccounts(s) {
@@ -413,7 +415,53 @@ async function notifyTrustUpgrade(db, userId) {
   } catch (e) { /* 通知系统故障不阻断主流程 */ }
 }
 
-const ALL_PERMS = ['delete_user', 'set_clip_limit', 'edit_pages', 'edit_public_clips', 'edit_private_clips', 'view_code', 'ban_user'];
+// v4.15: 细粒化权限——几乎覆盖所有独立管理动作（用户列表对所有管理员可见，由 isAdminIdentity 控制）
+const ALL_PERMS = [
+  'ban_user',            // 封禁 / 解封用户
+  'delete_user',         // 删除用户账号
+  'set_clip_limit',      // 设置剪贴板数量限制
+  'manage_feature',      // 修改用户功能开关
+  'manage_vip',          // 授予 / 撤销 VIP
+  'manage_clips',        // 管理剪贴板（查看 / 删除他人剪贴板）
+  'manage_comments',     // 管理评论（删除他人评论）
+  'manage_pages',        // 编辑站点页面（帮助 / 关于等）
+  'manage_announcements',// 发布公告 / 删除
+  'manage_tickets',      // 处理工单（改状态 / 删除）
+  'manage_invites',      // 管理邀请
+  'manage_settings',     // 站点设置
+  'view_code',           // 查看源码（只读）
+  'edit_code',           // 编辑并提交代码
+  'manage_admins'        // 管理其他管理员（授予 / 调整权限 / 设层级）——需更高层级
+];
+
+// 旧权限名 → 新权限名（v4.15 重命名，保证存量管理员权限不丢）
+const PERM_LEGACY_MAP = {
+  edit_pages: 'manage_pages',
+  edit_public_clips: 'manage_clips',
+  edit_private_clips: 'manage_clips'
+};
+
+/** 读取并归一化管理员权限：补齐全部 ALL_PERMS 键（默认 false），并把旧键映射到新键 */
+function readPerms(raw) {
+  const out = {};
+  for (const p of ALL_PERMS) out[p] = false;
+  let obj = raw;
+  if (typeof raw === 'string') { try { obj = JSON.parse(raw); } catch { obj = {}; } }
+  if (obj && typeof obj === 'object') {
+    for (const k of Object.keys(obj)) {
+      const nk = PERM_LEGACY_MAP[k] || k;
+      if (ALL_PERMS.includes(nk)) out[nk] = !!obj[k];
+    }
+  }
+  return out;
+}
+
+/** 管理员层级：developer=99、admin=admin_level(默认1)、普通用户=0 */
+function adminLevelOf(role, level) {
+  if (role === 'developer') return 99;
+  if (role === 'admin') return parseInt(level, 10) || 1;
+  return 0;
+}
 
 /** 获取站点设置值 */
 async function getSiteSetting(db, key, fallback) {
@@ -498,8 +546,8 @@ async function requireAdmin(c) {
 }
 
 app.put('/api/announcements', async (c) => {
-  const identity = requireAdmin(c);
-  if (!identity) return c.json({ error: 'forbidden' }, 403);
+  const identity = await getIdentity(c);
+  if (!(await hasAdminPerm(c.env.db, identity, 'manage_announcements'))) return c.json({ error: 'forbidden', message: '无发布公告权限（需 manage_announcements）' }, 403);
 
   let body;
   try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
@@ -525,8 +573,8 @@ app.put('/api/announcements', async (c) => {
 });
 
 app.delete('/api/announcements/:id', async (c) => {
-  const identity = requireAdmin(c);
-  if (!identity) return c.json({ error: 'forbidden' }, 403);
+  const identity = await getIdentity(c);
+  if (!(await hasAdminPerm(c.env.db, identity, 'manage_announcements'))) return c.json({ error: 'forbidden', message: '无删除公告权限（需 manage_announcements）' }, 403);
   try {
     await c.env.db.prepare('DELETE FROM announcements WHERE id = ?').bind(c.req.param('id')).run();
     return c.json({ ok: true });
@@ -684,7 +732,7 @@ app.post('/api/tickets/:code/reply', async (c) => {
 app.patch('/api/tickets/:code', async (c) => {
   const db = c.env.db;
   const identity = await getIdentity(c);
-  if (!(await isAdminIdentity(db, identity))) return c.json({ error: 'forbidden' }, 403);
+  if (!(await hasAdminPerm(db, identity, 'manage_tickets'))) return c.json({ error: 'forbidden', message: '无处理工单权限（需 manage_tickets）' }, 403);
   const code = c.req.param('code');
   const t = await db.prepare('SELECT id, code, related_clip_id, status, author_id, author_type FROM tickets WHERE code = ?').bind(code).first();
   if (!t) return c.json({ error: 'not_found' }, 404);
@@ -729,7 +777,7 @@ app.patch('/api/tickets/:code', async (c) => {
 app.delete('/api/tickets/:code', async (c) => {
   const db = c.env.db;
   const identity = await getIdentity(c);
-  if (!(await isAdminIdentity(db, identity))) return c.json({ error: 'forbidden' }, 403);
+  if (!(await hasAdminPerm(db, identity, 'manage_tickets'))) return c.json({ error: 'forbidden', message: '无删除工单权限（需 manage_tickets）' }, 403);
   const code = c.req.param('code');
   const t = await db.prepare('SELECT id FROM tickets WHERE code = ?').bind(code).first();
   if (!t) return c.json({ error: 'not_found' }, 404);
@@ -1358,7 +1406,7 @@ app.get('/api/me', async (c) => {
       `SELECT username, role, bio, signature, linked_accounts, is_vip, vip_until,
               invite_code, invite_count, feature_flags, password_hash,
               email, email_verified, no_cpoauth_nudge, created_at,
-              source, source_detail, source_set_at
+              source, source_detail, source_set_at, admin_level
        FROM users WHERE id = ?`
     ).bind(String(identity.userId)).first();
     const clips = await db.prepare(
@@ -1412,8 +1460,9 @@ app.get('/api/me', async (c) => {
       no_cpoauth_nudge: !!uRow?.no_cpoauth_nudge,
       invite_code: uRow?.invite_code || '', invite_count: uRow?.invite_count || 0,
       feature_flags: parseFeatureFlags(uRow?.feature_flags),
-      // v4.11: 暴露后台权限位，供前端区分「仅查看源码」与「可编辑并提交代码」
-      admin_permissions: parseAdminPerms(uRow?.admin_permissions),
+      // v4.15: 暴露层级与归一化后的权限位，供前端做层级管控与按钮置灰
+      admin_level: uRow?.role === 'developer' ? 99 : (parseInt(uRow?.admin_level, 10) || 1),
+      admin_permissions: readPerms(uRow?.admin_permissions),
       // v4.10: 注册时间（created_at 已在 users 表）+ 来源渠道（首次登录后询问）
       created_at: uRow?.created_at || null,
       source: uRow?.source || '',
@@ -2009,7 +2058,8 @@ app.put('/api/pages/:slug', async (c) => {
 app.get('/api/admin/users', async (c) => {
   const db = c.env.db;
   const identity = await getIdentity(c);
-  if (!(await hasAdminPerm(db, identity, 'delete_user'))) return c.json({ error: 'forbidden' }, 403);
+  // v4.15: 所有管理员（含无 delete_user 权限者）都能查看用户列表，仅操作按钮按权限+层级置灰
+  if (!(await isAdminIdentity(db, identity))) return c.json({ error: 'forbidden' }, 403);
 
   const page = Math.max(1, parseInt(c.req.query('page') || '1'));
   const q = (c.req.query('q') || '').trim();
@@ -2061,9 +2111,10 @@ app.get('/api/admin/users', async (c) => {
     users: rows.results.map((r) => ({
       id: r.id, username: r.username, display_name: r.display_name || r.username,
       avatar: r.avatar, role: r.role || 'user',
+      admin_level: r.role === 'developer' ? 99 : (parseInt(r.admin_level, 10) || 1),
       linked_accounts: parseLinkedAccounts(r.linked_accounts),
       clip_limit: r.clip_limit, limit_period: r.limit_period,
-      admin_permissions: parseAdminPerms(r.admin_permissions),
+      admin_permissions: readPerms(r.admin_permissions),
       created_at: r.created_at, last_login: r.last_login, clip_count: r.clip_count || 0,
       is_vip: !!r.is_vip, vip_until: r.vip_until,
       invite_code: r.invite_code || '', invite_count: r.invite_count || 0,
@@ -2096,31 +2147,61 @@ app.patch('/api/admin/users/:id', async (c) => {
   if (!(await isAdminIdentity(db, identity))) return c.json({ error: 'forbidden' }, 403);
 
   const targetId = c.req.param('id');
-  const target = await db.prepare('SELECT id, role, username, display_name, banned, ban_until, ban_reason FROM users WHERE id = ?').bind(targetId).first();
+  const oper = await db.prepare('SELECT id, role, admin_level FROM users WHERE id = ?').bind(String(identity.userId)).first();
+  const operLevel = oper ? adminLevelOf(oper.role, oper.admin_level) : 1;
+  const target = await db.prepare('SELECT id, role, username, display_name, banned, ban_until, ban_reason, admin_level FROM users WHERE id = ?').bind(targetId).first();
   if (!target) return c.json({ error: 'not_found' }, 404);
   if (target.role === 'developer') return c.json({ error: 'forbidden', message: '开发者身份不可更改' }, 403);
+
+  const targetLevel = adminLevelOf(target.role, target.admin_level);
+  const selfId = String(identity.userId) === String(targetId);
+  // v4.15: 层级管控——不能管理级别与自己相同或更高的人（开发者 99 已被上面拦截）
+  if (target.role === 'admin' && targetLevel >= operLevel) {
+    return c.json({ error: 'forbidden', message: '无权限管理同级或更高层级的管理员' }, 403);
+  }
 
   let body;
   try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
   const changes = [];
 
-  // v4.13: 封禁操作需 ban_user 权限，且禁止封禁自己
-  const wantsBan = body.banned !== undefined || body.ban_reason !== undefined || body.ban_duration !== undefined;
-  if (wantsBan) {
-    if (!(await hasAdminPerm(db, identity, 'ban_user'))) return c.json({ error: 'forbidden', message: '无封禁权限' }, 403);
-    if (String(identity.userId) === String(targetId)) return c.json({ error: 'forbidden', message: '不能封禁自己' }, 403);
+  // 角色 / 权限 / 层级变更：需 manage_admins，且不能改自己这些项
+  const changingAuth = body.role !== undefined || body.admin_permissions !== undefined || body.admin_level !== undefined;
+  if (changingAuth) {
+    if (!(await hasAdminPerm(db, identity, 'manage_admins'))) return c.json({ error: 'forbidden', message: '无管理管理员权限（需 manage_admins）' }, 403);
+    if (selfId) return c.json({ error: 'forbidden', message: '不能修改自己的管理员权限 / 层级' }, 403);
   }
 
-  // 角色变更
+  // 角色变更 / 升管（免「先撤再升」，可直接设层级 + 权限）
   if (body.role !== undefined) {
     const role = String(body.role);
     if (!['user', 'admin'].includes(role)) return c.json({ error: 'bad_role' }, 400);
-    await db.prepare('UPDATE users SET role = ? WHERE id = ?').bind(role, targetId).run();
-    changes.push(role === 'admin' ? '被设为管理员' : '管理员权限被撤销');
+    if (role === 'admin') {
+      let lvl = parseInt(body.admin_level, 10) || 1;
+      if (operLevel !== 99) lvl = Math.min(lvl, operLevel - 1); // 新管理员层级必须低于操作者
+      lvl = Math.max(1, Math.min(5, lvl));
+      const perms = readPerms(body.admin_permissions);
+      await db.prepare('UPDATE users SET role = ?, admin_level = ?, admin_permissions = ? WHERE id = ?')
+        .bind('admin', lvl, JSON.stringify(perms), targetId).run();
+      changes.push('被设为管理员（层级 ' + lvl + '）');
+    } else {
+      await db.prepare("UPDATE users SET role = 'user', admin_level = 1, admin_permissions = '{}' WHERE id = ?").bind(targetId).run();
+      changes.push('管理员权限被撤销');
+    }
+  } else if (body.admin_level !== undefined || body.admin_permissions !== undefined) {
+    // 仅调整层级 / 权限（保持 admin 角色），免撤管再升管
+    let lvl = parseInt(body.admin_level, 10) || (target.admin_level || 1);
+    if (operLevel !== 99) lvl = Math.min(lvl, operLevel - 1);
+    lvl = Math.max(1, Math.min(5, lvl));
+    let perms = readPerms(target.admin_permissions);
+    if (body.admin_permissions !== undefined) perms = readPerms(body.admin_permissions);
+    await db.prepare('UPDATE users SET admin_level = ?, admin_permissions = ? WHERE id = ?')
+      .bind(lvl, JSON.stringify(perms), targetId).run();
+    changes.push('管理权限/层级已更新（层级 ' + lvl + '）');
   }
 
-  // 剪贴板数量限制
+  // 剪贴板数量限制（需 set_clip_limit）
   if (body.clip_limit !== undefined || body.limit_period !== undefined) {
+    if (!(await hasAdminPerm(db, identity, 'set_clip_limit'))) return c.json({ error: 'forbidden', message: '无设置剪贴板限制权限' }, 403);
     const limit = body.clip_limit === null ? null : Math.max(0, parseInt(body.clip_limit) || 0);
     const period = body.limit_period === null ? null : String(body.limit_period || '');
     if (limit !== null && !['month', 'week', 'year', 'forever', ''].includes(period))
@@ -2130,20 +2211,11 @@ app.patch('/api/admin/users/:id', async (c) => {
     changes.push('剪贴板数量限制被调整');
   }
 
-  // 管理员权限
-  if (body.admin_permissions !== undefined) {
-    let perms = parseAdminPerms(body.admin_permissions);
-    const clean = {};
-    for (const p of ALL_PERMS) { if (perms[p]) clean[p] = true; }
-    await db.prepare('UPDATE users SET admin_permissions = ? WHERE id = ?').bind(JSON.stringify(clean), targetId).run();
-    changes.push('管理权限被更新');
-  }
-
-  // === v4.0: VIP 设置 ===
+  // VIP 设置（需 manage_vip）
   if (body.is_vip !== undefined) {
+    if (!(await hasAdminPerm(db, identity, 'manage_vip'))) return c.json({ error: 'forbidden', message: '无管理 VIP 权限' }, 403);
     const isVip = body.is_vip ? 1 : 0;
     let vipUntil = body.vip_until || null;
-    // v4.13: 支持设置 VIP 时长（天），0/null = 永久
     if (isVip && body.vip_duration) {
       const days = Math.max(1, parseInt(body.vip_duration) || 0);
       if (days > 0) vipUntil = new Date(Date.now() + days * 86400000).toISOString().slice(0, 19).replace('T', ' ');
@@ -2152,8 +2224,10 @@ app.patch('/api/admin/users/:id', async (c) => {
     changes.push(isVip ? (vipUntil ? 'VIP 已开通（限时）' : 'VIP 已开通') : 'VIP 已被撤销');
   }
 
-  // === v4.13: 封禁 / 解封（带时长，ban_duration 天；不传=永久） ===
+  // 封禁 / 解封（需 ban_user，不能封自己；层级管控已在上方统一拦截）
   if (body.banned !== undefined) {
+    if (!(await hasAdminPerm(db, identity, 'ban_user'))) return c.json({ error: 'forbidden', message: '无封禁权限' }, 403);
+    if (selfId) return c.json({ error: 'forbidden', message: '不能封禁自己' }, 403);
     const banned = body.banned ? 1 : 0;
     if (banned) {
       const reason = (body.ban_reason || '违反社区规范').toString().slice(0, 500);
@@ -2172,10 +2246,10 @@ app.patch('/api/admin/users/:id', async (c) => {
     }
   }
 
-  // === v4.0: 功能开关 ===
+  // 功能开关（需 manage_feature）
   if (body.feature_flags !== undefined) {
+    if (!(await hasAdminPerm(db, identity, 'manage_feature'))) return c.json({ error: 'forbidden', message: '无管理功能开关权限' }, 403);
     let ff = parseFeatureFlags(body.feature_flags);
-    // 只保留已知 key
     const clean = {};
     for (const k of FEATURE_KEYS) { if (ff[k] !== undefined) clean[k] = ff[k]; }
     await db.prepare('UPDATE users SET feature_flags = ? WHERE id = ?').bind(JSON.stringify(clean), targetId).run();
@@ -2183,7 +2257,7 @@ app.patch('/api/admin/users/:id', async (c) => {
   }
 
   // 后台管理操作 → 通知目标用户（操作者本人除外）
-  if (changes.length && String(identity.userId) !== String(targetId)) {
+  if (changes.length && !selfId) {
     const whom = target.display_name || target.username || ('用户#' + targetId);
     await createNotification(db, targetId, 'admin', '🛡 账号变动通知', `你的账号（${whom}）${changes.join('；')}。`, '/me');
   }
@@ -2197,9 +2271,15 @@ app.delete('/api/admin/users/:id', async (c) => {
   if (!(await hasAdminPerm(db, identity, 'delete_user'))) return c.json({ error: 'forbidden' }, 403);
   const targetId = c.req.param('id');
   if (String(identity.userId) === String(targetId)) return c.json({ error: 'forbidden', message: '不能删除自己的账号' }, 403);
-  const target = await db.prepare('SELECT id, role, username FROM users WHERE id = ?').bind(targetId).first();
+  const oper = await db.prepare('SELECT role, admin_level FROM users WHERE id = ?').bind(String(identity.userId)).first();
+  const operLevel = oper ? adminLevelOf(oper.role, oper.admin_level) : 1;
+  const target = await db.prepare('SELECT id, role, username, admin_level FROM users WHERE id = ?').bind(targetId).first();
   if (!target) return c.json({ error: 'not_found' }, 404);
   if (target.role === 'developer') return c.json({ error: 'forbidden', message: '开发者账号不可删除' }, 403);
+  // v4.15: 层级管控——不能删除同级或更高层级的管理员
+  if (target.role === 'admin' && adminLevelOf(target.role, target.admin_level) >= operLevel) {
+    return c.json({ error: 'forbidden', message: '无权限删除同级或更高层级的管理员' }, 403);
+  }
   await db.prepare("DELETE FROM clipboards WHERE owner_type = 'user' AND owner_id = ?").bind(targetId).run();
   await db.prepare('DELETE FROM comments WHERE author_id = ?').bind(targetId).run();
   await db.prepare('DELETE FROM users WHERE id = ?').bind(targetId).run();
