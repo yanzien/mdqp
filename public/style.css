@@ -597,6 +597,13 @@ main { max-width: 960px; width: 100%; margin: 0 auto; padding: 26px 22px 60px; f
 .ff-item { display: flex; align-items: center; gap: 8px; font-size: 14px; cursor: pointer; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; }
 .ff-item:hover { background: var(--surface-2); }
 
+/* v4.15: 权限分组弹窗 */
+.perm-groups { display: flex; flex-direction: column; gap: 12px; margin-top: 8px; }
+.perm-group { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: var(--surface-2); }
+.perm-group-title { font-size: 13px; font-weight: 600; margin-bottom: 8px; opacity: .85; }
+.perm-group .ff-item { border-color: transparent; }
+.perm-group .ff-item:hover { background: var(--surface); border-color: var(--border); }
+
 .ann-preview { margin-top: 12px; border-top: 1px dashed var(--border); padding-top: 10px; }
 .ann-preview .markdown-body { font-size: 14px; }
 
