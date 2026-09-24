@@ -19,7 +19,7 @@ const app = new Hono();
 
 const GUEST_LIMIT = 5;
 const PAGE_SIZE = 20;
-const VERSION = '4.15.0';
+const VERSION = '4.16.0';
 const SEARCH_MAX = 100;
 const RESERVED = new Set([
   'api', 'raw', 'new', 'edit', 'u', 'user', 'users', 'admin', 'login', 'logout',
@@ -180,15 +180,27 @@ async function isAdminIdentity(db, identity) {
   return !!u && (u.role === 'admin' || u.role === 'developer');
 }
 
+/** v4.15.3: 管理员上下文的**唯一取数入口**（role / level / 归一化权限）
+ *  ⚠️ 任何需要判断或展示管理员权限的地方都必须走这里，不要在别处手写 SELECT 列清单：
+ *  列清单漏写 admin_permissions 会让 readPerms(undefined) 静默兜底成「全 false」，
+ *  表现为"权限已授予但按钮全灰 / 代码页只读"——此坑已在 v4.15.1(admin_level)、v4.15.3(admin_permissions) 各犯一次。 */
+async function getAdminContext(db, userId) {
+  const r = await db.prepare('SELECT role, admin_level, admin_permissions FROM users WHERE id = ?').bind(String(userId)).first();
+  return {
+    role: r?.role || 'user',
+    level: adminLevelOf(r?.role, r?.admin_level),
+    perms: readPerms(r?.admin_permissions)
+  };
+}
+
 /** 检查管理员是否有某项管理权限 */
 async function hasAdminPerm(db, identity, perm) {
-  if (!(await isAdminIdentity(db, identity))) return false;
+  if (identity.type !== 'user') return false;
   if (!ALL_PERMS.includes(perm)) return false; // 未知权限一律拒绝
-  const u = await db.prepare('SELECT role, admin_permissions FROM users WHERE id = ?').bind(String(identity.userId)).first();
-  if (!u) return false;
-  if (u.role === 'developer') return true; // 开发者拥有所有权限
-  const perms = readPerms(u.admin_permissions);
-  return !!perms[perm];
+  const ctx = await getAdminContext(db, identity.userId);
+  if (ctx.role === 'developer') return true; // 开发者拥有所有权限
+  if (ctx.role !== 'admin') return false;
+  return !!ctx.perms[perm];
 }
 
 function parseLinkedAccounts(s) {
@@ -447,6 +459,9 @@ function readPerms(raw) {
   for (const p of ALL_PERMS) out[p] = false;
   let obj = raw;
   if (typeof raw === 'string') { try { obj = JSON.parse(raw); } catch { obj = {}; } }
+  // v4.15.3 绊线：收到 undefined/null 说明调用方拿到的行里没有 admin_permissions（SELECT 漏列），
+  // 曾因静默兜底成全 false 导致"权限已授予但按钮全灰 / 代码页只读"。日志：wrangler pages deployment tail
+  else if (raw === undefined || raw === null) console.warn('[mdqp] readPerms(undefined) — 调用方 SELECT 可能漏选了 admin_permissions');
   if (obj && typeof obj === 'object') {
     for (const k of Object.keys(obj)) {
       const nk = PERM_LEGACY_MAP[k] || k;
@@ -467,6 +482,28 @@ function adminLevelOf(role, level) {
 async function getSiteSetting(db, key, fallback) {
   const r = await db.prepare('SELECT value FROM site_settings WHERE key = ?').bind(key).first();
   return r ? r.value : fallback;
+}
+
+/** 删除「已过期且过期时间已超过 3 天」的剪贴板（expires_at 在过去且无续期），返回删除条数 */
+async function cleanupExpiredClips(db) {
+  const r = await db.prepare(
+    "DELETE FROM clipboards WHERE expires_at IS NOT NULL AND datetime(expires_at) < datetime('now','-3 days')"
+  ).run();
+  return (r && r.meta && typeof r.meta.changes === 'number') ? r.meta.changes : 0;
+}
+
+/** 按小时节流：借高频读请求顺带清理过期剪贴板，免去独立 Cron 配置（非致命） */
+async function maybeCleanupExpired(db) {
+  try {
+    const now = Date.now();
+    const row = await db.prepare("SELECT value FROM site_settings WHERE key='expiry_cleanup_last'").first();
+    const last = row ? parseInt(row.value || '0', 10) : 0;
+    if (now - last < 3600 * 1000) return;
+    await db.prepare(
+      "INSERT INTO site_settings (key, value, updated_at) VALUES ('expiry_cleanup_last', ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=datetime('now')"
+    ).bind(String(now)).run();
+    await cleanupExpiredClips(db);
+  } catch { /* 清理失败不影响主流程 */ }
 }
 
 /** 获取用户的功能开关 */
@@ -921,6 +958,7 @@ app.patch('/api/admin/code/request/:id', async (c) => {
 app.get('/api/clips', async (c) => {
   c.header('Cache-Control', 'public, max-age=30');
   const db = c.env.db;
+  await maybeCleanupExpired(db);
   const page = Math.max(1, parseInt(c.req.query('page') || '1'));
   const q = (c.req.query('q') || '').trim().slice(0, SEARCH_MAX);
   const offset = (page - 1) * PAGE_SIZE;
@@ -941,7 +979,7 @@ app.get('/api/clips', async (c) => {
       `SELECT c.clip_id, c.title, c.content, c.owner_type, c.owner_id, c.owner_name, c.editable_by_anyone,
               c.password_hash, c.expires_at, c.max_views, c.views, c.created_at, c.updated_at,
               c.login_required, c.max_readers, COALESCE(c.tags, '') AS tags,
-              u.role AS owner_role, u.is_vip AS owner_is_vip, u.vip_until AS owner_vip_until
+              u.role AS owner_role, u.admin_level AS owner_admin_level, u.is_vip AS owner_is_vip, u.vip_until AS owner_vip_until
        FROM clipboards c
        LEFT JOIN users u ON c.owner_type = 'user' AND u.id = c.owner_id
        ${where} ORDER BY c.created_at DESC LIMIT ? OFFSET ?`
@@ -960,6 +998,7 @@ app.get('/api/clips', async (c) => {
       owner_name: r.owner_name,
       // v4.8.2: 作者角色/VIP，供首页与剪贴板页在用户名后显示身份 tag
       owner_role: r.owner_role || null,
+      owner_admin_level: r.owner_admin_level != null ? parseInt(r.owner_admin_level, 10) : null,
       owner_is_vip: !!r.owner_is_vip,
       owner_vip_until: r.owner_vip_until || null,
       editable_by_anyone: !!r.editable_by_anyone,
@@ -1039,7 +1078,7 @@ app.get('/api/clips/:clipId', async (c) => {
 
   // v4.8.2: 作者身份（角色/VIP），供剪贴板页在用户名后显示 tag
   const ownerInfo = r.owner_type === 'user'
-    ? await db.prepare('SELECT role, is_vip, vip_until FROM users WHERE id = ?').bind(String(r.owner_id)).first()
+    ? await db.prepare('SELECT role, admin_level, is_vip, vip_until FROM users WHERE id = ?').bind(String(r.owner_id)).first()
     : null;
 
   return c.json({
@@ -1436,6 +1475,8 @@ app.get('/api/me', async (c) => {
     const dailyLimit = ben.benefits.daily;
     const monthlyLimit = ben.benefits.monthly;
     const charLimit = ben.charLimit;
+    // v4.15.3: 走统一取数入口拿真实角色 / 层级 / 权限（此接口曾漏选 admin_permissions → 前端权限全 false）
+    const adminCtx = await getAdminContext(db, identity.userId);
 
     return c.json({
       authenticated: true, type: 'user', userId: identity.userId, name: identity.name,
@@ -1461,8 +1502,9 @@ app.get('/api/me', async (c) => {
       invite_code: uRow?.invite_code || '', invite_count: uRow?.invite_count || 0,
       feature_flags: parseFeatureFlags(uRow?.feature_flags),
       // v4.15: 暴露层级与归一化后的权限位，供前端做层级管控与按钮置灰
-      admin_level: uRow?.role === 'developer' ? 99 : (parseInt(uRow?.admin_level, 10) || 1),
-      admin_permissions: readPerms(uRow?.admin_permissions),
+      // v4.15.3: 改由 getAdminContext 统一取数（不再依赖本接口手写 SELECT 的列清单）
+      admin_level: adminCtx.role === 'developer' ? 99 : (adminCtx.role === 'admin' ? adminCtx.level : 1),
+      admin_permissions: adminCtx.perms,
       // v4.10: 注册时间（created_at 已在 users 表）+ 来源渠道（首次登录后询问）
       created_at: uRow?.created_at || null,
       source: uRow?.source || '',
@@ -2099,7 +2141,7 @@ app.get('/api/admin/users', async (c) => {
 
   const totalRow = await db.prepare(`SELECT COUNT(*) as cnt FROM (${innerSql}) sub ${whereSql}`).bind(...params).first();
   const rows = await db.prepare(
-    `SELECT sub.id, sub.username, sub.display_name, sub.avatar, sub.role, sub.bio, sub.signature,
+    `SELECT sub.id, sub.username, sub.display_name, sub.avatar, sub.role, sub.admin_level, sub.bio, sub.signature,
             sub.linked_accounts, sub.clip_limit, sub.limit_period, sub.admin_permissions,
             sub.created_at, sub.last_login, sub.is_vip, sub.vip_until, sub.invite_code,
             sub.invite_count, sub.feature_flags, sub.source, sub.source_set_at,
@@ -2149,7 +2191,7 @@ app.patch('/api/admin/users/:id', async (c) => {
   const targetId = c.req.param('id');
   const oper = await db.prepare('SELECT id, role, admin_level FROM users WHERE id = ?').bind(String(identity.userId)).first();
   const operLevel = oper ? adminLevelOf(oper.role, oper.admin_level) : 1;
-  const target = await db.prepare('SELECT id, role, username, display_name, banned, ban_until, ban_reason, admin_level FROM users WHERE id = ?').bind(targetId).first();
+  const target = await db.prepare('SELECT id, role, username, display_name, banned, ban_until, ban_reason, admin_level, admin_permissions FROM users WHERE id = ?').bind(targetId).first();
   if (!target) return c.json({ error: 'not_found' }, 404);
   if (target.role === 'developer') return c.json({ error: 'forbidden', message: '开发者身份不可更改' }, 403);
 
@@ -2179,7 +2221,7 @@ app.patch('/api/admin/users/:id', async (c) => {
       let lvl = parseInt(body.admin_level, 10) || 1;
       if (operLevel !== 99) lvl = Math.min(lvl, operLevel - 1); // 新管理员层级必须低于操作者
       lvl = Math.max(1, Math.min(5, lvl));
-      const perms = readPerms(body.admin_permissions);
+      const perms = readPerms(body.admin_permissions || '{}');
       await db.prepare('UPDATE users SET role = ?, admin_level = ?, admin_permissions = ? WHERE id = ?')
         .bind('admin', lvl, JSON.stringify(perms), targetId).run();
       changes.push('被设为管理员（层级 ' + lvl + '）');
@@ -2316,6 +2358,15 @@ app.get('/api/admin/clips', async (c) => {
     })),
     page, total: totalRow?.cnt || 0, totalPages: Math.max(1, Math.ceil((totalRow?.cnt || 0) / PAGE_SIZE))
   });
+});
+
+// v4.15.2: 手动触发清理「已过期且超过 3 天」的剪贴板（仅管理员）
+app.delete('/api/admin/clips/expired', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (!(await isAdminIdentity(db, identity))) return c.json({ error: 'forbidden' }, 403);
+  const deleted = await cleanupExpiredClips(db);
+  return c.json({ ok: true, deleted });
 });
 
 // ========== v4.14: 举报审核已并入统一工单（见 /api/tickets，category=report） ==========
