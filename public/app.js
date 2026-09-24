@@ -35,11 +35,43 @@ function copy(text, msg) {
 // 更新日志：随代码发布自动同步
 const CHANGELOG_MD = `# 📝 更新日志
 
-mdqp 的主要版本变动记录。当前部署版本 **v4.15.0**。
+mdqp 的主要版本变动记录。当前部署版本 **v4.16.0**。
 
 ---
 
+## v4.16.0 · 2026-09-24（阅读模式 📖：全屏纯净阅读 + 目录）
+
+> 🔗 部署预览：https://2a1164f2.mdqp.pages.dev
+
+- ✨ **阅读模式**：剪贴板、关于页、帮助页、更新日志现在都带「📖 阅读」按钮，进入全屏纯净阅读界面——只保留**标题、作者 / 时间一行、正文**与「📑 目录」按钮，去掉评论、编辑、分享等干扰元素，适合长文沉浸式阅读。
+- ✨ **目录（TOC）**：阅读模式内点「📑 目录」会自动从正文各级标题生成大纲，点击任意条目平滑滚动定位；关于 / 帮助页原有的「📑 目录」按钮也继续可用。
+
+## v4.15.3 · 2026-09-24（修复管理员权限被静默吞掉——按钮全灰 / 代码页只读）
+
+> 🔗 部署预览：https://30514ffa.mdqp.pages.dev
+
+- 🐞 **修复「已授予权限但按钮全灰、\`/admin/code\` 仍显示只读」**：\`GET /api/me\` 的查询漏选 \`admin_permissions\` 列，而下方仍读该字段 → \`readPerms(undefined)\` 静默兜底成**15 项全 false**。于是前端 \`myPerm()\` 对所有权限一律返回 false：用户管理里「修改权限 / 撤管 / 封禁 / 删除 / 功能 / VIP」全部置灰，\`/admin/code\` 的 \`edit_code\` 判定也永远为假（哪怕库里权限确已写入）。
+- 🐞 **修复「只改层级会把权限清空」**：\`PATCH /api/admin/users/:id\` 读取目标用户时漏选 \`admin_permissions\`，仅提交 \`admin_level\` 且不带 \`admin_permissions\` 时，会把该管理员的权限整体覆盖成全 false。已补选该列。
+- 🧹 **权限取数收敛为唯一入口**：新增 \`getAdminContext(db, userId)\`（返回 \`role\` / 归一化 \`level\` / \`readPerms\` 后的 \`perms\`），\`/api/me\` 与 \`hasAdminPerm\` 统一走它，不再各自手写 SELECT 列清单——这类「漏列 → \`parseInt(undefined)||1\` / \`readPerms(undefined)\` 静默兜底」的 bug 已在 v4.15.1（\`admin_level\`）、v4.15.3（\`admin_permissions\`）各犯一次，现从结构上消除。顺带 \`hasAdminPerm\` 少一次重复查询。
+
+## v4.15.2 · 2026-09-24（权限弹窗全选 + 过期剪贴板自动清理）
+
+> 🔗 部署预览：https://6797ee0a.mdqp.pages.dev
+
+- **权限弹窗新增「全选 / 全不选」**：之前册封/修改管理员时需逐项手动勾选 15 项权限，极易漏勾（典型如漏掉 \`manage_admins\` 导致该管理员无法修改他人权限、按钮全灰）。现在顶部一键全选，避免漏配。
+- **过期剪贴板自动清理**：新增 \`cleanupExpiredClips\`，删除「已过期且过期时间已超过 3 天」的剪贴板（\`expires_at\` 在过去且无续期）。通过 \`maybeCleanupExpired\` 借高频读请求（\`/api/clips\`、\`/api/me\`、\`/api/admin/clips\`）按小时节流顺带清理，无需独立 Cron；后台「剪贴板管理」新增「🧹 清理过期(>3天)」按钮可手动触发。
+
+## v4.15.1 · 2026-09-24（修复管理员层级显示）
+
+> 🔗 部署预览：https://1e2741d3.mdqp.pages.dev
+
+- 🐞 **修复管理员层级「显示 1 级但实为实际层级」**：\`GET /api/admin/users\` 列表查询漏选 \`admin_level\` 列，导致前端映射读不到该字段、\`parseInt(undefined)||1\` 永远回退成 1；管理列表、权限弹窗预填、层级徽章染色全部受影响。已补选该列。
+- 🐞 **修复管理员徽章/主人标签层级染色错误**：\`/me\` 页与公开主页的 \`roleBadge\` 未把真实层级传入（默认按 1 级染色），\`ownerBadge\` 对管理员硬编码 1 级色；现统一按 \`admin_level\` 着色（蓝<绿<橙<红<紫），剪贴板作者标签随接口下发的 \`owner_admin_level\` 生效。
+- ✨ \`/me\` 页对管理员新增可见「层级 X/5」文案，便于核对。
+
 ## v4.15.0 · 2026-09-19（管理员权限细粒化 + 层级管控）
+
+> 🔗 部署预览：https://7d39b2d6.mdqp.pages.dev
 
 - 🐛 **修复 \`/admin/code\` 代码查看页崩溃（工单 TK6CA56C02）**：拥有 \`view_code\` 但无 \`edit_code\` 权限的用户打开代码查看页时，\`renderCodeViewer\` 在无「编辑」按钮的情况下仍对其 \`onclick\` 赋值，触发 \`can't access property "onclick", $(...) is null\`。已加空判：按钮不存在则跳过绑定。
 - 🔑 **修复「修改代码」权限设了不生效**：后端 \`ALL_PERMS\` 白名单此前缺失 \`edit_code\`，保存时被过滤丢弃，但校验点仍在查 \`edit_code\`，导致「授予了却没生效」。前后端权限位统一补齐为 15 项（封禁 / 删除 / 限制 / VIP / 功能 / 各内容管理 / 查看 / 编辑代码 / 管理管理员），并新增旧键映射兼容历史数据。
@@ -49,14 +81,20 @@ mdqp 的主要版本变动记录。当前部署版本 **v4.15.0**。
 
 ## v4.14.4 · 2026-09-20（公告彻底加固 + 工单内容预览）
 
+> 🔗 部署预览：https://490f6239.mdqp.pages.dev
+
 - 🛡 **公告接口再次加固**：\`PUT/DELETE /api/announcements\` 的身份校验（\`getIdentity\`/\`isAdminIdentity\`）原本在 try/catch 之外，一旦身份解析偶发异常会裸 500 拖垮 \`/admin\`。现已统一包裹，任何异常都判为未授权（403）而非 500；清理「保留最新 5 条」逻辑改为非致命——即便清理失败，已发布的公告不受影响、接口仍返回成功。杜绝任何来源的裸 500。
 - 👁 **工单列表内容预览**：工单中心每张卡片「下面小字」新增内容开头一段预览（最多 100 字、两行截断），列表接口同步返回 \`content\` 字段，一眼看清工单大意。
 
 ## v4.14.3 · 2026-09-19（修复举报提交 400）
 
+> 🔗 部署预览：https://379b3183.mdqp.pages.dev
+
 - 🐛 **修复举报提交返回 HTTP 400**：\`POST /api/tickets\` 在 \`category=report\` 时由 \`reason\`+\`detail\` 拼装内容，但服务端在拼装前先校验 \`content\` 非空，而举报请求不带 \`content\` 字段，导致每次举报都被 \`empty_content\` 拒绝（返回 25 字节 \`{"error":"empty_content"}\`）。已将举报类豁免出该空内容校验，举报恢复正常。
 
 ## v4.14.2 · 2026-09-19（公告加固 + 通知系统 + 举报适配）
+
+> 🔗 部署预览：https://7f3d3bef.mdqp.pages.dev
 
 - 🛡 **公告接口加固**：\`PUT/DELETE /api/announcements\` 补齐 try/catch 与 D1 偶发抖动单次重试，失败返回友好 JSON 而非裸 500；后端错误上报补齐 HTTP method，消除此前「GET /api/announcements 500」误报（\`/admin\` 发布/删除公告不再静默崩）。
 - 🔔 **通知系统落地（工单 / 评论）**：你的工单被管理员处理（状态变更）、工单收到新回复、你的剪贴板收到新评论时，相关用户将收到站内通知（铃铛红点 + 未读角标 + 分类筛选）；通知相关接口全部加故障隔离，表缺失/异常降级为空、不再拖垮整站。
@@ -64,6 +102,8 @@ mdqp 的主要版本变动记录。当前部署版本 **v4.15.0**。
 - 🗄️ 数据库：\`notifications\` 表（v4.5 引入，此前迁移未实际落库，本次通过 \`migrate-notifications.mjs\` 补齐到生产 D1）支撑上述通知；管理后台公告发布/删除失败时 toast 显示真实错误信息。
 
 ## v4.14.0 · 2026-09-19（统一工单系统：举报 + 反馈合并，仿洛谷）
+
+> 🔗 部署预览：https://5b506e49.mdqp.pages.dev
 
 - 🆕 **举报与反馈合并为统一工单系统**：新增 \`/tickets\` 工单中心（洛谷式卡片列表 + 详情页），所有用户均可**公开查看**工单与处理进度，管理员可在详情页改状态、写处理说明、回复（标记为官方回复）、删除关联违规内容或删除工单。
 - 🆕 工单分类：\`程序缺陷 / 功能建议 / 内容举报 / 其他\`；状态：\`待处理 / 处理中 / 已解决 / 已驳回\`（已驳回仅管理员可见）。
@@ -74,6 +114,8 @@ mdqp 的主要版本变动记录。当前部署版本 **v4.15.0**。
 
 ## v4.14.1 · 2026-09-19（工单写入改独立页 + Markdown 编辑器）
 
+> 🔗 部署预览：https://063464e5.mdqp.pages.dev
+
 - 🆕 **工单写入搬到独立页 \`/tickets/new\`**：原「发起工单」弹窗改为整页编辑器——左侧 Markdown 输入（工具栏 + 实时预览，复用站点编辑器体验），右侧实时渲染，支持标题与分类（程序缺陷 / 功能建议 / 其他）。
 - 🐞 **Bug 反馈保留结构化格式**：从报错弹窗点「🐞 反馈给站长」、命令面板「上报最近一次报错」、或横幅「去反馈」，跳到新工单页时自动预填「错误类型 / 发生时间 / 发生页面 / 错误信息 / 运行环境 / 最近控制台日志 + 我当时的操作 / 期望结果」模板；手动切到「程序缺陷」分类且内容为空时也会自动带出该模板。
 - 🔧 联动：原 \`/feedback\` 别名、「＋ 发起工单」按钮、报错一键反馈现在统一跳 \`/tickets/new\`；旧的 \`openNewTicketModal\` 弹窗已删除，避免两套写入入口腐烂。
@@ -82,12 +124,16 @@ mdqp 的主要版本变动记录。当前部署版本 **v4.15.0**。
 
 ## v4.13.2 · 2026-09-19（访客可只读查看评论）
 
+> 🔗 部署预览：https://a482a261.mdqp.pages.dev
+
 - 🆕 **访客可查看评论**：详情页评论区不再对未登录访客隐藏已有评论。访客现在能看到全部评论（只读），仅隐藏「发表评论」输入框；发表仍受服务端登录校验（\`POST /api/comments\` 非登录返回 401），后台读取接口本就不限登录。
 - 🐞 修复点：\`loadComments\` 原先对访客直接 \`return\` 只显示占位提示、从不拉取评论，现已改为先拉取并渲染评论列表，再按登录态决定是否显示输入框。
 
 ---
 
 ## v4.13.1 · 2026-09-19（修复长内容编辑器滚动乱跳）
+
+> 🔗 部署预览：https://c524603d.mdqp.pages.dev
 
 - 🐞 **修复长内容编辑时滚动乱跳/闪烁**：复制一大坨内容后，向上滚动编辑会闪一下跳回底部、用滚动条弄到顶部后稍微下滑又直接闪到底部。
 - 🔧 根因有二：① \`autoGrow\` 每次输入都把 textarea \`height:'auto'\` 塌缩再设回，重置了内部滚动位置；② 预览默认开启，每次输入 \`updatePreview\` 重建预览 \`innerHTML\` 清空 \`pv.scrollTop\`，经滚动同步把编辑器滚动位置拽走。
@@ -446,9 +492,9 @@ function roleBadge(role, opts = {}) {
 
 /** v4.8.2: 他人身份 tag —— 用在首页卡片与剪贴板页的用户名后面（管理员 / 开发者 / 有效 VIP）
  *  VIP 需校验 vip_until 是否过期，过期就不再显示（与 isVip() 判定保持一致）。 */
-function ownerBadge(role, isVipFlag, vipUntil) {
+function ownerBadge(role, isVipFlag, vipUntil, adminLevel) {
   if (role === 'developer') return '<span class="badge badge-role badge-dev owner-tag">🛠 开发者</span>';
-  if (role === 'admin') return '<span class="badge badge-role badge-admin badge-admin-lvl1 owner-tag">🛡 管理员</span>';
+  if (role === 'admin') { const lvl = Math.max(1, Math.min(5, adminLevel || 1)); return `<span class="badge badge-role badge-admin badge-admin-lvl${lvl} owner-tag">🛡 管理员</span>`; }
   if (isVipFlag) {
     let ok = true;
     if (vipUntil) {
@@ -657,6 +703,46 @@ function setupToc(toggleBtn, panel, contentEl) {
   panel.onclick = (e) => { const a = e.target.closest('[data-toc]'); if (a) { const t = document.getElementById(a.dataset.toc); if (t) t.scrollIntoView({ behavior: 'smooth', block: 'start' }); } };
 }
 
+// ==================== v4.16.0: 阅读模式（全屏纯净阅读） ====================
+function openReadingMode({ title, meta, content }) {
+  const ov = $('#readOverlay');
+  $('#readTitle').textContent = title || '无标题';
+  $('#readMeta').textContent = meta || '';
+  renderMd($('#readContent'), content || '');
+  ov.classList.add('open');
+  ov.setAttribute('aria-hidden', 'false');
+  document.body.style.overflow = 'hidden';
+  const toc = $('#readToc'); toc.classList.add('hidden'); toc.innerHTML = '';
+  const sc = $('#readScroll'); if (sc) sc.scrollTop = 0;
+}
+function closeReadingMode() {
+  const ov = $('#readOverlay');
+  if (!ov || !ov.classList.contains('open')) return;
+  ov.classList.remove('open');
+  ov.setAttribute('aria-hidden', 'true');
+  const toc = $('#readToc'); if (toc) toc.classList.add('hidden');
+  document.body.style.overflow = '';
+}
+function initReadingMode() {
+  const closeBtn = $('#readCloseBtn'); if (closeBtn) closeBtn.onclick = closeReadingMode;
+  const tocBtn = $('#readTocBtn'); const tocPanel = $('#readToc');
+  if (tocBtn && tocPanel) {
+    tocBtn.onclick = () => {
+      if (tocPanel.classList.contains('hidden')) {
+        tocPanel.innerHTML = buildOutline($('#readContent'));
+        if (tocPanel.innerHTML.trim()) tocPanel.classList.remove('hidden');
+      } else tocPanel.classList.add('hidden');
+    };
+    tocPanel.onclick = (e) => {
+      const a = e.target.closest('[data-toc]');
+      if (a) { const t = document.getElementById(a.dataset.toc); if (t) t.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+    };
+  }
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && $('#readOverlay') && $('#readOverlay').classList.contains('open')) closeReadingMode();
+  });
+}
+
 function timeAgo(s) {
   if (!s) return ''; const t = new Date(s.replace(' ', 'T') + (s.includes('Z') ? '' : 'Z')).getTime(); const d = Date.now() - t;
   if (d < 6e4) return '刚刚'; if (d < 36e5) return Math.floor(d / 6e4) + ' 分钟前'; if (d < 864e5) return Math.floor(d / 36e5) + ' 小时前'; if (d < 2592e6) return Math.floor(d / 864e5) + ' 天前';
@@ -800,7 +886,7 @@ function clipCard(c) {
     oRole = state.me.role; oVip = state.me.is_vip; oUntil = state.me.vip_until;
   }
   const authorHtml = c.owner_type === 'user'
-    ? `<a class="card-author" href="/u/${esc(c.owner_id)}" data-link>${esc(c.owner_name)}</a>${ownerBadge(oRole, oVip, oUntil)}`
+    ? `<a class="card-author" href="/u/${esc(c.owner_id)}" data-link>${esc(c.owner_name)}</a>${ownerBadge(oRole, oVip, oUntil, c.owner_admin_level)}`
     : `<span class="card-author guest">${esc(c.owner_name || '游客')}</span>`;
   // v4.6: 标签 + 置顶按钮（仅在我的剪贴板渲染时显示）
   const tagsArr = Array.isArray(c.tags) ? c.tags : [];
@@ -981,7 +1067,7 @@ async function renderClip(clipId, pwd = '') {
   // v4.8.2: 用户名后的身份 tag（先清旧，避免重复渲染叠加）
   const __oldTag = __an.parentNode.querySelector('.owner-tag');
   if (__oldTag) __oldTag.remove();
-  if (data.owner_type === 'user') __an.insertAdjacentHTML('afterend', ownerBadge(data.owner_role, data.owner_is_vip, data.owner_vip_until));
+  if (data.owner_type === 'user') __an.insertAdjacentHTML('afterend', ownerBadge(data.owner_role, data.owner_is_vip, data.owner_vip_until, data.owner_admin_level));
   if (data.owner_type === 'user') { a.href = '/u/' + data.owner_id; a.setAttribute('data-link', ''); a.classList.remove('no-link'); }
   else { a.href = 'javascript:void(0)'; a.removeAttribute('data-link'); a.classList.add('no-link'); }
 
@@ -1003,7 +1089,7 @@ async function renderClip(clipId, pwd = '') {
   $('#clipBadges').innerHTML = badges.join('');
 
   // 操作按钮
-  $('#clipTools').innerHTML = `<button class="btn btn-sm" id="outlineBtn">📑 目录</button>`;
+  $('#clipTools').innerHTML = `<button class="btn btn-sm" id="readModeClipBtn">📖 阅读</button><button class="btn btn-sm" id="outlineBtn">📑 目录</button>`;
   if (data.can_edit) {
     $('#clipTools').innerHTML += `<a class="btn btn-sm" href="/edit/${esc(data.clip_id)}" data-link>✏️ 编辑</a><button class="btn btn-sm btn-danger" id="delBtn">🗑 删除</button>`;
     $('#delBtn').onclick = async () => { if (!confirm('确定删除？')) return; const r = await api(`/api/clips/${encodeURIComponent(data.clip_id)}`, { method: 'DELETE' }); if (r.ok) { toast('已删除'); go('/'); } else toast('删除失败：' + (r.data?.error || r.status), 'err'); };
@@ -1014,6 +1100,11 @@ async function renderClip(clipId, pwd = '') {
     $('#reportBtn').onclick = () => openReportModal(data.clip_id);
   }
   setupToc($('#outlineBtn'), $('#clipOutline'), $('#clipContent'));
+  $('#readModeClipBtn').onclick = () => openReadingMode({
+    title: data.title || '无标题',
+    meta: `${data.owner_name || '游客'} · ${timeAgo(data.created_at)}发布${data.updated_at !== data.created_at ? ' · 已编辑' : ''}`,
+    content: data.content
+  });
 
   // 分享
   const url = location.origin + '/c/' + data.clip_id;
@@ -1295,12 +1386,16 @@ function openPermsModal(displayName, current) {
          <select id="promLevel" class="input input-sm">${lvlOpts.map((l) => `<option value="${l}"${l === curLvl ? ' selected' : ''}>${l} 级${l === maxLvl ? '（最高可授）' : ''}</option>`).join('')}</select></div>`
       : `<p class="muted" style="margin:10px 0 4px">⚠️ 你是最低层级，无法授予或调整管理员身份。</p>`;
     const groupsHtml = PERM_GROUPS.map((g) => `<div class="perm-group"><div class="perm-group-title">${g.title}</div>${g.perms.map((p) => `<label class="ff-item"><input type="checkbox" data-perm="${p}" ${curPerms[p] ? 'checked' : ''}> <span>${PERM_LABELS[p] || p}</span></label>`).join('')}</div>`).join('');
+    const allChecked = ALL_PERMS.every((p) => curPerms[p]);
     const body = `<p class="muted" style="margin:0 0 8px">为 <b>${esc(displayName)}</b> 设置管理员权限（可多选）：</p>
+      <label class="ff-item" style="font-weight:600;margin-bottom:6px"><input type="checkbox" id="promAll"${allChecked ? ' checked' : ''}> <span>全选 / 全不选</span></label>
       <div class="perm-groups">${groupsHtml}</div>${levelHtml}`;
     const canSave = maxLvl >= 1;
     const m = openModal('管理员权限设置', body);
     m.foot.innerHTML = `<button class="btn btn-sm" id="promCancel">取消</button><button class="btn btn-sm btn-primary" id="promSave"${canSave ? '' : ' disabled'}>确认</button>`;
     m.foot.querySelector('#promCancel').onclick = () => { closeModal(); resolve(null); };
+    const allBox = m.body.querySelector('#promAll');
+    if (allBox) allBox.onchange = () => { m.body.querySelectorAll('[data-perm]').forEach((c) => { c.checked = allBox.checked; }); };
     m.foot.querySelector('#promSave').onclick = () => {
       if (!canSave) return;
       const perms = {}; m.body.querySelectorAll('[data-perm]').forEach((c) => { perms[c.dataset.perm] = c.checked; });
@@ -1705,9 +1800,9 @@ async function renderMe() {
       <div class="profile-top">
         ${avatarHtml(me.avatar, me.name)}
         <div class="profile-info">
-          <h1 class="profile-name">${esc(me.name)} ${roleBadge(me.role, { is_vip: me.is_vip })}${vipBadge} ${trustBadge(me.trust_level || 0)}</h1>
+          <h1 class="profile-name">${esc(me.name)} ${roleBadge(me.role, { is_vip: me.is_vip, permLevel: myLevel() })}${vipBadge} ${trustBadge(me.trust_level || 0)}</h1>
           ${sigHtml}
-          <p class="muted">已登录 · 剪贴板有配额限制${me.role === 'developer' ? ' · 你是本站开发者' : me.role === 'admin' ? ' · 你是管理员' : ''}</p>
+          <p class="muted">已登录 · 剪贴板有配额限制${me.role === 'developer' ? ' · 你是本站开发者' : me.role === 'admin' ? ' · 你是管理员（层级 ' + (me.admin_level || 1) + '/5）' : ''}</p>
           ${bioHtml}
           ${badgesHtml}
         </div>
@@ -1861,13 +1956,18 @@ async function loadMyClips() {
 async function renderPage(slug) {
   if (slug === 'changelog') {
     showView('page'); $('#pageTitle').textContent = '📝 更新日志'; $('#pageMeta').textContent = 'mdqp 主要版本变动记录 · 随代码发布自动更新';
-    const el = $('#pageContent'); el.className = 'markdown-body changelog'; renderMd(el, CHANGELOG_MD); $('#pageTools').innerHTML = ''; return;
+    const el = $('#pageContent'); el.className = 'markdown-body changelog'; renderMd(el, CHANGELOG_MD);
+    $('#pageTools').innerHTML = `<button class="btn btn-sm" id="readModePageBtn">📖 阅读</button>`;
+    $('#readModePageBtn').onclick = () => openReadingMode({ title: '📝 更新日志', meta: $('#pageMeta').textContent, content: CHANGELOG_MD });
+    return;
   }
   showView('page'); $('#pageContent').className = 'markdown-body';
   const { ok, data } = await api('/api/pages/' + slug);
   if (!ok || !data?.page) { $('#pageTitle').textContent = slug === 'help' ? '使用帮助' : '关于'; $('#pageMeta').textContent = ''; $('#pageContent').innerHTML = emptyHTML('clips', '这个页面还不存在', ''); $('#pageTools').innerHTML = ''; return; }
   const p = data.page; $('#pageTitle').textContent = p.title || slug; $('#pageMeta').textContent = p.updated_at ? `更新于 ${esc(timeAgo(p.updated_at))}${p.updated_by ? ' · 由 ' + esc(p.updated_by) + ' 编辑' : ''}` : '';
-  renderMd($('#pageContent'), p.content); $('#pageTools').innerHTML = isAdmin() ? `<a class="btn btn-sm" href="/edit-page/${esc(slug)}" data-link>✏️ 编辑此页</a><button class="btn btn-sm" id="pageOutlineBtn">📑 目录</button>` : '';
+  renderMd($('#pageContent'), p.content);
+  $('#pageTools').innerHTML = `<button class="btn btn-sm" id="readModePageBtn">📖 阅读</button>` + (isAdmin() ? `<a class="btn btn-sm" href="/edit-page/${esc(slug)}" data-link>✏️ 编辑此页</a><button class="btn btn-sm" id="pageOutlineBtn">📑 目录</button>` : '');
+  $('#readModePageBtn').onclick = () => openReadingMode({ title: p.title || slug, meta: $('#pageMeta').textContent, content: p.content });
   const ob = $('#pageOutlineBtn'); if (ob) setupToc(ob, $('#pageOutline'), $('#pageContent'));
 }
 
@@ -2291,8 +2391,15 @@ async function loadAdminClips() {
     <td class="admin-actions"><a class="btn btn-sm" href="/c/${esc(c.clip_id)}" data-link>查看</a><button class="btn btn-sm btn-danger" data-delclip="${esc(c.clip_id)}">删除</button></td>
   </tr>`).join('');
   box.innerHTML = `<div class="list-head"><h2>📋 剪贴板管理（${data.clips.length} 条）</h2>
+    <button class="btn btn-sm" id="cleanExpiredBtn" style="margin-right:8px">🧹 清理过期(&gt;3天)</button>
     <input id="adminClipSearch" class="input input-sm admin-search" placeholder="🔍 搜索标题 / 作者"></div>
     <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>标题</th><th>作者</th><th>公开</th><th>登录可见</th><th>读者上限</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  const ce = $('#cleanExpiredBtn');
+  if (ce) ce.onclick = async () => {
+    if (!confirm('删除所有「已过期且超过 3 天」的剪贴板？此操作不可恢复')) return;
+    const r = await api('/api/admin/clips/expired', { method: 'DELETE' });
+    if (r.ok) { toast('已清理 ' + (r.data?.deleted || 0) + ' 条过期剪贴板'); loadAdminClips(); } else toast('清理失败', 'err');
+  };
   const cs = $('#adminClipSearch');
   if (cs) cs.oninput = (e) => { const q = e.target.value.trim().toLowerCase(); box.querySelectorAll('tbody tr').forEach((tr) => { tr.style.display = !q || tr.textContent.toLowerCase().includes(q) ? '' : 'none'; }); };
   $$('#adminBody [data-delclip]').forEach((b) => b.onclick = async () => {
@@ -3762,7 +3869,7 @@ window.addEventListener('popstate', render);
   initTheme(); const mt = $('#menuToggle'); if (mt) mt.onclick = () => document.body.classList.toggle('nav-open');
   const ov = $('#navOverlay'); if (ov) ov.onclick = closeNav; setupCmdk();
   setupAuthModal(); loadAuthMethods();
-  setupSetPwModal(); setupRefreshGuide(); setupSettingsModal(); setupNotifBell();
+  setupSetPwModal(); setupRefreshGuide(); setupSettingsModal(); setupNotifBell(); initReadingMode();
   const navOiwb = $('#navOiwb'); if (navOiwb) navOiwb.onclick = (e) => { e.preventDefault(); goOiwb(); };
   installErrorReporter(); // v4.5.2：报错自动捕获 + 一键反馈
   // 侧边栏折叠（仅桌面生效，状态持久化）
