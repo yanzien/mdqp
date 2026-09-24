@@ -806,6 +806,22 @@
   </div>
 </div>
 
+<!-- ========== v4.16.0 阅读模式（全屏纯净阅读） ========== -->
+<div id="readOverlay" class="read-overlay" aria-hidden="true">
+  <div class="read-topbar">
+    <button class="read-btn read-close" id="readCloseBtn" title="退出阅读（Esc）">✕ 退出</button>
+    <button class="read-btn" id="readTocBtn" title="目录">📑 目录</button>
+  </div>
+  <div class="read-scroll" id="readScroll">
+    <article class="read-article">
+      <h1 class="read-title" id="readTitle"></h1>
+      <div class="read-meta" id="readMeta"></div>
+      <div class="read-content markdown-body" id="readContent"></div>
+    </article>
+  </div>
+  <aside id="readToc" class="read-toc hidden"></aside>
+</div>
+
 <script src="/app.js"></script>
 </body>
 </html>
