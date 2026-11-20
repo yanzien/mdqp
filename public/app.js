@@ -35,9 +35,21 @@ function copy(text, msg) {
 // 更新日志：随代码发布自动同步
 const CHANGELOG_MD = `# 📝 更新日志
 
-mdqp 的主要版本变动记录。当前部署版本 **v4.33.0**。
+mdqp 的主要版本变动记录。当前部署版本 **v4.34.0**。
 
 ---
+
+## v4.34.0 · 2026-11-20（权益不再空头：版本历史 + 一键导出）
+
+> 🔗 部署预览：https://2fd2dfd9.mdqp.pages.dev
+
+上次核验被人揭穿：权益表挂着「版本历史」和「导出全部数据」，点了却没反应——纯画饼。这次两个都真做了。
+
+- 🕒 **版本历史**：每次改剪贴板自动把旧版留一份。L1 留 3 份、L2 留 10 份、VIP 不限（L0 没有，升等级就有）。详情页「🕒 历史版本」能看时间、谁改的、内容摘要，一键回滚；回滚前还会把当前内容也存一份，手滑了有后悔药。
+- 📦 **导出全部数据**：我的页面新增「📦 导出数据」，点一下把所有剪贴板打包成 JSON 下载，标题、正文、标签、公开状态和日期都在里面。L1 及以上或 VIP 才能用——权益表那格写着 ❌，得说话算话。
+- ⚠️ 顺带更正上次核验：徽章其实早就有了（VIP ⭐、信任等级 🛡、成就徽章都是真家伙），是我关键词搜错了冤枉它，这次没动。
+
+配套加了 \`clip_versions\` 表和三条接口，老数据不受影响——从你下一次编辑开始才会留版本。
 
 ## v4.33.0 · 2026-10-27（全端适配：手机 / 平板 / 桌面 / 刘海屏 / 横屏）
 
@@ -2581,6 +2593,50 @@ async function loadHomeMine() {
 }
 
 // ==================== 详情（含评论 + 登录门禁） ====================
+// v4.34: 导出我的全部剪贴板（L1+ / VIP 权益）
+async function exportMyData() {
+  const { ok, data } = await api('/api/me/export');
+  if (!ok) { toast('导出失败：' + (data?.message || data?.error || '?'), 'err'); return; }
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'mdqp-export-' + new Date().toISOString().slice(0, 10) + '.json';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  toast('已导出 ' + data.count + ' 条剪贴板');
+}
+
+// v4.34: 剪贴板历史版本（编辑时自动留存；可预览并恢复）
+async function openHistoryModal(clipId) {
+  const { ok, data } = await api('/api/clips/' + encodeURIComponent(clipId) + '/versions');
+  if (!ok) { toast('加载失败：' + (data?.message || data?.error || '?'), 'err'); return; }
+  const list = Array.isArray(data.versions) ? data.versions : [];
+  let body;
+  if (!list.length) {
+    body = `<p class="muted">${esc(data.message || '还没有历史版本。编辑剪贴板时会自动留存旧内容。')}</p>`;
+  } else {
+    body = `<p class="muted">共 ${list.length} 个历史版本${data.limit > 0 ? ` · 最多保留 ${data.limit} 个` : ''}。恢复前会先把当前内容存成新版本。</p>` +
+      list.map((v) => `<div class="hist-item" style="border:1px solid var(--border);border-radius:10px;padding:10px;margin-bottom:8px">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><b>#${v.id}</b><span class="muted">${esc(timeAgo(v.created_at))}</span><span class="muted">${esc(v.saved_by || '')}</span><button class="btn btn-sm hist-restore" data-vid="${v.id}" style="margin-left:auto">↩ 恢复此版</button></div>
+        <div style="font-weight:600;margin:6px 0">${esc(v.title || '无标题')}</div>
+        <pre class="hist-preview" style="max-height:120px;overflow:auto;white-space:pre-wrap;word-break:break-word;font-size:12px">${esc((v.content || '').slice(0, 500))}${v.content && v.content.length > 500 ? '…' : ''}</pre>
+      </div>`).join('');
+  }
+  const m = openModal('🕒 历史版本', body);
+  m.foot.innerHTML = `<button class="btn" id="histClose">关闭</button>`;
+  $('#histClose').onclick = closeModal;
+  m.body.querySelectorAll('.hist-restore').forEach((btn) => {
+    btn.onclick = async () => {
+      if (!confirm('确定恢复到这个版本？当前内容会先存成一个新版本。')) return;
+      const r = await api('/api/clips/' + encodeURIComponent(clipId) + '/restore', {
+        method: 'POST', body: JSON.stringify({ version_id: Number(btn.dataset.vid) })
+      });
+      if (r.ok) { closeModal(); toast('已恢复，正在刷新…'); location.reload(); }
+      else toast('恢复失败：' + (r.data?.message || r.data?.error || r.status), 'err');
+    };
+  });
+}
+
 async function renderClip(clipId, pwd = '') {
   track('clip.view', clipId, ''); // M3 埋点（旁路）
   showView('clip'); $('#clipArticle').classList.add('hidden');
@@ -2655,7 +2711,8 @@ async function renderClip(clipId, pwd = '') {
   // 操作按钮
   $('#clipTools').innerHTML = `<button class="btn btn-sm" id="readModeClipBtn">📖 阅读</button><button class="btn btn-sm" id="outlineBtn">📑 目录</button>`;
   if (data.can_edit) {
-    $('#clipTools').innerHTML += `<a class="btn btn-sm" href="/edit/${esc(data.clip_id)}" data-link>✏️ 编辑</a><button class="btn btn-sm btn-danger" id="delBtn">🗑 删除</button>`;
+    $('#clipTools').innerHTML += `<a class="btn btn-sm" href="/edit/${esc(data.clip_id)}" data-link>✏️ 编辑</a><button class="btn btn-sm" id="histBtn">🕒 历史版本</button><button class="btn btn-sm btn-danger" id="delBtn">🗑 删除</button>`;
+    $('#histBtn').onclick = () => openHistoryModal(data.clip_id);
     $('#delBtn').onclick = async () => { if (!confirm('确定删除？')) return; const r = await api(`/api/clips/${encodeURIComponent(data.clip_id)}`, { method: 'DELETE' }); if (r.ok) { toast('已删除'); go('/'); } else toast('删除失败：' + (r.data?.error || r.status), 'err'); };
   }
   // v4.13: 举报入口（仅登录用户可见）
@@ -3437,6 +3494,7 @@ async function renderMe() {
       ${linkedAccountChips(linked, true)}
       <div class="profile-stats">
         <a class="btn btn-sm" href="/u/${esc(me.userId)}" data-link>查看公开主页</a>
+        <button class="btn btn-sm" id="meExportBtn">📦 导出数据</button>
         <a class="btn btn-sm" href="/invite" data-link>🎁 邀请好友</a>
         <a class="btn btn-sm" href="/vip" data-link>⭐ VIP</a>
         <a class="btn btn-sm btn-primary" href="/new" data-link>＋ 新建</a>
@@ -3446,6 +3504,8 @@ async function renderMe() {
 
     // 设置弹窗入口
     const meSettingsBtn = $('#meSettingsBtn'); if (meSettingsBtn) meSettingsBtn.onclick = openSettingsModal;
+    // v4.34: 导出全部数据（L1+ / VIP）
+    const meExportBtn = $('#meExportBtn'); if (meExportBtn) meExportBtn.onclick = exportMyData;
     // 信任等级进度（v4.5.2 维持制）
     renderTrustProgress($('#meTrustProgress'), me.trust_progress);
     // 战绩概览：详细战绩（cp:summary）暂无法使用，仅保留竞赛名片（card.svg）
