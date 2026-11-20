@@ -19,7 +19,7 @@ const app = new Hono();
 
 const GUEST_LIMIT = 5;
 const PAGE_SIZE = 20;
-const VERSION = '4.16.0';
+const VERSION = '4.33.0';
 const SEARCH_MAX = 100;
 const RESERVED = new Set([
   'api', 'raw', 'new', 'edit', 'u', 'user', 'users', 'admin', 'login', 'logout',
@@ -33,6 +33,90 @@ const FEATURE_KEYS = ['custom_slug', 'max_views', 'password', 'expiry', 'collabo
 const DEFAULT_FEATURES = { custom_slug: 0, max_views: 1, password: 1, expiry: 1, collaboration: 1, login_required: 1, max_readers: 0, comments: 1 };
 
 app.use('/api/*', cors());
+
+// ========== 全局 API 中间件（必须注册在所有 app.get/post 之前！） ==========
+// ⚠️ v4.31.6 教训：Hono 按**注册顺序**执行处理器。中间件若注册在路由之后，
+//    路由 handler 直接返回响应、链条终止 → 中间件永不执行，静默失效。
+//    这两个中间件曾因此双双沦为死代码（表现为 IP 封禁不生效 + 额度恒为 0）。
+
+// --- ① IP / 网段封禁（注册/登录路径的拦截另在 oauth.js 里做）---
+// 封禁列表在隔离实例内缓存 60s：否则每个 API 请求都要 SELECT 一次 ip_bans，
+// 这正是拖垮 D1 读额度的开销；封禁是低频管理操作，1 分钟生效延迟可接受。
+let _ipBanCache = { at: 0, list: [] };
+
+// v4.32.x：昵称（display_name）改名复用注册时的用户名限制，防止仿冒/脏词/非法字符卡 bug
+// 与 oauth.js 保持一致（不跨文件 import，避免循环依赖）
+const USERNAME_RE = /^[A-Za-z0-9_\-\u4e00-\u9fa5]+$/;
+const USERNAME_BANNED_SUBSTR = ['nazi', 'gay', '纳粹', '共产党', '国民党', '拉', '给'];
+const USERNAME_BANNED_WORDS = ['la'];
+function normalizeUserName(s) {
+  return String(s || '').toLowerCase().replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u2064\uFEFF]/g, '');
+}
+function checkUsernameBanned(username) {
+  const n = normalizeUserName(username);
+  if (!n) return null;
+  if (n !== 'yanzien' && (n.includes('yanzie') || n.replace(/n$/, '').includes('yanzie'))) return 'yanzie';
+  for (const w of USERNAME_BANNED_SUBSTR) if (n.includes(w)) return w;
+  for (const w of USERNAME_BANNED_WORDS) {
+    const re = new RegExp('(?<![a-z0-9])' + w + '(?![a-z0-9])');
+    if (re.test(n)) return w;
+  }
+  return null;
+}
+async function ipBansCached(db) {
+  const now = Date.now();
+  if (now - _ipBanCache.at < 60_000) return _ipBanCache.list;
+  try {
+    const rows = await db.prepare('SELECT id, kind, value, reason, ban_until FROM ip_bans').all();
+    _ipBanCache = { at: now, list: rows.results || [] };
+  } catch { /* 查询失败沿用旧缓存，避免因故障误封 */ }
+  return _ipBanCache.list;
+}
+app.use('/api/*', async (c, next) => {
+  const path = new URL(c.req.url).pathname;
+  // 放行健康检查与治理端点本身，否则管理员无法自救
+  if (path === '/api/health' || path.startsWith('/api/admin/ip-bans')) return next();
+  const ip = clientIp(c);
+  let ban = null;
+  if (ip && c.env.db) {
+    const list = await ipBansCached(c.env.db);
+    const nowStr = new Date().toISOString().slice(0, 19).replace('T', ' ');
+    for (const r of list) {
+      if (r.ban_until && String(r.ban_until) <= nowStr) continue; // 已过期
+      if (r.kind === 'ip' && r.value === ip) { ban = r; break; }
+      if (r.kind === 'cidr' && cidrContains(r.value, ip)) { ban = r; break; }
+    }
+  }
+  if (!ban) return next();
+  const until = ban.ban_until ? String(ban.ban_until).replace(' ', 'T') + 'Z' : null;
+  const msg = '你所在的 IP 已被封禁' + (ban.reason ? `（原因：${ban.reason}）` : '') + (until ? `，解封时间：${until}（UTC）` : '（永久）');
+  return c.json({ error: 'ip_banned', message: msg, ban_until: until }, 403);
+});
+
+// --- ② 配额计量 + 定期落盘 + 超阈值自动刹车 ---
+// 放在 IP 封禁中间件**之后**，这样被封 IP 的请求不计入统计（它们本来也打不到 D1）。
+app.use('/api/*', async (c, next) => {
+  const path = new URL(c.req.url).pathname;
+  // 计量：D1 读接口按经验行数估，KV/健康检查等按 0（不烧 D1）
+  // 估算口径偏保守（宁可高估），确保不会真的撞到上限才发现。
+  const D1_COST = {
+    '/api/clips': 60, '/api/me': 30, '/api/stats': 80,
+    '/api/chat/conversations': 40, '/api/chat/unread': 60,
+    '/api/admin/users': 120, '/api/admin/ip-groups': 90, '/api/admin/chat-conversations': 90
+  };
+  let rows = 0;
+  for (const [prefix, cost] of Object.entries(D1_COST)) {
+    if (path === prefix || path.startsWith(prefix + '/') || path.startsWith(prefix + '?')) { rows = cost; break; }
+  }
+  if (rows) quotaAddD1(c.env.SITE_KV, rows);
+
+  await next();
+
+  // 响应后：落盘（内部限流到每分钟一次）+ 超阈值刹车
+  try { await quotaFlush(c.env.SITE_KV); } catch {}
+  if (rows && _quotaState.trip !== 1) { try { await quotaAutoTrip(c.env.SITE_KV, c.env.db); } catch {} }
+});
+
 
 // ========== 工具函数 ==========
 
@@ -126,7 +210,7 @@ async function getIdentity(c) {
   if (sessionMatch) {
     const p = await verifyJWT(sessionMatch[1], secret);
     if (p) {
-      const ban = await getBanStatus(c.env.db, p.userId);
+      const ban = await getBanStatus(c.env.db, p.userId, c.env.SITE_KV);
       if (ban) return { type: 'banned', userId: p.userId, banReason: ban.reason, banUntil: ban.until };
       return { type: 'user', userId: p.userId, sub: p.sub, name: p.name, avatar: p.avatar };
     }
@@ -135,7 +219,7 @@ async function getIdentity(c) {
   if (auth && auth.startsWith('Bearer ')) {
     const p = await verifyJWT(auth.slice(7), secret);
     if (p) {
-      const ban = await getBanStatus(c.env.db, p.userId);
+      const ban = await getBanStatus(c.env.db, p.userId, c.env.SITE_KV);
       if (ban) return { type: 'banned', userId: p.userId, banReason: ban.reason, banUntil: ban.until };
       return { type: 'user', userId: p.userId, sub: p.sub, name: p.name, avatar: p.avatar };
     }
@@ -146,18 +230,36 @@ async function getIdentity(c) {
 }
 
 /** v4.13: 查询用户当前是否处于「生效中的封禁」。
+ *  v4.30：加 KV 缓存（60s）——封禁判定是**全站每个 API 请求的固定开销**，
+ *  包括高频的聊天轮询，每次都 SELECT users 表会白白吃掉大量读配额。
+ *  封禁是低频变更，缓存 60s 完全可接受；后台改封禁时会主动失效。
  *  过期（ban_until 已过）视为未封禁，并惰性清理，避免反复判定。返回 {reason, until} 或 null。 */
-async function getBanStatus(db, userId) {
+async function getBanStatus(db, userId, kv) {
   if (!userId) return null;
+  const ck = 'ban:' + userId;
+  if (kv) {
+    const cached = await cacheGet(kv, ck);
+    if (cached && typeof cached === 'object') {
+      if (!cached.banned) return null;
+      if (!cached.until) return { reason: cached.reason || '', until: null };
+      const t = new Date(String(cached.until).replace(' ', 'T') + 'Z').getTime();
+      if (Number.isFinite(t) && t > Date.now()) return { reason: cached.reason || '', until: cached.until };
+      // 缓存里已过期：惰性清理
+      try { await cachePut(kv, ck, { banned: 0 }, 60); } catch {}
+      return null;
+    }
+  }
   const u = await db.prepare('SELECT banned, ban_until, ban_reason FROM users WHERE id = ?').bind(String(userId)).first();
-  if (!u || !u.banned) return null;
+  if (!u || !u.banned) { if (kv) await cachePut(kv, ck, { banned: 0 }, 60); return null; }
   if (u.ban_until) {
     const t = new Date(String(u.ban_until).replace(' ', 'T') + 'Z').getTime();
     if (Date.now() >= t) {
       try { await db.prepare('UPDATE users SET banned = 0, ban_until = NULL, ban_reason = NULL WHERE id = ?').bind(String(userId)).run(); } catch { /* ignore */ }
+      if (kv) await cachePut(kv, ck, { banned: 0 }, 60);
       return null;
     }
   }
+  if (kv) await cachePut(kv, ck, { banned: 1, reason: u.ban_reason || '', until: u.ban_until || null }, 60);
   return { reason: u.ban_reason || '', until: u.ban_until || null };
 }
 
@@ -201,6 +303,27 @@ async function hasAdminPerm(db, identity, perm) {
   if (ctx.role === 'developer') return true; // 开发者拥有所有权限
   if (ctx.role !== 'admin') return false;
   return !!ctx.perms[perm];
+}
+
+/** v4.21：管理员「任一」权限命中即放行（避免重复查库） */
+async function hasAnyAdminPerm(db, identity, perms) {
+  if (identity.type !== 'user') return false;
+  const ctx = await getAdminContext(db, identity.userId);
+  if (ctx.role === 'developer') return true;
+  if (ctx.role !== 'admin') return false;
+  return perms.some((p) => !!ctx.perms[p]);
+}
+
+/** v4.21：按剪贴板可见性判定管理员权限——action ∈ view|edit|delete，
+ *  公开板查 {action}_public_clips，私有板查 {action}_private_clips。
+ *  私有剪贴板是最高敏感数据，只有被显式授予 private 系列权限的管理员才可触碰。 */
+async function hasAdminClipPerm(db, identity, row, action) {
+  if (identity.type !== 'user') return false;
+  const ctx = await getAdminContext(db, identity.userId);
+  if (ctx.role === 'developer') return true;
+  if (ctx.role !== 'admin') return false;
+  const scope = row && row.is_public ? 'public' : 'private';
+  return !!ctx.perms[action + '_' + scope + '_clips'];
 }
 
 function parseLinkedAccounts(s) {
@@ -427,14 +550,21 @@ async function notifyTrustUpgrade(db, userId) {
   } catch (e) { /* 通知系统故障不阻断主流程 */ }
 }
 
-// v4.15: 细粒化权限——几乎覆盖所有独立管理动作（用户列表对所有管理员可见，由 isAdminIdentity 控制）
+// v4.15 起细粒化权限；v4.21 拆细剪贴板（公开/私有 × 查看/编辑/删除）并新增网站治理三档。
+// 注意：任何权限名变更都必须同步 public/app.js 的 PERM_LABELS / ALL_PERMS / PERM_GROUPS。
 const ALL_PERMS = [
   'ban_user',            // 封禁 / 解封用户
   'delete_user',         // 删除用户账号
   'set_clip_limit',      // 设置剪贴板数量限制
   'manage_feature',      // 修改用户功能开关
   'manage_vip',          // 授予 / 撤销 VIP
-  'manage_clips',        // 管理剪贴板（查看 / 删除他人剪贴板）
+  // v4.21：剪贴板管理拆成 公开 / 私有 × 查看 / 编辑 / 删除
+  'view_public_clips',   // 查看他人公开剪贴板
+  'edit_public_clips',   // 编辑他人公开剪贴板
+  'delete_public_clips', // 删除他人公开剪贴板
+  'view_private_clips',  // 查看他人私有剪贴板（高敏感）
+  'edit_private_clips',  // 编辑他人私有剪贴板（高敏感）
+  'delete_private_clips',// 删除他人私有剪贴板（高敏感）
   'manage_comments',     // 管理评论（删除他人评论）
   'manage_pages',        // 编辑站点页面（帮助 / 关于等）
   'manage_announcements',// 发布公告 / 删除
@@ -443,17 +573,40 @@ const ALL_PERMS = [
   'manage_settings',     // 站点设置
   'view_code',           // 查看源码（只读）
   'edit_code',           // 编辑并提交代码
-  'manage_admins'        // 管理其他管理员（授予 / 调整权限 / 设层级）——需更高层级
+  'manage_admins',       // 管理其他管理员（授予 / 调整权限 / 设层级）——需更高层级
+  // v4.21：网站托管治理三档（递进蕴含：delete ⊃ ban ⊃ view）
+  'view_sites',          // 查看网站列表
+  'ban_sites',           // 查看 + 封禁 / 解封网站
+  'delete_sites',        // 查看 + 封禁 + 删除网站
+  // v4.32.1：治理类细粒度开关（可由站长逐项授予普通管理员）
+  'manage_ip',           // IP 治理：查看 / 封禁 / 解封 IP 与网段
+  'manage_sites',        // 站点治理统一开关：查看 / 封禁 / 解封 / 删除网站
+  'manage_quota',        // 配额治理：修改 D1 / KV 额度上限
+  'manage_snapshot_quota' // 快照配额治理：设置用户快照配额
 ];
 
-// 旧权限名 → 新权限名（v4.15 重命名，保证存量管理员权限不丢）
-const PERM_LEGACY_MAP = {
-  edit_pages: 'manage_pages',
-  edit_public_clips: 'manage_clips',
-  edit_private_clips: 'manage_clips'
+// 权限蕴含：授予高阶权限即自动拥有其依赖的低阶权限（在 readPerms 里做闭包展开）
+const PERM_IMPLY = {
+  edit_public_clips: ['view_public_clips'],
+  delete_public_clips: ['edit_public_clips', 'view_public_clips'],
+  edit_private_clips: ['view_private_clips'],
+  delete_private_clips: ['edit_private_clips', 'view_private_clips'],
+  ban_sites: ['view_sites'],
+  delete_sites: ['ban_sites', 'view_sites'],
+  // v4.32.1：manage_sites 单一开关蕴含全部站点治理权限
+  manage_sites: ['view_sites', 'ban_sites', 'delete_sites']
 };
 
-/** 读取并归一化管理员权限：补齐全部 ALL_PERMS 键（默认 false），并把旧键映射到新键 */
+// 旧权限名 → 展开后的新权限集合（v4.15 / v4.21 重命名，保证存量管理员权限不丢）
+const PERM_LEGACY_MAP = {
+  edit_pages: ['manage_pages'],
+  edit_public_clips: ['view_public_clips', 'edit_public_clips'],
+  edit_private_clips: ['view_private_clips', 'edit_private_clips'],
+  // v4.20 及以前的「管理剪贴板」是单一布尔，视为同时拥有全部六项（不降级老管理员）
+  manage_clips: ['view_public_clips', 'edit_public_clips', 'delete_public_clips', 'view_private_clips', 'edit_private_clips', 'delete_private_clips']
+};
+
+/** 读取并归一化管理员权限：补齐全部 ALL_PERMS 键（默认 false），旧键展开映射，再做蕴含闭包 */
 function readPerms(raw) {
   const out = {};
   for (const p of ALL_PERMS) out[p] = false;
@@ -464,11 +617,34 @@ function readPerms(raw) {
   else if (raw === undefined || raw === null) console.warn('[mdqp] readPerms(undefined) — 调用方 SELECT 可能漏选了 admin_permissions');
   if (obj && typeof obj === 'object') {
     for (const k of Object.keys(obj)) {
-      const nk = PERM_LEGACY_MAP[k] || k;
-      if (ALL_PERMS.includes(nk)) out[nk] = !!obj[k];
+      if (!obj[k]) continue; // 显式 false 不覆盖其它来源授予的 true
+      const names = PERM_LEGACY_MAP[k] || (ALL_PERMS.includes(k) ? [k] : []);
+      for (const n of names) out[n] = true;
+    }
+  }
+  // 蕴含闭包：delete ⊃ edit ⊃ view、delete_sites ⊃ ban_sites ⊃ view_sites
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const p of ALL_PERMS) {
+      if (!out[p]) continue;
+      for (const q of (PERM_IMPLY[p] || [])) if (!out[q]) { out[q] = true; changed = true; }
     }
   }
   return out;
+}
+
+/** v4.32.3: 权限授予的「包含关系」合并。
+ *  requested: 本次提交的权限（readPerms 已展开）；existing: 目标原有权限；operPerms: 操作者自身权限；operIsDev: 是否开发者。
+ *  - 操作者有权授予的权限：按 submitted 值覆盖（再经 readPerms 展开蕴含，保持一致）。
+ *  - 操作者无权授予的权限：保持目标原值——既不能越权加，也不会被误删。
+ *  droppedOut 收集「试图授予但无权」的权限名，供前端提示。开发者拥有全部权限，直接采用提交值。 */
+function mergeGrantable(requested, existing, operPerms, operIsDev, droppedOut) {
+  if (operIsDev) return readPerms(requested);
+  const merged = {};
+  for (const p of ALL_PERMS) merged[p] = operPerms[p] ? !!requested[p] : !!existing[p];
+  for (const p of ALL_PERMS) if (requested[p] && !operPerms[p]) droppedOut.push(p);
+  return readPerms(merged);
 }
 
 /** 管理员层级：developer=99、admin=admin_level(默认1)、普通用户=0 */
@@ -518,6 +694,319 @@ async function userHasFeature(db, userId, feature) {
   return !!flags[feature];
 }
 
+// ========== v4.27：站点管控（关战 / 功能开关 / 限流 / 零宽识别） ==========
+const DF_CHAT = 1, DF_SITE = 2, DF_CLIPBOARD = 4;
+async function getSiteConfig(db, kv) {
+  let m = {};
+  try {
+    const rows = await db.prepare("SELECT key,value FROM site_settings WHERE key IN ('site_mode','maintenance_title','maintenance_text','disabled_features')").all();
+    (rows.results || []).forEach((r) => { m[r.key] = r.value; });
+  } catch { /* D1 故障降级为默认配置 */ }
+  const df = parseInt(m.disabled_features || '0', 10) || 0;
+  // v4.31：配额超阈值时自动关闭聊天，前端据此隐藏入口（读 KV 不烧 D1）
+  let chatAutoOff = false;
+  try { chatAutoOff = !!(kv && await kv.get('chat_autodisable')); } catch {}
+  return {
+    mode: m.site_mode === 'maintenance' ? 'maintenance' : 'normal',
+    maintenance_title: m.maintenance_title || '网站维护中',
+    maintenance_text: m.maintenance_text || '网站正在维护升级，请稍后再来。',
+    disabled_features: {
+      chat: !!(df & DF_CHAT) || chatAutoOff,
+      site: !!(df & DF_SITE),
+      clipboard: !!(df & DF_CLIPBOARD)
+    },
+    chat_auto_disabled: chatAutoOff
+  };
+}
+function objToDisabledFeatures(o) { let b = 0; if (o) { if (o.chat) b |= DF_CHAT; if (o.site) b |= DF_SITE; if (o.clipboard) b |= DF_CLIPBOARD; } return b; }
+async function isUserFeatureDisabled(db, userId, bit) {
+  const u = await db.prepare('SELECT disabled_features FROM users WHERE id = ?').bind(String(userId)).first();
+  return !!(u && (parseInt(u.disabled_features, 10) || 0) & bit);
+}
+// 不可见字符：零宽空格/连字、BOM、方向控制符、词连接符、全角空格
+const INVISIBLE_RE = /[​-‍﻿‪-‮⁠　]/;
+function hasInvisibleChars(s) { return !!(s && INVISIBLE_RE.test(s)); }
+function stripInvisible(s) { return s ? s.replace(/[​-‍﻿‪-‮⁠　]/g, '') : s; }
+function escHtml(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+// v4.27.1：轻量 KV 缓存（复用 SITE_KV，key 前缀 cache:）——降低 D1 读压力；D1 读配额耗尽时热读仍可服务
+async function cacheGet(kv, key) { try { return await kv.get('cache:' + key, 'json'); } catch { return null; } }
+async function cachePut(kv, key, val, ttl) { try { await kv.put('cache:' + key, JSON.stringify(val), { expirationTtl: ttl }); } catch { /* ignore */ } }
+
+// ========== v4.31：配额计量与自动刹车 ==========
+// 用户诉求：D1/KV 额度到 80% 时自动关闭聊天，并在后台显示进度条。
+//
+// 关键事实：**Cloudflare 不提供查询 D1/KV 已用配额的 API**。所以必须自己做「估算计量」。
+// 计量口径（保守，宁可高估也不要低估到爆）：
+//   - 每命中一次 D1 读接口，按该接口的经验行数计费（_quotaCost）
+//   - 每一次 KV 操作计 1 次
+// 每日窗口 = UTC 00:00 → 次日 00:00（=北京时间 08:00 → 次日 08:00，与用户要求一致）
+//
+// 计量写入必须极轻：每请求都写 KV 会反过来把 KV 也烧光。
+// 因此用**内存计数 + 定时批量落盘**（每 60s 或累计到阈值才 flush），并放进全局变量避免重复声明。
+const _quotaState = globalThis.__mdqpQuotaState || { d1: 0, kv: 0, day: '', lastFlush: 0, trip: 0 };
+globalThis.__mdqpQuotaState = _quotaState;
+
+/** 取当前配额日（UTC 日期，北京时间 08:00 为分界） */
+function quotaDayKey(now = Date.now()) {
+  // UTC 00:00 = 北京 08:00，所以用 UTC 日期即可
+  return new Date(now).toISOString().slice(0, 10);
+}
+/** 免费版默认额度（Cloudflare D1 free: 5M rows/day；KV free: 100k reads/day）。
+ *  v4.31.1：可在后台修改（仅站长），存 KV；读不到时回落到这两个默认值。 */
+const QUOTA_LIMITS_DEFAULT = { d1: 5_000_000, kv: 100_000 };
+/** 触发自动刹车的阈值 */
+const QUOTA_TRIP_RATIO = 0.8;
+
+/** 读取当前生效的额度上限。KV 里有站长自定义值就用，否则用默认值。 */
+async function quotaLimits(kv) {
+  let custom = null;
+  try { custom = await kv?.get('quota_limits', 'json'); } catch {}
+  const d1 = Number(custom?.d1);
+  const kvv = Number(custom?.kv);
+  return {
+    d1: Number.isFinite(d1) && d1 > 0 ? Math.floor(d1) : QUOTA_LIMITS_DEFAULT.d1,
+    kv: Number.isFinite(kvv) && kvv > 0 ? Math.floor(kvv) : QUOTA_LIMITS_DEFAULT.kv,
+    isDefault: !(Number.isFinite(d1) && d1 > 0) && !(Number.isFinite(kvv) && kvv > 0),
+    updated_at: custom?.updated_at || null
+  };
+}
+
+/** 累加本次请求的 D1 读行数估算 + KV 读。纯内存，无 IO。 */
+function quotaAddD1(kv, rows = 1) {
+  if (!kv) return;
+  _quotaState.d1 += rows; _quotaState.kv += 1;
+  _quotaState._pending = _quotaState._pending || { d1: 0, kv: 0 };
+  _quotaState._pending.d1 += rows; _quotaState._pending.kv += 1;
+}
+/** 累加 KV 操作 */
+function quotaAddKv(kv, n = 1) {
+  if (!kv) return;
+  _quotaState.kv += n;
+  _quotaState._pending = _quotaState._pending || { d1: 0, kv: 0 };
+  _quotaState._pending.kv += n;
+}
+
+/**
+ * 批量把内存计数落盘到 KV。每分钟最多一次。
+ * 落盘失败静默（KV 故障不该影响主流程）。
+ */
+async function quotaFlush(kv, force = false) {
+  if (!kv) return;
+  const now = Date.now();
+  const day = quotaDayKey(now);
+  if (_quotaState.day !== day) { // 跨天：归零重新累计
+    _quotaState.day = day; _quotaState.d1 = 0; _quotaState.kv = 0; _quotaState.trip = 0;
+    force = true;
+  }
+  if (!force && now - _quotaState.lastFlush < 60_000) return;
+  const delta = _quotaState._pending;
+  if (!delta) return;
+  _quotaState.lastFlush = now;
+  try {
+    const cur = await kv.get('quota:' + day, 'json') || {};
+    const next = {
+      d1: (cur.d1 || 0) + (delta.d1 || 0),
+      kv: (cur.kv || 0) + (delta.kv || 0),
+      day
+    };
+    // 保留 3 天，够看趋势
+    await kv.put('quota:' + day, JSON.stringify(next), { expirationTtl: 259_200 });
+    _quotaState._pending = { d1: 0, kv: 0 };
+  } catch { /* ignore */ }
+}
+
+// 上面的 flush 需要一个稳定的"本次未落盘增量"，初始化结构
+_quotaState._pending = _quotaState._pending || { d1: 0, kv: 0 };
+
+/** 读取当前配额用量（供后台进度条）。含当日估算 + 可自定义的上限。 */
+async function quotaGet(kv, db) {
+  const day = quotaDayKey();
+  const lim = await quotaLimits(kv);
+  let stored = { d1: 0, kv: 0 };
+  try { stored = (await kv?.get('quota:' + day, 'json')) || { d1: 0, kv: 0 }; } catch {}
+  // 内存里还没落盘的增量也要算进去，否则后台看到的会偏低
+  const p = _quotaState._pending || { d1: 0, kv: 0 };
+  const sameDay = _quotaState.day === day;
+  const d1 = (stored.d1 || 0) + (sameDay ? (p.d1 || 0) : 0);
+  const kvUsed = (stored.kv || 0) + (sameDay ? (p.kv || 0) : 0);
+  const d1Ratio = Math.min(1, d1 / lim.d1);
+  const kvRatio = Math.min(1, kvUsed / lim.kv);
+  return {
+    day,
+    d1: { used: d1, limit: lim.d1, ratio: d1Ratio, percent: Math.round(d1Ratio * 100) },
+    kv: { used: kvUsed, limit: lim.kv, ratio: kvRatio, percent: Math.round(kvRatio * 100) },
+    worst: Math.max(d1Ratio, kvRatio),
+    tripped: _quotaState.trip === 1,
+    limits: lim,
+    defaults: QUOTA_LIMITS_DEFAULT
+  };
+}
+
+/**
+ * 自动刹车：任一配额 ≥ 80% 时，自动关闭聊天功能（写 KV 标记）。
+ * 这是**保护措施**——聊天轮询是最大消耗源，掐掉它能立刻止血。
+ * 不删数据、可一键恢复（管理员在后台点恢复即可）。
+ */
+async function quotaAutoTrip(kv, db, siteKv) {
+  if (!kv) return false;
+  if (_quotaState.trip === 1) return true;
+  const q = await quotaGet(kv, db);
+  if (q.worst < QUOTA_TRIP_RATIO) return false;
+  _quotaState.trip = 1;
+  try { await kv.put('quota_tripped', JSON.stringify({ day: q.day, at: Date.now(), worst: q.worst }), { expirationTtl: 86_400 }); } catch {}
+  console.error(`[quota] 达到 ${Math.round(q.worst * 100)}% 阈值，自动关闭聊天以保护站点（D1 ${q.d1.percent}% / KV ${q.kv.percent}%）`);
+  // 同时打开「降级提示」让用户知道原因，而不是静默消失
+  try { await kv.put('chat_autodisable', '1', { expirationTtl: 86_400 }); } catch {}
+  return true;
+}
+
+/** 供 onError / 中间件等复用的轻量判定（避免重复查 KV） */
+function isChatAutoDisabled(kv) { return kv && _quotaState.trip === 1; }
+
+// v4.28：聊天限流状态（纯内存，零 D1 读）
+// 旧实现每发一条消息都要 SELECT COUNT(*) 扫 chat_messages，是刷屏攻击放大 D1 读配额的主因。
+// 改为进程内时间戳：每人 CHAT_USER_COOLDOWN_MS 冷却 + 全群 CHAT_GROUP_LOCK_MS 全员锁。
+const CHAT_USER_COOLDOWN_MS = 3000;  // 每人 3s 内不得再发
+const CHAT_GROUP_LOCK_MS = 1000;     // 全群收到任意一条消息后 1s 内任何人不得再发
+const _chatLastByUser = new Map();   // userId -> 上次发送时间戳
+const _chatGroupLock = new Map();   // convId -> 最近一条消息时间戳
+function pruneMap(m, cap) { if (m.size <= cap) return; const cut = Date.now() - 3600e3; for (const [k, v] of m) { if (v < cut) m.delete(k); else break; } }
+function chatRateCheck(convId, userId, isGlobal) {
+  const now = Date.now();
+  pruneMap(_chatLastByUser, 5000); pruneMap(_chatGroupLock, 2000);
+  if (isGlobal) {
+    const last = _chatGroupLock.get(convId) || 0;
+    if (now - last < CHAT_GROUP_LOCK_MS) return { error: 'rate_limited', message: '群里有人刚发了消息，请稍候', retry_after: Math.ceil((CHAT_GROUP_LOCK_MS - (now - last)) / 1000) };
+  }
+  const mine = _chatLastByUser.get(userId) || 0;
+  if (now - mine < CHAT_USER_COOLDOWN_MS) return { error: 'rate_limited', message: '发送过快，请 ' + Math.ceil((CHAT_USER_COOLDOWN_MS - (now - mine)) / 1000) + ' 秒后再试', retry_after: Math.ceil((CHAT_USER_COOLDOWN_MS - (now - mine)) / 1000) };
+  return null;
+}
+function chatRateMark(convId, userId) { const now = Date.now(); _chatLastByUser.set(userId, now); _chatGroupLock.set(convId, now); }
+
+// v4.30：聊天消息缓存失效
+// KV list 是最终一致的，不能靠 list 精确删 key；直接删掉该群的 index 标记，
+// 读侧发现 index 缺失即视为失效。这里用「版本号」方案：写消息时递增版本，
+// 读侧把版本拼进 cache key，旧数据自然失效（KV 自身有 TTL 兜底）。
+const CHAT_VER_PREFIX = 'chatver:';
+async function chatBumpVersion(kv, convId) {
+  if (!kv) return;
+  try {
+    const cur = parseInt((await kv.get(CHAT_VER_PREFIX + convId)) || '0', 10) || 0;
+    await kv.put(CHAT_VER_PREFIX + convId, String(cur + 1));
+  } catch { /* KV 不可用时靠 TTL 兜底 */ }
+}
+async function chatVer(kv, convId) {
+  if (!kv) return 0;
+  try { return parseInt((await kv.get(CHAT_VER_PREFIX + convId)) || '0', 10) || 0; } catch { return 0; }
+}
+
+// v4.29：IP 治理工具——IP 归一化、IPv4 数值化、CIDR 匹配
+function clientIp(c) {
+  return (c.req.header('CF-Connecting-IP') || (c.req.header('X-Forwarded-For') || '').split(',')[0].trim() || '').trim();
+}
+/** IPv4 → 32 位无符号整数；非 IPv4（含 IPv6）返回 null */
+function ipToInt(ip) {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(String(ip || '').trim());
+  if (!m) return null;
+  let v = 0;
+  for (let i = 1; i <= 4; i++) { const p = parseInt(m[i], 10); if (p > 255) return null; v = (v * 256) + p; }
+  return v >>> 0;
+}
+function intToIp(n) { return [(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join('.'); }
+/** 校验 CIDR 并返回 {base, mask} 归一化值；非法返回 null */
+function parseCidr(v) {
+  const s = String(v || '').trim(); const i = s.indexOf('/');
+  if (i < 0) return null;
+  const ip = ipToInt(s.slice(0, i)); const bits = parseInt(s.slice(i + 1), 10);
+  if (ip === null || !Number.isInteger(bits) || bits < 0 || bits > 32) return null;
+  const mask = bits === 0 ? 0 : (0xFFFFFFFF << (32 - bits)) >>> 0;
+  return { base: (ip & mask) >>> 0, bits, text: intToIp((ip & mask) >>> 0) + '/' + bits };
+}
+function cidrContains(cidr, ip) {
+  const c = parseCidr(cidr); const v = ipToInt(ip);
+  if (!c || v === null) return false;
+  if (c.bits === 0) return true;
+  const mask = (0xFFFFFFFF << (32 - c.bits)) >>> 0;
+  return ((v & mask) >>> 0) === c.base;
+}
+/** 规范化封禁目标：纯 IP → {kind:'ip'}；CIDR → {kind:'cidr'} 归一化后返回 */
+function normalizeBanTarget(v) {
+  const s = String(v || '').trim();
+  if (!s) return null;
+  const c = parseCidr(s);
+  if (c) return { kind: 'cidr', value: c.text };
+  if (ipToInt(s) !== null) return { kind: 'ip', value: intToIp(ipToInt(s)) };
+  return null;
+}
+/** 查该 IP 是否被封（单 IP + 任意 CIDR 命中）。返回 ban 行或 null；D1 故障视为未封（不因治理功能拖垮全站） */
+async function checkIpBan(db, ip) {
+  if (!ip || !db) return null;
+  const v = ipToInt(ip);
+  if (v === null) return null;
+  try {
+    const rows = await db.prepare(
+      "SELECT * FROM ip_bans WHERE (kind = 'ip' AND value = ?) OR (kind = 'cidr' AND (ban_until IS NULL OR ban_until > datetime('now')))"
+    ).bind(ip).all();
+    const list = rows.results || [];
+    for (const r of list) {
+      if (r.kind === 'ip') return r;
+      if (cidrContains(r.value, ip)) return r;
+    }
+    // 过期 CIDR 惰性清理
+    const stale = (rows.results || []).filter((r) => r.kind === 'cidr' && r.ban_until && new Date(String(r.ban_until).replace(' ', 'T') + 'Z') <= new Date());
+    for (const s of stale) { try { await db.prepare('DELETE FROM ip_bans WHERE id = ?').bind(s.id).run(); } catch {} }
+  } catch { return null; }
+  return null;
+}
+/** 记录注册 IP（供治理视图） */
+async function recordUserIp(db, userId, ip, ua) {
+  if (!db || !ip || ipToInt(ip) === null) return;
+  try {
+    await db.prepare('INSERT INTO user_ips (user_id, ip, ua) VALUES (?, ?, ?)').bind(userId, ip, String(ua || '').slice(0, 200)).run();
+    // 概率清理同 IP 的历史记录，防无限增长
+    if (Math.random() < 0.05) {
+      await db.prepare("DELETE FROM user_ips WHERE created_at < datetime('now','-30 days')").run();
+    }
+  } catch { /* 表未迁移时不阻断注册 */ }
+}
+
+// 站点管控配置（公开只读）
+app.get('/api/site/config', async (c) => {
+  const kv = c.env.SITE_KV;
+  try {
+    if (kv) { const cached = await cacheGet(kv, 'site_config'); if (cached) return c.json(cached); }
+    const cfg = await getSiteConfig(c.env.db, c.env.SITE_KV);
+    if (kv) cachePut(kv, 'site_config', cfg, 300);
+    return c.json(cfg);
+  } catch {
+    return c.json({ mode: 'normal', maintenance_title: '网站维护中', maintenance_text: '网站正在维护升级，请稍后再来。', disabled_features: { chat: false, site: false, clipboard: false }, degraded: true });
+  }
+});
+// 管理员读取完整配置
+app.get('/api/admin/site-config', async (c) => {
+  const db = c.env.db; const id = await getIdentity(c);
+  if (!(await isAdminIdentity(db, id))) return c.json({ error: 'forbidden' }, 403);
+  return c.json(await getSiteConfig(db, c.env.SITE_KV));
+});
+// 管理员更新配置（关战 / 功能开关 / 维护文案）
+app.post('/api/admin/site-config', async (c) => {
+  const db = c.env.db; const id = await getIdentity(c);
+  if (!(await isAdminIdentity(db, id))) return c.json({ error: 'forbidden' }, 403);
+  let body; try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
+  const mode = body.mode === 'maintenance' ? 'maintenance' : 'normal';
+  const title = String(body.maintenance_title || '网站维护中').slice(0, 100);
+  const text = String(body.maintenance_text || '').slice(0, 1000);
+  const df = objToDisabledFeatures(body.disabled_features);
+  const set = (k, v) => db.prepare("INSERT INTO site_settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')").bind(k, v).run();
+  await set('site_mode', mode);
+  await set('maintenance_title', title);
+  await set('maintenance_text', text);
+  await set('disabled_features', String(df));
+  return c.json({ ok: true, config: await getSiteConfig(db, c.env.SITE_KV) });
+});
+
 // ========== API ==========
 
 app.get('/api/health', (c) => c.json({ ok: true, version: VERSION, time: Date.now() }));
@@ -525,12 +1014,20 @@ app.get('/api/health', (c) => c.json({ ok: true, version: VERSION, time: Date.no
 // 站点统计
 app.get('/api/stats', async (c) => {
   c.header('Cache-Control', 'public, max-age=30');
-  const db = c.env.db;
-  const [clips, users] = await Promise.all([
-    db.prepare('SELECT COUNT(*) as cnt FROM clipboards').first(),
-    db.prepare('SELECT COUNT(*) as cnt FROM users').first()
-  ]);
-  return c.json({ clips: clips?.cnt || 0, users: users?.cnt || 0 });
+  const kv = c.env.SITE_KV;
+  try {
+    if (kv) { const cached = await cacheGet(kv, 'stats'); if (cached) return c.json(cached); }
+    const db = c.env.db;
+    const [clips, users] = await Promise.all([
+      db.prepare('SELECT COUNT(*) as cnt FROM clipboards').first(),
+      db.prepare('SELECT COUNT(*) as cnt FROM users').first()
+    ]);
+    const out = { clips: clips?.cnt || 0, users: users?.cnt || 0 };
+    if (kv) cachePut(kv, 'stats', out, 60);
+    return c.json(out);
+  } catch {
+    return c.json({ clips: 0, users: 0, degraded: true });
+  }
 });
 
 // ========== 公告 API ==========
@@ -622,9 +1119,10 @@ app.delete('/api/announcements/:id', async (c) => {
 });
 
 // ========== 统一工单系统（合并「反馈」+「内容举报」，仿洛谷工单） ==========
-const TICKET_CATEGORY_LABEL = { bug: '程序缺陷', suggestion: '功能建议', report: '内容举报', other: '其他' };
+const TICKET_CATEGORY_LABEL = { bug: '程序缺陷', suggestion: '功能建议', report: '内容举报', appeal: '封禁申诉', other: '其他' };
 const TICKET_STATUS_LABEL = { open: '待处理', reviewing: '处理中', resolved: '已解决', rejected: '已驳回' };
-const TICKET_CATS = ['bug', 'suggestion', 'report', 'other'];
+// v4.21：新增 appeal（站点 / 内容被封禁后的申诉），走独立模块，管理员处理后可直接解封
+const TICKET_CATS = ['bug', 'suggestion', 'report', 'appeal', 'other'];
 const TICKET_STATUSES = ['open', 'reviewing', 'resolved', 'rejected'];
 
 async function genTicketCode(db) {
@@ -643,26 +1141,80 @@ app.post('/api/tickets', async (c) => {
   try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
   const category = TICKET_CATS.includes(body.category) ? body.category : 'other';
   const content = (body.content || '').toString().slice(0, 5000);
-  // 举报类由 reason/detail 拼装 finalContent（见下），本身无 content 字段，跳过此校验
-  if (category !== 'report' && !content.trim()) return c.json({ error: 'empty_content' }, 400);
-  const title = (body.title || '').toString().slice(0, 100).trim() || (category === 'report' ? '内容举报' : '工单');
+  // 举报 / 申诉类由 reason/detail 拼装 finalContent（见下），本身无 content 字段，跳过此校验
+  if (category !== 'report' && category !== 'appeal' && !content.trim()) return c.json({ error: 'empty_content' }, 400);
+  let title = (body.title || '').toString().slice(0, 100).trim() || (category === 'report' ? '内容举报' : category === 'appeal' ? '封禁申诉' : '工单');
   const identity = await getIdentity(c);
 
-  let relatedClipId = '', relatedClipReason = '', finalContent = content;
-  if (category === 'report') {
+  let relatedClipId = '', relatedClipReason = '', relatedSiteSlug = '', finalContent = content;
+  // v4.21：申诉必须登录（要能确认申诉人是站长本人），且必须指向具体对象（站点 / 片段）
+  if (category === 'appeal') {
+    if (identity.type !== 'user') return c.json({ error: 'login_required', message: '请先登录后再提交申诉' }, 401);
+    const siteSlug = (body.site_slug || '').toString().trim();
     const clipId = (body.clip_id || '').toString().trim();
-    if (!clipId) return c.json({ error: 'missing_clip' }, 400);
-    const clip = await db.prepare('SELECT clip_id, title FROM clipboards WHERE clip_id = ?').bind(clipId).first();
-    if (!clip) return c.json({ error: 'not_found' }, 404);
-    // 去重：同一用户对同一片段的未处理举报工单只计一次
-    const dup = await db.prepare("SELECT code FROM tickets WHERE category='report' AND related_clip_id=? AND author_id=? AND status='open'")
-      .bind(clipId, String(identity.userId || '')).first();
-    if (dup) return c.json({ ok: true, already: true, code: dup.code });
-    relatedClipId = clipId;
-    relatedClipReason = (body.reason || '').toString().slice(0, 50);
-    const reasonLabel = REPORT_REASON_LABEL[relatedClipReason] || relatedClipReason || '其他';
-    finalContent = '【举报原因】' + reasonLabel + (body.detail ? '\n' + (body.detail || '').toString().slice(0, 1000) : '');
+    if (!siteSlug && !clipId) return c.json({ error: 'missing_target', message: '请指定申诉对象（站点或片段）' }, 400);
+    const detail = (body.detail || body.content || '').toString().slice(0, 2000).trim();
+    if (!detail) return c.json({ error: 'empty_content', message: '请填写申诉理由' }, 400);
+    if (siteSlug) {
+      const site = await db.prepare('SELECT slug, title, status, suspend_reason, owner_id FROM sites WHERE slug = ?').bind(siteSlug).first();
+      if (!site) return c.json({ error: 'not_found' }, 404);
+      // 只能是站长本人申诉自己的站点
+      if (String(site.owner_id) !== String(identity.userId)) return c.json({ error: 'forbidden', message: '只能申诉自己的站点' }, 403);
+      // 同一站长对同一站点的未处理申诉只保留一条
+      const dup = await db.prepare("SELECT code FROM tickets WHERE category='appeal' AND related_site_slug=? AND status IN ('open','reviewing')")
+        .bind(siteSlug).first();
+      if (dup) return c.json({ ok: true, already: true, code: dup.code });
+      relatedSiteSlug = siteSlug;
+      finalContent = '【申诉对象】站点 ' + siteSlug + (site.title ? '（' + site.title + '）' : '')
+        + '\n【当前状态】' + (site.status === 'suspended' ? '已封禁' : site.status)
+        + (site.suspend_reason ? '\n【封禁原因】' + site.suspend_reason : '')
+        + '\n【访问地址】' + SITES_HOST + '/' + siteSlug
+        + '\n\n【申诉理由】' + detail;
+    } else {
+      const clip = await db.prepare('SELECT clip_id, title FROM clipboards WHERE clip_id = ?').bind(clipId).first();
+      if (!clip) return c.json({ error: 'not_found' }, 404);
+      const dup = await db.prepare("SELECT code FROM tickets WHERE category='appeal' AND related_clip_id=? AND status IN ('open','reviewing')")
+        .bind(clipId).first();
+      if (dup) return c.json({ ok: true, already: true, code: dup.code });
+      relatedClipId = clipId;
+      finalContent = '【申诉对象】片段 ' + clipId + (clip.title ? '（' + clip.title + '）' : '')
+        + '\n\n【申诉理由】' + detail;
+    }
+    if (!(body.title || '').toString().trim()) {
+      title = relatedSiteSlug ? ('申诉：站点 ' + relatedSiteSlug + ' 被封禁') : ('申诉：片段 ' + clipId + ' 被处理');
+    }
+  }
+  if (category === 'report') {
+    // 举报必须先登录（v4.20：举报对象可以是片段，也可以是站点）
     if (identity.type !== 'user') return c.json({ error: 'login_required', message: '请先登录后再举报' }, 401);
+    const clipId = (body.clip_id || '').toString().trim();
+    const siteSlug = (body.site_slug || '').toString().trim();
+    if (!clipId && !siteSlug) return c.json({ error: 'missing_target', message: '请指定举报对象（片段或站点）' }, 400);
+    const reasonRaw = (body.reason || '').toString().slice(0, 50);
+    const reasonLabel = REPORT_REASON_LABEL[reasonRaw] || reasonRaw || '其他';
+    const detail = body.detail ? '\n' + (body.detail || '').toString().slice(0, 1000) : '';
+    if (clipId) {
+      const clip = await db.prepare('SELECT clip_id, title FROM clipboards WHERE clip_id = ?').bind(clipId).first();
+      if (!clip) return c.json({ error: 'not_found' }, 404);
+      // 去重：同一用户对同一片段的未处理举报工单只计一次
+      const dup = await db.prepare("SELECT code FROM tickets WHERE category='report' AND related_clip_id=? AND author_id=? AND status='open'")
+        .bind(clipId, String(identity.userId || '')).first();
+      if (dup) return c.json({ ok: true, already: true, code: dup.code });
+      relatedClipId = clipId;
+      relatedClipReason = reasonRaw;
+      finalContent = '【举报原因】' + reasonLabel + detail;
+    } else {
+      const site = await db.prepare('SELECT slug, title FROM sites WHERE slug = ?').bind(siteSlug).first();
+      if (!site) return c.json({ error: 'not_found' }, 404);
+      // 去重：同一用户对同一站点的未处理举报工单只计一次
+      const dup = await db.prepare("SELECT code FROM tickets WHERE category='report' AND related_site_slug=? AND author_id=? AND status='open'")
+        .bind(siteSlug, String(identity.userId || '')).first();
+      if (dup) return c.json({ ok: true, already: true, code: dup.code });
+      relatedSiteSlug = siteSlug;
+      finalContent = '【举报对象】站点 ' + siteSlug + (site.title ? '（' + site.title + '）' : '')
+        + '\n【访问地址】' + SITES_HOST + '/' + siteSlug
+        + '\n【举报原因】' + reasonLabel + detail;
+    }
   }
   if (identity.type === 'none') return c.json({ error: 'unauthorized' }, 401);
 
@@ -672,9 +1224,9 @@ app.post('/api/tickets', async (c) => {
 
   const code = await genTicketCode(db);
   await db.prepare(
-    `INSERT INTO tickets (code, category, title, content, author_id, author_name, author_type, status, related_clip_id, related_clip_reason, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, datetime('now'), datetime('now'))`
-  ).bind(code, category, title, finalContent, authorId, authorName, authorType, relatedClipId, relatedClipReason).run();
+    `INSERT INTO tickets (code, category, title, content, author_id, author_name, author_type, status, related_clip_id, related_clip_reason, related_site_slug, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, datetime('now'), datetime('now'))`
+  ).bind(code, category, title, finalContent, authorId, authorName, authorType, relatedClipId, relatedClipReason, relatedSiteSlug).run();
   return c.json({ ok: true, code });
 });
 
@@ -696,7 +1248,7 @@ app.get('/api/tickets', async (c) => {
   const rows = await db.prepare(
     `SELECT t.id, t.code, t.category, t.title, t.content, t.author_name, t.status, t.created_at, t.updated_at,
             (SELECT COUNT(*) FROM ticket_replies r WHERE r.ticket_id = t.id) AS reply_count
-     FROM tickets t ${whereSql} ORDER BY t.updated_at DESC LIMIT 30 OFFSET ?`
+     FROM tickets t ${whereSql} ORDER BY t.created_at DESC LIMIT 30 OFFSET ?`
   ).bind(...binds, (page - 1) * 30).all();
   const total = await db.prepare(`SELECT COUNT(*) AS n FROM tickets t ${whereSql}`).bind(...binds).first();
   return c.json({
@@ -726,9 +1278,17 @@ app.get('/api/tickets/:code', async (c) => {
     const cl = await db.prepare('SELECT clip_id, title FROM clipboards WHERE clip_id = ?').bind(t.related_clip_id).first();
     clip = cl ? { clip_id: cl.clip_id, title: cl.title, exists: true } : { clip_id: t.related_clip_id, title: '', exists: false };
   }
+  // v4.20：举报对象也可以是站点
+  let site = null;
+  if (t.related_site_slug) {
+    const st = await db.prepare('SELECT slug, title, status, owner_id FROM sites WHERE slug = ?').bind(t.related_site_slug).first();
+    site = st
+      ? { slug: st.slug, title: st.title || '', status: st.status, exists: true, url: SITES_HOST + '/' + st.slug }
+      : { slug: t.related_site_slug, title: '', status: 'gone', exists: false, url: SITES_HOST + '/' + t.related_site_slug };
+  }
   return c.json({
     ticket: { ...t, category_label: TICKET_CATEGORY_LABEL[t.category] || t.category, status_label: TICKET_STATUS_LABEL[t.status] || t.status },
-    replies: replies.results, clip,
+    replies: replies.results, clip, site,
     can_reply: identity.type !== 'none',
     can_manage: admin,
     is_author: identity.type === 'user' && String(identity.userId) === String(t.author_id)
@@ -771,7 +1331,7 @@ app.patch('/api/tickets/:code', async (c) => {
   const identity = await getIdentity(c);
   if (!(await hasAdminPerm(db, identity, 'manage_tickets'))) return c.json({ error: 'forbidden', message: '无处理工单权限（需 manage_tickets）' }, 403);
   const code = c.req.param('code');
-  const t = await db.prepare('SELECT id, code, related_clip_id, status, author_id, author_type FROM tickets WHERE code = ?').bind(code).first();
+  const t = await db.prepare('SELECT id, code, related_clip_id, related_site_slug, status, author_id, author_type FROM tickets WHERE code = ?').bind(code).first();
   if (!t) return c.json({ error: 'not_found' }, 404);
   let body;
   try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
@@ -784,9 +1344,56 @@ app.patch('/api/tickets/:code', async (c) => {
   }
   if (body.admin_note !== undefined) { sets.push('admin_note = ?'); binds.push((body.admin_note || '').toString().slice(0, 2000)); }
   if (body.assignee_name !== undefined) { sets.push('assignee_name = ?'); binds.push((body.assignee_name || '').toString().slice(0, 60)); }
-  const action = body.action === 'delete_clip' ? 'delete_clip' : '';
+  // v4.20：被举报对象为站点时，管理员可直接封禁 / 删除该站点
+  const action = ['delete_clip', 'suspend_site', 'unsuspend_site', 'delete_site'].includes(body.action) ? body.action : '';
+  // v4.21：申诉工单可直接解封站点（需 ban_sites 权限）
+  if (action === 'unsuspend_site' && t.related_site_slug) {
+    if (!(await hasAdminPerm(db, identity, 'ban_sites'))) return c.json({ error: 'forbidden', message: '无解封站点权限（需 ban_sites）' }, 403);
+    const kv = c.env.SITE_KV;
+    const slug = t.related_site_slug;
+    const sr = await db.prepare('SELECT slug, file_count FROM sites WHERE slug = ?').bind(slug).first();
+    if (sr) {
+      const st = (sr.file_count || 0) > 0 ? 'published' : 'draft';
+      await db.prepare("UPDATE sites SET status = ?, suspend_reason = NULL, updated_at = datetime('now') WHERE slug = ?").bind(st, slug).run();
+      if (kv) { try { await kv.put(SITE_PREFIX(slug) + '__status', st); } catch { /* ignore */ } }
+      try {
+        const own = await db.prepare('SELECT owner_id FROM sites WHERE slug = ?').bind(slug).first();
+        if (own) await createNotification(db, own.owner_id, 'site', '✅ 你的站点 ' + slug + ' 申诉成功，已恢复', '管理员已解除封禁，站点可正常访问。', '/sites/' + slug);
+      } catch { /* ignore */ }
+    }
+    if (!sets.length) sets.push("updated_at = datetime('now')");
+  }
+  if (action === 'suspend_site' && t.related_site_slug) {
+    if (!(await hasAdminPerm(db, identity, 'ban_sites'))) return c.json({ error: 'forbidden', message: '无封禁站点权限（需 ban_sites）' }, 403);
+    const kv = c.env.SITE_KV;
+    const slug = t.related_site_slug;
+    const st = await db.prepare('SELECT slug FROM sites WHERE slug = ?').bind(slug).first();
+    if (st) {
+      const why = (body.reason || '').toString().slice(0, 200) || '违反站点托管规范（工单 ' + t.code + '）';
+      await db.prepare("UPDATE sites SET status = 'suspended', suspend_reason = ?, updated_at = datetime('now') WHERE slug = ?").bind(why, slug).run();
+      if (kv) { try { await kv.put(SITE_PREFIX(slug) + '__status', 'suspended'); } catch { /* ignore */ } }
+    }
+    if (!sets.length) sets.push("updated_at = datetime('now')");
+  }
+  if (action === 'delete_site' && t.related_site_slug) {
+    if (!(await hasAdminPerm(db, identity, 'delete_sites'))) return c.json({ error: 'forbidden', message: '无删除站点权限（需 delete_sites）' }, 403);
+    const kv = c.env.SITE_KV;
+    const slug = t.related_site_slug;
+    if (kv) {
+      try {
+        const listed = await kv.list({ prefix: SITE_PREFIX(slug) });
+        for (const k of (listed.keys || [])) { try { await kv.delete(k.name); } catch { /* ignore */ } }
+      } catch { /* ignore */ }
+    }
+    await db.prepare('DELETE FROM sites WHERE slug = ?').bind(slug).run();
+    if (!sets.length) sets.push("updated_at = datetime('now')");
+  }
   if (action === 'delete_clip' && t.related_clip_id) {
     const clipId = t.related_clip_id;
+    const cr = await db.prepare('SELECT clip_id, is_public FROM clipboards WHERE clip_id = ?').bind(clipId).first();
+    if (cr && !(await hasAdminClipPerm(db, identity, cr, 'delete'))) {
+      return c.json({ error: 'forbidden', message: cr.is_public ? '无删除公开剪贴板权限（需 delete_public_clips）' : '无删除私有剪贴板权限（需 delete_private_clips）' }, 403);
+    }
     await db.prepare('DELETE FROM clipboards WHERE clip_id = ?').bind(clipId).run();
     await db.prepare('DELETE FROM comments WHERE clip_id = ?').bind(clipId).run();
     await db.prepare('DELETE FROM clip_readers WHERE clip_id = ?').bind(clipId).run();
@@ -958,6 +1565,7 @@ app.patch('/api/admin/code/request/:id', async (c) => {
 app.get('/api/clips', async (c) => {
   c.header('Cache-Control', 'public, max-age=30');
   const db = c.env.db;
+  try {
   await maybeCleanupExpired(db);
   const page = Math.max(1, parseInt(c.req.query('page') || '1'));
   const q = (c.req.query('q') || '').trim().slice(0, SEARCH_MAX);
@@ -1016,6 +1624,10 @@ app.get('/api/clips', async (c) => {
     total,
     totalPages: Math.max(1, Math.ceil(total / PAGE_SIZE))
   });
+  } catch {
+    // D1 读配额耗尽等故障：降级为 200 空列表，避免前端整片 500
+    return c.json({ clips: [], page: 1, total: 0, totalPages: 1, degraded: true });
+  }
 });
 
 // ========== 单个剪贴板（含读者追踪 + 登录门禁） ==========
@@ -1131,6 +1743,10 @@ app.post('/api/clips', async (c) => {
   const db = c.env.db;
   const identity = await getIdentity(c);
   if (identity.type === 'none') return c.json({ error: 'unauthorized', message: '缺少身份标识' }, 401);
+  // v4.27：全局剪贴板禁用 + 单用户剪贴板禁用
+  const cdf = await db.prepare("SELECT value FROM site_settings WHERE key='disabled_features'").first();
+  if (parseInt(cdf?.value || '0', 10) & DF_CLIPBOARD) return c.json({ error: 'clipboard_disabled', message: '剪贴板功能已临时关闭' }, 503);
+  if (identity.type === 'user' && await isUserFeatureDisabled(db, identity.userId, DF_CLIPBOARD)) return c.json({ error: 'your_clipboard_disabled', message: '你的剪贴板功能已被管理员关闭' }, 403);
 
   let body;
   try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
@@ -1277,7 +1893,8 @@ app.put('/api/clips/:clipId', async (c) => {
 
   const r = await db.prepare('SELECT * FROM clipboards WHERE clip_id = ?').bind(clipId).first();
   if (!r) return c.json({ error: 'not_found' }, 404);
-  const admin = await isAdminIdentity(db, identity);
+  // v4.21：管理员改他人剪贴板须有对应可见性的 edit 权限（公开 / 私有分开）
+  const admin = await hasAdminClipPerm(db, identity, r, 'edit');
   if (!canWrite(identity, r) && !admin) return c.json({ error: 'forbidden' }, 403);
 
   let body;
@@ -1354,7 +1971,8 @@ app.delete('/api/clips/:clipId', async (c) => {
   if (identity.type === 'none') return c.json({ error: 'unauthorized' }, 401);
   const r = await db.prepare('SELECT * FROM clipboards WHERE clip_id = ?').bind(clipId).first();
   if (!r) return c.json({ error: 'not_found' }, 404);
-  if (!canWrite(identity, r) && !(await isAdminIdentity(db, identity))) return c.json({ error: 'forbidden' }, 403);
+  // v4.21：管理员删他人剪贴板须有对应可见性的 delete 权限（公开 / 私有分开）
+  if (!canWrite(identity, r) && !(await hasAdminClipPerm(db, identity, r, 'delete'))) return c.json({ error: 'forbidden' }, 403);
   await db.prepare('DELETE FROM clipboards WHERE clip_id = ?').bind(clipId).run();
   // 级联删除关联数据
   await db.prepare('DELETE FROM comments WHERE clip_id = ?').bind(clipId).run();
@@ -1400,7 +2018,7 @@ app.get('/api/users/:userId', async (c) => {
   return c.json({
     user: {
       id: u.id, sub: u.sub, username: u.username, display_name: u.display_name || u.username,
-      avatar: u.avatar, bio: u.bio || '', signature: u.signature || '',
+      avatar: u.avatar, bio: u.bio || '', signature: u.signature || '', tag: u.tag || '',
       role: u.role || 'user', linked_accounts: parseLinkedAccounts(u.linked_accounts),
       clip_limit: u.clip_limit, limit_period: u.limit_period, created_at: u.created_at,
       clip_count: totalRow?.cnt || 0,
@@ -1441,6 +2059,7 @@ app.get('/api/me', async (c) => {
   }
 
   if (identity.type === 'user') {
+   try {
     const uRow = await db.prepare(
       `SELECT username, role, bio, signature, linked_accounts, is_vip, vip_until,
               invite_code, invite_count, feature_flags, password_hash,
@@ -1519,6 +2138,15 @@ app.get('/api/me', async (c) => {
         tags: parseTags(r.tags), pinned: !!r.pinned
       }))
     });
+   } catch {
+    // D1 读配额耗尽：降级为“已登录但资料受限”，避免前端整片 500（真实资料在配额恢复后自动回来）
+    return c.json({
+      authenticated: true, type: 'user', userId: identity.userId, name: identity.name,
+      role: 'user', is_vip: false, benefits: [], char_limit: 1500,
+      degraded: true, degradedReason: 'd1_read_quota',
+      clips: [], invite_count: 0, cpoauth_bound: !!identity.sub, trust_level: 0
+    });
+   }
   }
 
   if (identity.type === 'guest') {
@@ -1663,6 +2291,35 @@ app.patch('/api/me', async (c) => {
   const fields = {};
   if (body.signature !== undefined) fields.signature = String(body.signature).slice(0, 200);
   if (body.bio !== undefined) fields.bio = String(body.bio).slice(0, 500);
+  if (body.tag !== undefined) fields.tag = stripInvisible(String(body.tag || '')).slice(0, 30);
+  // v4.32.x：改名（展示名 display_name）—— 允许 emoji，但禁止零宽字符、禁止含 yanzie 子串、复用其他敏感词
+  if (body.display_name !== undefined) {
+    let dn = String(body.display_name || '').trim();
+    if (!dn) return c.json({ error: 'empty_display_name', message: '昵称不能为空' }, 400);
+    // 零宽/控制字符：直接拒绝（不再静默去除）
+    if (/[​-‏‪-‮⁠-⁯﻿]/g.test(dn)) {
+      return c.json({ error: 'display_name_invisible', message: '昵称不能包含不可见/零宽字符' }, 400);
+    }
+    const dnNorm = normalizeUserName(dn); // 转小写 + 去零宽，用于敏感词比对
+    if (dnNorm.length < 2) return c.json({ error: 'invalid_display_name', message: '昵称至少 2 个字符' }, 400);
+    // 敏感词 / 冒充词拦截（含 yanzie 子串，连 yanzien 本体也拦，防仿冒）
+    let bannedWord = null;
+    for (const w of ['nazi', 'gay', '纳粹', '共产党', '国民党', '拉', '给']) if (dnNorm.includes(w)) { bannedWord = w; break; }
+    // yanzie 子串拦截：站长（uid 1/2，本人昵称即 yanzie）放行，其余照拦防仿冒
+    if (!bannedWord && dnNorm.includes('yanzie') && identity.userId !== 1 && identity.userId !== 2) bannedWord = 'yanzie';
+    if (!bannedWord && /(?<![a-z0-9])la(?![a-z0-9])/.test(dnNorm)) bannedWord = 'la';
+    if (bannedWord) {
+      return c.json({ error: 'display_name_banned', message: '昵称包含不允许使用的词「' + bannedWord + '」，请换一个' }, 400);
+    }
+    fields.display_name = dn.slice(0, 30);
+  }
+  // v4.32: 头像（空串=清除；URL 或 /api/avatar/ 路径；或 emoji: 前缀的预设）
+  if (body.avatar !== undefined) {
+    const av = String(body.avatar || '').slice(0, 200);
+    const ok = av === '' || /^https?:\/\//.test(av) || av.startsWith('/api/avatar/') || av.startsWith('emoji:') || /^\p{Extended_Pictographic}$/u.test(av);
+    if (!ok) return c.json({ error: 'bad_avatar', message: '头像格式无效' }, 400);
+    fields.avatar = av;
+  }
   // v4.4: 「不再提示绑定 cpoauth」持久化（跨设备一致）
   if (body.no_cpoauth_nudge !== undefined) fields.no_cpoauth_nudge = body.no_cpoauth_nudge ? 1 : 0;
   // v4.10: 来源渠道（首次登录后询问；白名单校验，仅允许已知渠道 + 空/unknown）
@@ -1681,7 +2338,111 @@ app.patch('/api/me', async (c) => {
   const setAtSql = srcSetAt === 'now' ? "source_set_at = datetime('now')" : srcSetAt === 'clear' ? 'source_set_at = NULL' : null;
   const sql = `UPDATE users SET ${cols}${setAtSql ? ', ' + setAtSql : ''} WHERE id = ?`;
   await db.prepare(sql).bind(...vals, String(identity.userId)).run();
-  return c.json({ ok: true, ...fields, source_set_at: srcSetAt === 'now' ? (new Date().toISOString().slice(0, 19).replace('T', ' ')) : (srcSetAt === 'clear' ? null : undefined) });
+
+  // v4.32: 改名 / 换头像后重签会话 Cookie，使服务端身份（发帖名、聊天发送名等）即时生效
+  let setCookie = null;
+  if (fields.display_name || fields.avatar !== undefined) {
+    const ck = c.req.header('Cookie') || '';
+    const m = ck.match(/mdqp_session=([^;]+)/);
+    if (m) {
+      const sp = await verifyJWT(decodeURIComponent(m[1]), c.env.CPOAUTH_CLIENT_SECRET);
+      if (sp && sp.userId) {
+        const newJwt = await signJWT(
+          {
+            userId: Number(sp.userId),
+            sub: sp.sub || null,
+            name: fields.display_name || sp.name,
+            avatar: fields.avatar !== undefined ? fields.avatar : (sp.avatar || ''),
+            exp: sp.exp || Math.floor(Date.now() / 1000) + 7 * 24 * 3600
+          },
+          c.env.CPOAUTH_CLIENT_SECRET
+        );
+        setCookie = `mdqp_session=${newJwt}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${7 * 24 * 3600}`;
+      }
+    }
+  }
+  const res = c.json({ ok: true, ...fields, source_set_at: srcSetAt === 'now' ? (new Date().toISOString().slice(0, 19).replace('T', ' ')) : (srcSetAt === 'clear' ? null : undefined) });
+  if (setCookie) c.header('Set-Cookie', setCookie);
+  return res;
+});
+
+// ========== v4.32: 头像上传 / 读取 ==========
+// 头像存 SITE_KV（key=avatar:{userId}），users.avatar 存可访问的短链 /api/avatar/{id}。
+// 预设头像走 emoji: 前缀（由前端 avatarHtml 渲染），不进 KV。
+const AVATAR_KV_PREFIX = 'avatar:';
+const AVATAR_ALLOW = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+const AVATAR_MAX = 2 * 1024 * 1024; // 2MB
+
+app.post('/api/me/avatar', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'unauthorized' }, 401);
+  const ct = c.req.header('Content-Type') || '';
+  let bytes, mime;
+  try {
+    if (ct.includes('multipart/form-data')) {
+      const form = await c.req.parseFormData();
+      const file = form.get('file');
+      if (!file || typeof file === 'string') return c.json({ error: 'no_file' }, 400);
+      bytes = new Uint8Array(await file.arrayBuffer());
+      mime = file.type || 'image/png';
+    } else {
+      const body = await c.req.json();
+      const du = String(body.dataUrl || '');
+      const mm = du.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.*)$/s);
+      if (!mm) return c.json({ error: 'bad_dataurl' }, 400);
+      mime = mm[1];
+      bytes = Uint8Array.from(atob(mm[2]), (ch) => ch.charCodeAt(0));
+    }
+  } catch {
+    return c.json({ error: 'bad_request' }, 400);
+  }
+  if (!AVATAR_ALLOW.has(mime)) return c.json({ error: 'unsupported_type', message: '仅支持 PNG / JPEG / WebP / GIF' }, 400);
+  if (!bytes || bytes.length === 0) return c.json({ error: 'empty' }, 400);
+  if (bytes.length > AVATAR_MAX) return c.json({ error: 'too_large', message: '头像不能超过 2MB' }, 400);
+
+  const uid = String(identity.userId);
+  const key = AVATAR_KV_PREFIX + uid;
+  try {
+    await c.env.SITE_KV.put(key, bytes, { metadata: { contentType: mime, uid } });
+  } catch {
+    return c.json({ error: 'kv_failed', message: '头像存储失败，请稍后重试' }, 500);
+  }
+  const url = '/api/avatar/' + uid;
+  await db.prepare('UPDATE users SET avatar = ? WHERE id = ?').bind(url, uid).run();
+
+  // 重签会话，使头像即时生效
+  let setCookie = null;
+  const ck = c.req.header('Cookie') || '';
+  const m = ck.match(/mdqp_session=([^;]+)/);
+  if (m) {
+    const sp = await verifyJWT(decodeURIComponent(m[1]), c.env.CPOAUTH_CLIENT_SECRET);
+    if (sp && sp.userId) {
+      const newJwt = await signJWT(
+        { userId: Number(sp.userId), sub: sp.sub || null, name: sp.name, avatar: url, exp: sp.exp || Math.floor(Date.now() / 1000) + 7 * 24 * 3600 },
+        c.env.CPOAUTH_CLIENT_SECRET
+      );
+      setCookie = `mdqp_session=${newJwt}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${7 * 24 * 3600}`;
+    }
+  }
+  const res = c.json({ ok: true, url });
+  if (setCookie) c.header('Set-Cookie', setCookie);
+  return res;
+});
+
+app.get('/api/avatar/:userId', async (c) => {
+  const uid = c.req.param('userId');
+  if (!/^\d+$/.test(uid)) return c.json({ error: 'bad_id' }, 400);
+  // 注意：KV 单独 {type:'arrayBuffer'} 返回裸 ArrayBuffer；不要用 metadata:true（会丢 value）
+  const buf = await c.env.SITE_KV.get(AVATAR_KV_PREFIX + uid, { type: 'arrayBuffer' });
+  if (!buf) return c.json({ error: 'not_found' }, 404);
+  const b = new Uint8Array(buf);
+  let ctype = 'image/png';
+  if (b[0] === 0x89 && b[1] === 0x50) ctype = 'image/png';
+  else if (b[0] === 0xFF && b[1] === 0xD8) ctype = 'image/jpeg';
+  else if (b[0] === 0x47 && b[1] === 0x49) ctype = 'image/gif';
+  else if (b[0] === 0x52 && b[1] === 0x49 && b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) ctype = 'image/webp';
+  return new Response(buf, { headers: { 'Content-Type': ctype, 'Cache-Control': 'public, max-age=86400' } });
 });
 
 // ========== 战绩概览（cp:summary 代理，best-effort + D1 缓存） ==========
@@ -1897,9 +2658,16 @@ app.get('/api/search/users', async (c) => {
   const q = (c.req.query('q') || '').trim().slice(0, 50);
   if (!q || q.length < 1) return c.json({ users: [] });
 
-  const rows = await db.prepare(
-    "SELECT id, username, display_name, avatar FROM users WHERE username LIKE ? OR display_name LIKE ? LIMIT 10"
-  ).bind(`%${q}%`, `%${q}%`).all();
+  // v4.18：支持直接输入用户 ID（纯数字）——精确命中排最前，再按用户名/昵称模糊匹配
+  const like = `%${q}%`;
+  const num = /^\d{1,10}$/.test(q) ? parseInt(q, 10) : null;
+  const rows = num !== null
+    ? await db.prepare(
+        'SELECT id, username, display_name, avatar FROM users WHERE id = ? OR username LIKE ? OR display_name LIKE ? ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END, id ASC LIMIT 10'
+      ).bind(num, like, like, num).all()
+    : await db.prepare(
+        'SELECT id, username, display_name, avatar FROM users WHERE username LIKE ? OR display_name LIKE ? ORDER BY id ASC LIMIT 10'
+      ).bind(like, like).all();
 
   return c.json({ users: rows.results.map((r) => ({
     id: r.id, username: r.username, display_name: r.display_name || r.username, avatar: r.avatar
@@ -2113,7 +2881,8 @@ app.get('/api/admin/users', async (c) => {
   const bannedOnly = c.req.query('banned'); // '1' | '0' | 不传=全部
   const sort = (c.req.query('sort') || 'id');
   const order = (c.req.query('order') || 'asc').toLowerCase() === 'desc' ? 'DESC' : 'ASC';
-  const offset = (page - 1) * PAGE_SIZE;
+  const pageSize = Math.min(200, Math.max(1, parseInt(c.req.query('pageSize') || '') || PAGE_SIZE));
+  const offset = (page - 1) * pageSize;
 
   const whereParts = [];
   const params = [];
@@ -2141,17 +2910,17 @@ app.get('/api/admin/users', async (c) => {
 
   const totalRow = await db.prepare(`SELECT COUNT(*) as cnt FROM (${innerSql}) sub ${whereSql}`).bind(...params).first();
   const rows = await db.prepare(
-    `SELECT sub.id, sub.username, sub.display_name, sub.avatar, sub.role, sub.admin_level, sub.bio, sub.signature,
+    `SELECT sub.id, sub.username, sub.display_name, sub.tag, sub.avatar, sub.role, sub.admin_level, sub.bio, sub.signature,
             sub.linked_accounts, sub.clip_limit, sub.limit_period, sub.admin_permissions,
             sub.created_at, sub.last_login, sub.is_vip, sub.vip_until, sub.invite_code,
             sub.invite_count, sub.feature_flags, sub.source, sub.source_set_at,
             sub.banned, sub.banned_at, sub.ban_until, sub.clip_count
      FROM (${innerSql}) sub ${whereSql} ORDER BY ${orderCol} ${order} LIMIT ? OFFSET ?`
-  ).bind(...params, PAGE_SIZE, offset).all();
+  ).bind(...params, pageSize, offset).all();
 
   return c.json({
     users: rows.results.map((r) => ({
-      id: r.id, username: r.username, display_name: r.display_name || r.username,
+      id: r.id, username: r.username, display_name: r.display_name || r.username, tag: r.tag || '',
       avatar: r.avatar, role: r.role || 'user',
       admin_level: r.role === 'developer' ? 99 : (parseInt(r.admin_level, 10) || 1),
       linked_accounts: parseLinkedAccounts(r.linked_accounts),
@@ -2162,9 +2931,11 @@ app.get('/api/admin/users', async (c) => {
       invite_code: r.invite_code || '', invite_count: r.invite_count || 0,
       feature_flags: parseFeatureFlags(r.feature_flags),
       source: r.source || '', source_set_at: r.source_set_at || null,
-      banned: !!r.banned, ban_until: r.ban_until || null, banned_at: r.banned_at || null
+      banned: !!r.banned, ban_until: r.ban_until || null, banned_at: r.banned_at || null,
+      disabled_features: parseInt(r.disabled_features, 10) || 0,
+      invisible_name: hasInvisibleChars(r.display_name) || hasInvisibleChars(r.username)
     })),
-    page, total: totalRow?.cnt || 0, totalPages: Math.max(1, Math.ceil((totalRow?.cnt || 0) / PAGE_SIZE))
+    page, pageSize, total: totalRow?.cnt || 0, totalPages: Math.max(1, Math.ceil((totalRow?.cnt || 0) / pageSize))
   });
 });
 
@@ -2191,6 +2962,10 @@ app.patch('/api/admin/users/:id', async (c) => {
   const targetId = c.req.param('id');
   const oper = await db.prepare('SELECT id, role, admin_level FROM users WHERE id = ?').bind(String(identity.userId)).first();
   const operLevel = oper ? adminLevelOf(oper.role, oper.admin_level) : 1;
+  // v4.32.3: 操作者自身权限上下文——用于「包含关系」校验（只能授予自己拥有的权限）
+  const operCtx = await getAdminContext(db, identity.userId);
+  const operIsDev = operCtx.role === 'developer';
+  const operPerms = operCtx.perms;
   const target = await db.prepare('SELECT id, role, username, display_name, banned, ban_until, ban_reason, admin_level, admin_permissions FROM users WHERE id = ?').bind(targetId).first();
   if (!target) return c.json({ error: 'not_found' }, 404);
   if (target.role === 'developer') return c.json({ error: 'forbidden', message: '开发者身份不可更改' }, 403);
@@ -2213,6 +2988,15 @@ app.patch('/api/admin/users/:id', async (c) => {
     if (selfId) return c.json({ error: 'forbidden', message: '不能修改自己的管理员权限 / 层级' }, 403);
   }
 
+  // v4.27：功能禁用（撤销/恢复 进入聊天 / 站点托管 / 剪贴板 的权限）
+  if (body.disabled_features !== undefined) {
+    if (!(await hasAdminPerm(db, identity, 'ban_user'))) return c.json({ error: 'forbidden', message: '无封禁/限制权限' }, 403);
+    if (selfId) return c.json({ error: 'forbidden', message: '不能限制自己的功能' }, 403);
+    const df = objToDisabledFeatures(body.disabled_features);
+    await db.prepare('UPDATE users SET disabled_features = ? WHERE id = ?').bind(df, targetId).run();
+    changes.push('功能权限已更新（位标记 ' + df + '）');
+  }
+
   // 角色变更 / 升管（免「先撤再升」，可直接设层级 + 权限）
   if (body.role !== undefined) {
     const role = String(body.role);
@@ -2221,10 +3005,15 @@ app.patch('/api/admin/users/:id', async (c) => {
       let lvl = parseInt(body.admin_level, 10) || 1;
       if (operLevel !== 99) lvl = Math.min(lvl, operLevel - 1); // 新管理员层级必须低于操作者
       lvl = Math.max(1, Math.min(5, lvl));
-      const perms = readPerms(body.admin_permissions || '{}');
+      const requested = readPerms(body.admin_permissions || '{}');
+      const existing = readPerms(target.admin_permissions);
+      const dropped = [];
+      const perms = mergeGrantable(requested, existing, operPerms, operIsDev, dropped);
       await db.prepare('UPDATE users SET role = ?, admin_level = ?, admin_permissions = ? WHERE id = ?')
         .bind('admin', lvl, JSON.stringify(perms), targetId).run();
-      changes.push('被设为管理员（层级 ' + lvl + '）');
+      let msg = '被设为管理员（层级 ' + lvl + '）';
+      if (dropped.length) msg += '；已忽略你无权授予的权限：' + dropped.join('、');
+      changes.push(msg);
     } else {
       await db.prepare("UPDATE users SET role = 'user', admin_level = 1, admin_permissions = '{}' WHERE id = ?").bind(targetId).run();
       changes.push('管理员权限被撤销');
@@ -2235,10 +3024,18 @@ app.patch('/api/admin/users/:id', async (c) => {
     if (operLevel !== 99) lvl = Math.min(lvl, operLevel - 1);
     lvl = Math.max(1, Math.min(5, lvl));
     let perms = readPerms(target.admin_permissions);
-    if (body.admin_permissions !== undefined) perms = readPerms(body.admin_permissions);
+    let dropped = [];
+    if (body.admin_permissions !== undefined) {
+      // v4.32.3: 仅当显式提交权限时才做「包含关系」合并；未动权限则保留目标原有授权
+      const requested = readPerms(body.admin_permissions);
+      const existing = readPerms(target.admin_permissions);
+      perms = mergeGrantable(requested, existing, operPerms, operIsDev, dropped);
+    }
     await db.prepare('UPDATE users SET admin_level = ?, admin_permissions = ? WHERE id = ?')
       .bind(lvl, JSON.stringify(perms), targetId).run();
-    changes.push('管理权限/层级已更新（层级 ' + lvl + '）');
+    let msg = '管理权限/层级已更新（层级 ' + lvl + '）';
+    if (dropped.length) msg += '；已忽略你无权授予的权限：' + dropped.join('、');
+    changes.push(msg);
   }
 
   // 剪贴板数量限制（需 set_clip_limit）
@@ -2274,16 +3071,20 @@ app.patch('/api/admin/users/:id', async (c) => {
     if (banned) {
       const reason = (body.ban_reason || '违反社区规范').toString().slice(0, 500);
       let banUntil = null;
-      const days = parseInt(body.ban_duration);
-      if (Number.isFinite(days) && days > 0) {
-        banUntil = new Date(Date.now() + days * 86400000).toISOString().slice(0, 19).replace('T', ' ');
+      // v4.29：ban_days 支持小数（0.5 = 12 小时）；兼容旧的 ban_duration（整数天）
+      const rawDays = body.ban_days !== undefined ? Number(body.ban_days) : parseInt(body.ban_duration);
+      if (Number.isFinite(rawDays) && rawDays > 0) {
+        banUntil = new Date(Date.now() + rawDays * 86400000).toISOString().slice(0, 19).replace('T', ' ');
       }
       await db.prepare("UPDATE users SET banned = 1, banned_at = datetime('now'), ban_reason = ?, ban_until = ? WHERE id = ?")
         .bind(reason, banUntil, targetId).run();
+      // v4.30：主动失效封禁缓存，否则被封用户最多 60s 内仍能访问
+      try { await cachePut(c.env.SITE_KV, 'ban:' + targetId, { banned: 1, reason, until: banUntil }, 60); } catch {}
       changes.push(banUntil ? `已封禁至 ${banUntil}` : '已永久封禁');
     } else {
       await db.prepare("UPDATE users SET banned = 0, banned_at = NULL, ban_reason = NULL, ban_until = NULL WHERE id = ?")
         .bind(targetId).run();
+      try { await cachePut(c.env.SITE_KV, 'ban:' + targetId, { banned: 0 }, 60); } catch {}
       changes.push('已解封');
     }
   }
@@ -2304,7 +3105,7 @@ app.patch('/api/admin/users/:id', async (c) => {
     await createNotification(db, targetId, 'admin', '🛡 账号变动通知', `你的账号（${whom}）${changes.join('；')}。`, '/me');
   }
 
-  return c.json({ ok: true, id: Number(targetId) });
+  return c.json({ ok: true, id: Number(targetId), message: changes.join('；') || '操作成功' });
 });
 
 app.delete('/api/admin/users/:id', async (c) => {
@@ -2332,12 +3133,17 @@ app.delete('/api/admin/users/:id', async (c) => {
 app.get('/api/admin/clips', async (c) => {
   const db = c.env.db;
   const identity = await getIdentity(c);
-  if (!(await isAdminIdentity(db, identity))) return c.json({ error: 'forbidden' }, 403);
+  // v4.21：查看剪贴板分公开 / 私有两档；无私有权限的管理员连列表里都看不到私有板
+  const canViewPublic = await hasAdminPerm(db, identity, 'view_public_clips');
+  const canViewPrivate = await hasAdminPerm(db, identity, 'view_private_clips');
+  if (!canViewPublic && !canViewPrivate) return c.json({ error: 'forbidden', message: '无查看剪贴板权限（需 view_public_clips 或 view_private_clips）' }, 403);
   const page = Math.max(1, parseInt(c.req.query('page') || '1'));
   const q = (c.req.query('q') || '').trim().slice(0, SEARCH_MAX);
   const offset = (page - 1) * PAGE_SIZE;
-  let where = ''; const params = [];
-  if (q) { where = 'WHERE title LIKE ? OR content LIKE ? OR owner_name LIKE ? OR clip_id LIKE ?'; params.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`); }
+  let where = ''; const params = [], conds = [];
+  if (q) { conds.push('(title LIKE ? OR content LIKE ? OR owner_name LIKE ? OR clip_id LIKE ?)'); params.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`); }
+  if (!canViewPrivate) conds.push('is_public = 1');
+  if (conds.length) where = 'WHERE ' + conds.join(' AND ');
   const totalRow = await db.prepare(`SELECT COUNT(*) as cnt FROM clipboards ${where}`).bind(...params).first();
   const rows = await db.prepare(
     `SELECT clip_id, title, content, owner_type, owner_id, owner_name, is_public, editable_by_anyone,
@@ -2364,7 +3170,7 @@ app.get('/api/admin/clips', async (c) => {
 app.delete('/api/admin/clips/expired', async (c) => {
   const db = c.env.db;
   const identity = await getIdentity(c);
-  if (!(await isAdminIdentity(db, identity))) return c.json({ error: 'forbidden' }, 403);
+  if (!(await hasAnyAdminPerm(db, identity, ['delete_public_clips', 'delete_private_clips']))) return c.json({ error: 'forbidden', message: '无删除剪贴板权限' }, 403);
   const deleted = await cleanupExpiredClips(db);
   return c.json({ ok: true, deleted });
 });
@@ -2698,6 +3504,1657 @@ app.put('/api/admin/settings/:key', async (c) => {
   return c.json({ ok: true, key, value });
 });
 
+// ========== v4.17: 聊天系统 ==========
+// 设计：单聊 / 群聊共用 chat_conversations + chat_members + chat_messages。
+// 全站总群 is_global=1，所有用户注册时自动加入（见 oauth.js）。
+// 实时性：前端轮询（3-5s）+ 未读计数（chat_members.last_read_id）。
+// 存储上限：单聊任一方 VIP / 群主 VIP → 保留最近 100 条，否则 50 条（超限时清理最旧）。
+
+/** 单条聊天消息的等效字数上限（与前端 eqChars 对齐）：超过直接拒绝发送 */
+const CHAT_MSG_MAX = 150;
+
+/** 取全站总群 conv_id（无则返回 null） */
+async function getGlobalConvId(db) {
+  const r = await db.prepare('SELECT id FROM chat_conversations WHERE is_global = 1 LIMIT 1').first();
+  return r ? r.id : null;
+}
+
+/** 计算会话保留上限：VIP 相关则 100，否则 50 */
+async function chatRetentionLimit(db, conv) {
+  let vip = false;
+  if (conv.type === 'single') {
+    const r = await db.prepare(
+      "SELECT 1 FROM chat_members cm JOIN users u ON u.id = cm.user_id WHERE cm.conv_id = ? AND cm.left = 0 AND u.is_vip = 1 AND (u.vip_until IS NULL OR u.vip_until > datetime('now')) LIMIT 1"
+    ).bind(conv.id).first();
+    vip = !!r;
+  } else if (conv.owner_id) {
+    const o = await db.prepare(
+      "SELECT 1 FROM users WHERE id = ? AND is_vip = 1 AND (vip_until IS NULL OR vip_until > datetime('now')) LIMIT 1"
+    ).bind(conv.owner_id).first();
+    vip = !!o;
+  }
+  return vip ? 100 : 50;
+}
+
+/** 校验当前用户是对话成员（未退出）；返回 member 行或 null */
+async function getChatMember(db, convId, userId) {
+  return await db.prepare('SELECT * FROM chat_members WHERE conv_id = ? AND user_id = ? AND left = 0').bind(convId, userId).first();
+}
+
+// 全局未读数（轻量，供导航栏角标 / 后台轮询使用）
+// 注意：未读必须按真实消息数 COUNT，不能用「最后一条 id − last_read_id」——
+// chat_messages.id 是全局自增、跨会话共享 id 空间的，同一会话内 id 并不连续。
+app.get('/api/chat/unread', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required' }, 401);
+  const row = await db.prepare(
+    `SELECT COUNT(*) AS n FROM chat_messages m
+     JOIN chat_members cm ON cm.conv_id = m.conv_id AND cm.user_id = ? AND cm.left = 0
+     WHERE m.id > COALESCE(cm.last_read_id, 0) AND m.sender_id <> ?`
+  ).bind(identity.userId, identity.userId).first();
+  // v4.21：附带每个会话的最新一条消息，让**全站**全局轮询就能判定「有新消息」并弹桌面通知，
+  // 不必再拉一次完整会话列表（此前通知只在聊天页内发，用户在别的页面收不到）。
+  const convs = await db.prepare(
+    `SELECT c.id, c.type, c.name, cm.muted,
+            m.id AS m_id, m.content AS m_content, m.sender_id AS m_sender_id,
+            COALESCE(u.display_name, u.username, '') AS m_sender_name
+       FROM chat_conversations c
+       JOIN chat_members cm ON cm.conv_id = c.id AND cm.user_id = ? AND cm.left = 0
+       LEFT JOIN chat_messages m ON m.id = (SELECT MAX(id) FROM chat_messages WHERE conv_id = c.id)
+       LEFT JOIN users u ON u.id = m.sender_id`
+  ).bind(identity.userId).all();
+  const items = (convs.results || []).map((r) => ({
+    id: r.id, type: r.type, name: r.name || '', muted: !!r.muted,
+    last_id: r.m_id || 0, content: r.m_content || '',
+    sender_id: r.m_sender_id == null ? null : String(r.m_sender_id),
+    sender_name: r.m_sender_name || ''
+  }));
+  return c.json({ unread: row ? row.n : 0, convs: items });
+});
+
+// 会话列表（含对方/群信息、最后一条消息、未读、成员数）
+// v4.20 P0-1.2：改为批量查询，原先每个会话串行 4–5 次 D1 往返，会话一多就是几十次。
+app.get('/api/chat/conversations', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required' }, 401);
+
+  const convs = await db.prepare(
+    'SELECT c.id, c.type, c.name, c.is_global, c.owner_id, c.announcement, c.avatar, cm.role, cm.last_read_id, cm.muted FROM chat_conversations c JOIN chat_members cm ON cm.conv_id = c.id WHERE cm.user_id = ? AND cm.left = 0 ORDER BY c.id DESC'
+  ).bind(identity.userId).all();
+
+  const rows = convs.results || [];
+  const ids = rows.map((r) => r.id);
+  const list = rows.map((conv) => ({
+    id: conv.id, type: conv.type, name: conv.name, is_global: !!conv.is_global,
+    owner_id: conv.owner_id, my_role: conv.role, unread: 0, last_message: null, announcement: conv.announcement || '', avatar: conv.avatar || '',
+    member_count: 0, other: null, limit: 50, muted: !!conv.muted
+  }));
+  if (!ids.length) return c.json({ conversations: list });
+
+  const ph = ids.map(() => '?').join(',');
+
+  // ① 每个会话的最后一条消息（一次查询）
+  const lasts = await db.prepare(
+    `SELECT m.conv_id, m.id, m.sender_id, m.content, m.created_at, u.display_name AS sender_name
+     FROM chat_messages m
+     JOIN (SELECT conv_id, MAX(id) AS mid FROM chat_messages WHERE conv_id IN (${ph}) GROUP BY conv_id) x ON x.mid = m.id
+     LEFT JOIN users u ON u.id = m.sender_id`
+  ).bind(...ids).all();
+  const lastMap = new Map();
+  for (const r of lasts.results || []) {
+    lastMap.set(r.conv_id, { id: r.id, sender_id: r.sender_id, content: r.content, created_at: r.created_at, sender_name: r.sender_name || null });
+  }
+
+  // ② 每个会话的未读数（JOIN 出自己的 last_read_id，一次查询）
+  const unread = await db.prepare(
+    `SELECT m.conv_id AS conv_id, COUNT(*) AS n FROM chat_messages m
+     JOIN chat_members cm ON cm.conv_id = m.conv_id AND cm.user_id = ? AND cm.left = 0
+     WHERE m.conv_id IN (${ph}) AND m.id > COALESCE(cm.last_read_id, 0) AND m.sender_id <> ?
+     GROUP BY m.conv_id`
+  ).bind(identity.userId, ...ids, identity.userId).all();
+  const unreadMap = new Map((unread.results || []).map((r) => [r.conv_id, r.n]));
+
+  // ③ 单聊的对方信息（一次查询）
+  const others = await db.prepare(
+    `SELECT cm.conv_id AS conv_id, u.id, u.username, u.display_name, u.avatar
+     FROM chat_members cm JOIN users u ON u.id = cm.user_id
+     WHERE cm.conv_id IN (${ph}) AND cm.user_id <> ? AND cm.left = 0`
+  ).bind(...ids, identity.userId).all();
+  const otherMap = new Map();
+  for (const r of others.results || []) {
+    if (!otherMap.has(r.conv_id)) otherMap.set(r.conv_id, { id: r.id, username: r.username, display_name: r.display_name || r.username, avatar: r.avatar });
+  }
+
+  // ④ 群成员数（一次查询）
+  const counts = await db.prepare(
+    `SELECT conv_id, COUNT(*) AS n FROM chat_members WHERE conv_id IN (${ph}) AND left = 0 GROUP BY conv_id`
+  ).bind(...ids).all();
+  const countMap = new Map((counts.results || []).map((r) => [r.conv_id, r.n]));
+
+  // ⑤ 留存上限：单聊看任一方 VIP，群聊看群主 VIP（一次查询）
+  const vips = await db.prepare(
+    `SELECT c.id AS conv_id,
+            CASE WHEN c.type = 'single'
+                 THEN (SELECT MAX(CASE WHEN u.is_vip = 1 AND (u.vip_until IS NULL OR u.vip_until > datetime('now')) THEN 1 ELSE 0 END)
+                       FROM chat_members cm JOIN users u ON u.id = cm.user_id WHERE cm.conv_id = c.id AND cm.left = 0)
+                 ELSE (SELECT CASE WHEN u.is_vip = 1 AND (u.vip_until IS NULL OR u.vip_until > datetime('now')) THEN 1 ELSE 0 END
+                       FROM users u WHERE u.id = c.owner_id) END AS vip
+     FROM chat_conversations c WHERE c.id IN (${ph})`
+  ).bind(...ids).all();
+  const vipMap = new Map((vips.results || []).map((r) => [r.conv_id, !!r.vip]));
+
+  for (const item of list) {
+    item.last_message = lastMap.get(item.id) || null;
+    item.unread = unreadMap.get(item.id) || 0;
+    item.member_count = countMap.get(item.id) || 0;
+    item.other = item.type === 'single' ? (otherMap.get(item.id) || null) : null;
+    item.limit = vipMap.get(item.id) ? 100 : 50;
+  }
+  return c.json({ conversations: list });
+});
+
+// 消息列表（分页：before=最早已加载消息 id，不传则取最新 50 条）
+app.get('/api/chat/conversations/:id/messages', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required' }, 401);
+  const convId = parseInt(c.req.param('id'), 10);
+  const member = await getChatMember(db, convId, identity.userId);
+  if (!member) return c.json({ error: 'forbidden' }, 403);
+
+  const before = c.req.query('before');
+  const since = c.req.query('since');
+  // v4.30：聊天读走 KV 缓存（高频读场景，KV 配额独立且远大于 D1）。
+  // 轮询是烧 D1 读配额的大头，这里命中缓存就不碰 D1；发消息/撤回时主动失效。
+  const cacheBase = 'chatmsg:' + convId + ':';
+  // 把版本号拼进 key：写消息时 bump 版本，旧缓存 key 自然不再被命中（无需精确删除）
+  const ver = await chatVer(c.env.SITE_KV, convId);
+  const cacheKey = cacheBase + 'v' + ver + ':' + (since && !isNaN(parseInt(since, 10)) ? 'since' + parseInt(since, 10) : before && !isNaN(parseInt(before, 10)) ? 'before' + parseInt(before, 10) : 'tail');
+  const cached = await cacheGet(c.env.SITE_KV, cacheKey);
+  if (cached && Array.isArray(cached.messages)) {
+    c.header('X-Cache', 'HIT');
+    return c.json({ messages: cached.messages, cached: true });
+  }
+
+  let rows;
+  if (since && !isNaN(parseInt(since, 10))) {
+    rows = await db.prepare('SELECT m.id, m.sender_id, m.content, m.created_at, m.recalled, m.reply_to, m.mentions, m.attach_type, m.attach_id, u.username AS sender_username, u.display_name AS sender_name, u.avatar AS sender_avatar, u.tag AS sender_tag FROM chat_messages m LEFT JOIN users u ON u.id = m.sender_id WHERE m.conv_id = ? AND m.id > ? ORDER BY m.id ASC LIMIT 50').bind(convId, parseInt(since, 10)).all();
+  } else if (before && !isNaN(parseInt(before, 10))) {
+    rows = await db.prepare('SELECT m.id, m.sender_id, m.content, m.created_at, m.recalled, m.reply_to, m.mentions, m.attach_type, m.attach_id, u.username AS sender_username, u.display_name AS sender_name, u.avatar AS sender_avatar, u.tag AS sender_tag FROM chat_messages m LEFT JOIN users u ON u.id = m.sender_id WHERE m.conv_id = ? AND m.id < ? ORDER BY m.id DESC LIMIT 50').bind(convId, parseInt(before, 10)).all();
+  } else {
+    rows = await db.prepare('SELECT m.id, m.sender_id, m.content, m.created_at, m.recalled, m.reply_to, m.mentions, m.attach_type, m.attach_id, u.username AS sender_username, u.display_name AS sender_name, u.avatar AS sender_avatar, u.tag AS sender_tag FROM chat_messages m LEFT JOIN users u ON u.id = m.sender_id WHERE m.conv_id = ? ORDER BY m.id DESC LIMIT 50').bind(convId).all();
+  }
+  let raw = rows.results || [];
+  if (!since) raw = raw.reverse(); // 旧→新，便于前端顺序渲染
+  const msgs = raw.map((r) => ({
+    id: r.id, sender_id: r.sender_id, content: r.content, created_at: r.created_at,
+    sender: { username: r.sender_username, display_name: r.sender_name || r.sender_username, avatar: r.sender_avatar, tag: r.sender_tag || '', invisible: hasInvisibleChars(r.sender_name) },
+    recalled: !!r.recalled, reply_to: r.reply_to || 0, mentions: safeParseArray(r.mentions),
+    attach_type: r.attach_type || '', attach_id: r.attach_id || ''
+  }));
+  // 轮询结果短 TTL 缓存；翻历史（before）缓存久一点。KV 故障时 cacheGet 已吞异常，不影响主流程
+  await cachePut(c.env.SITE_KV, cacheKey, { messages: msgs }, cacheKey.endsWith('tail') ? 20 : 600);
+  return c.json({ messages: msgs, cached: false });
+});
+
+// 发送消息
+app.post('/api/chat/conversations/:id/messages', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required' }, 401);
+  const convId = parseInt(c.req.param('id'), 10);
+  const member = await getChatMember(db, convId, identity.userId);
+  if (!member) return c.json({ error: 'forbidden' }, 403);
+
+  // v4.27：全局聊天禁用（关战）+ 单用户聊天禁用
+  const dfRow = await db.prepare("SELECT value FROM site_settings WHERE key='disabled_features'").first();
+  if (parseInt(dfRow?.value || '0', 10) & DF_CHAT) return c.json({ error: 'chat_disabled', message: '聊天功能已临时关闭' }, 503);
+  if (await isUserFeatureDisabled(db, identity.userId, DF_CHAT)) return c.json({ error: 'your_chat_disabled', message: '你的聊天功能已被管理员关闭' }, 403);
+
+  let body;
+  try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
+  const content = stripInvisible(String(body.content || '').replace(/\r\n/g, '\n')).trim();
+  const attachType = String(body.attach_type || '').slice(0, 10);
+  const attachId = String(body.attach_id || '').slice(0, 64);
+  const replyTo = parseInt(body.reply_to, 10) || 0;
+  let mentions = [];
+  if (Array.isArray(body.mentions)) mentions = body.mentions.map((x) => parseInt(x, 10)).filter((x) => x).slice(0, 20);
+  // 纯附件消息允许无文字；否则需有内容
+  if (!content && !attachType) return c.json({ error: 'empty' }, 400);
+  // v4.18：超过 150 等效字符直接拒绝（前端弹窗引导改用剪贴板链接）
+  const eq = countChars(content);
+  if (content && eq > CHAT_MSG_MAX) {
+    return c.json({ error: 'too_long', eq, max: CHAT_MSG_MAX, message: '消息约 ' + eq + ' 等效字符，超过 ' + CHAT_MSG_MAX + ' 上限，请改用剪贴板链接' }, 413);
+  }
+
+  const conv = await db.prepare('SELECT id, type, owner_id, is_global FROM chat_conversations WHERE id = ?').bind(convId).first();
+  if (!conv) return c.json({ error: 'not_found' }, 404);
+
+  // v4.28：限流改为纯内存状态（旧实现每条消息都 SELECT COUNT(*) 扫表，放大 D1 读配额）
+  const rl = chatRateCheck(convId, identity.userId, !!conv.is_global);
+  if (rl) return c.json(rl, 429);
+  chatRateMark(convId, identity.userId);
+
+  const r = await db.prepare(
+    "INSERT INTO chat_messages (conv_id, sender_id, content, created_at, reply_to, mentions, attach_type, attach_id) VALUES (?, ?, ?, datetime('now'), ?, ?, ?, ?)"
+  ).bind(convId, identity.userId, content, replyTo, JSON.stringify(mentions), attachType, attachId).run();
+  const msgId = r.meta.last_row_id;
+  await chatBumpVersion(c.env.SITE_KV, convId); // v4.30：新消息使旧缓存立即失效
+
+  // 发送者自身标记为已读（避免自己发的消息算未读）
+  await db.prepare('UPDATE chat_members SET last_read_id = ? WHERE conv_id = ? AND user_id = ?').bind(msgId, convId, identity.userId).run();
+
+  // 保留上限：VIP 相关 100，否则 50
+  const limit = await chatRetentionLimit(db, conv);
+  const cnt = await db.prepare('SELECT COUNT(*) AS n FROM chat_messages WHERE conv_id = ?').bind(convId).first();
+  if (cnt && cnt.n > limit) {
+    await db.prepare(
+      'DELETE FROM chat_messages WHERE conv_id = ? AND id NOT IN (SELECT id FROM chat_messages WHERE conv_id = ? ORDER BY id DESC LIMIT ?)'
+    ).bind(convId, convId, limit).run();
+    await chatBumpVersion(c.env.SITE_KV, convId); // v4.30：清理旧消息后失效缓存
+  }
+
+  // 被 @ 的人发通知（轻量，失败不影响主流程）
+  if (mentions.length) {
+    try {
+      const senderName = (await db.prepare('SELECT display_name, username FROM users WHERE id = ?').bind(identity.userId).first());
+      const sname = senderName ? (senderName.display_name || senderName.username) : '有人';
+      for (const uid of mentions) {
+        if (uid === identity.userId) continue;
+        await createNotification(db, uid, 'chat', '💬 ' + sname + ' 在群聊里 @ 了你', '点击查看消息', '/chat?c=' + convId);
+      }
+    } catch { /* ignore */ }
+  }
+
+  const msg = await db.prepare(
+    'SELECT id, sender_id, content, created_at, recalled, reply_to, mentions, attach_type, attach_id FROM chat_messages WHERE id = ?'
+  ).bind(msgId).first();
+  msg.mentions = safeParseArray(msg.mentions);
+  return c.json({ message: msg });
+});
+
+// 安全解析 JSON 数组（容错）
+function safeParseArray(s) {
+  try { const a = JSON.parse(s); return Array.isArray(a) ? a : []; } catch { return []; }
+}
+
+// 发起单聊（找已有或建新）
+app.post('/api/chat/single/:userId', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required' }, 401);
+  const targetId = parseInt(c.req.param('userId'), 10);
+  if (!targetId || targetId === identity.userId) return c.json({ error: 'invalid_target' }, 400);
+  const target = await db.prepare('SELECT id FROM users WHERE id = ?').bind(targetId).first();
+  if (!target) return c.json({ error: 'user_not_found' }, 404);
+
+  const existing = await db.prepare(
+    "SELECT c.id FROM chat_conversations c JOIN chat_members a ON a.conv_id = c.id AND a.user_id = ? AND a.left = 0 JOIN chat_members b ON b.conv_id = c.id AND b.user_id = ? AND b.left = 0 WHERE c.type = 'single' LIMIT 1"
+  ).bind(identity.userId, targetId).first();
+  if (existing) return c.json({ conv_id: existing.id });
+
+  const r = await db.prepare("INSERT INTO chat_conversations (type, name, owner_id, is_global) VALUES ('single', '', NULL, 0)").run();
+  const convId = r.meta.last_row_id;
+  await db.prepare("INSERT OR IGNORE INTO chat_members (conv_id, user_id, role) VALUES (?, ?, 'member')").bind(convId, identity.userId).run();
+  await db.prepare("INSERT OR IGNORE INTO chat_members (conv_id, user_id, role) VALUES (?, ?, 'member')").bind(convId, targetId).run();
+  return c.json({ conv_id: convId });
+});
+
+// 建群
+app.post('/api/chat/groups', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required' }, 401);
+  let body;
+  try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
+  const name = String(body.name || '').trim().slice(0, 40);
+  if (!name) return c.json({ error: 'name_required' }, 400);
+  const memberIds = Array.isArray(body.member_ids) ? body.member_ids.map((x) => parseInt(x, 10)).filter((x) => x && x !== identity.userId) : [];
+
+  const r = await db.prepare("INSERT INTO chat_conversations (type, name, owner_id, is_global) VALUES ('group', ?, ?, 0)").bind(name, identity.userId).run();
+  const convId = r.meta.last_row_id;
+  await db.prepare("INSERT OR IGNORE INTO chat_members (conv_id, user_id, role) VALUES (?, ?, 'owner')").bind(convId, identity.userId).run();
+
+  for (const uid of memberIds) {
+    const u = await db.prepare('SELECT id FROM users WHERE id = ?').bind(uid).first();
+    if (!u) continue;
+    await db.prepare("INSERT OR IGNORE INTO chat_members (conv_id, user_id, role) VALUES (?, ?, 'member')").bind(convId, uid).run();
+    await createNotification(db, uid, 'chat', '👥 你被邀请加入群聊「' + name + '」', '点击进入群聊参与讨论', '/chat?c=' + convId);
+  }
+  return c.json({ conv_id: convId });
+});
+
+// 群内拉人（+ 按钮）
+app.post('/api/chat/groups/:id/members', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required' }, 401);
+  const convId = parseInt(c.req.param('id'), 10);
+  const member = await getChatMember(db, convId, identity.userId);
+  if (!member) return c.json({ error: 'forbidden' }, 403);
+  const conv = await db.prepare("SELECT id, type, name FROM chat_conversations WHERE id = ?").bind(convId).first();
+  if (!conv || conv.type !== 'group') return c.json({ error: 'not_group' }, 400);
+
+  let body;
+  try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
+  const memberIds = Array.isArray(body.member_ids) ? body.member_ids.map((x) => parseInt(x, 10)).filter((x) => x && x !== identity.userId) : [];
+
+  for (const uid of memberIds) {
+    const u = await db.prepare('SELECT id FROM users WHERE id = ?').bind(uid).first();
+    if (!u) continue;
+    await db.prepare("INSERT OR IGNORE INTO chat_members (conv_id, user_id, role) VALUES (?, ?, 'member')").bind(convId, uid).run();
+    await createNotification(db, uid, 'chat', '👥 你被邀请加入群聊「' + (conv.name || '群聊') + '」', '点击进入群聊参与讨论', '/chat?c=' + convId);
+  }
+  return c.json({ ok: true });
+});
+
+// 拉人候选：默认=与该用户发过消息的用户；带 q= 则按用户名/昵称搜索
+app.get('/api/chat/candidates', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required' }, 401);
+  const q = (c.req.query('q') || '').trim().slice(0, 50);
+  const convId = parseInt(c.req.query('convId') || '0', 10);
+
+  let rows;
+  if (q) {
+    // 与 /api/search/users 同一套逻辑：纯数字可当作 user id 精确命中
+    const like = `%${q}%`;
+    const num = /^\d{1,10}$/.test(q) ? parseInt(q, 10) : null;
+    rows = num !== null
+      ? await db.prepare(
+          'SELECT id, username, display_name, avatar FROM users WHERE (id = ? OR username LIKE ? OR display_name LIKE ?) AND id <> ? ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END, id ASC LIMIT 10'
+        ).bind(num, like, like, identity.userId, num).all()
+      : await db.prepare(
+          'SELECT id, username, display_name, avatar FROM users WHERE (username LIKE ? OR display_name LIKE ?) AND id <> ? ORDER BY id ASC LIMIT 10'
+        ).bind(like, like, identity.userId).all();
+  } else {
+    rows = await db.prepare(
+      `SELECT DISTINCT u.id, u.username, u.display_name, u.avatar
+       FROM chat_conversations c
+       JOIN chat_members cm1 ON cm1.conv_id = c.id AND cm1.user_id = ? AND cm1.left = 0
+       JOIN chat_members cm2 ON cm2.conv_id = c.id AND cm2.user_id <> ? AND cm2.left = 0
+       JOIN users u ON u.id = cm2.user_id
+       WHERE c.type = 'single'
+         AND EXISTS (SELECT 1 FROM chat_messages m WHERE m.conv_id = c.id)
+       ORDER BY u.id DESC LIMIT 20`
+    ).bind(identity.userId, identity.userId).all();
+  }
+  let users = (rows.results || []).map((r) => ({ id: r.id, username: r.username, display_name: r.display_name || r.username, avatar: r.avatar }));
+  if (convId) {
+    const mem = await db.prepare('SELECT user_id FROM chat_members WHERE conv_id = ? AND left = 0').bind(convId).all();
+    const inConv = new Set((mem.results || []).map((m) => m.user_id));
+    users = users.filter((u) => !inConv.has(u.id));
+  }
+  return c.json({ users });
+});
+
+// 退出群聊（普通成员；群主不可退出，需解散）
+app.post('/api/chat/conversations/:id/leave', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required' }, 401);
+  const convId = parseInt(c.req.param('id'), 10);
+  const member = await getChatMember(db, convId, identity.userId);
+  if (!member) return c.json({ error: 'forbidden' }, 403);
+  const conv = await db.prepare('SELECT id, type, is_global FROM chat_conversations WHERE id = ?').bind(convId).first();
+  if (!conv || conv.type !== 'group') return c.json({ error: 'not_group' }, 400);
+  if (conv.is_global) return c.json({ error: 'cannot_leave_global' }, 400);
+  if (member.role === 'owner') return c.json({ error: 'owner_cannot_leave' }, 400);
+  await db.prepare('UPDATE chat_members SET left = 1 WHERE conv_id = ? AND user_id = ?').bind(convId, identity.userId).run();
+  return c.json({ ok: true });
+});
+
+// 解散群聊（仅群主）
+app.post('/api/chat/conversations/:id/dissolve', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required' }, 401);
+  const convId = parseInt(c.req.param('id'), 10);
+  const member = await getChatMember(db, convId, identity.userId);
+  if (!member) return c.json({ error: 'forbidden' }, 403);
+  const conv = await db.prepare('SELECT id, type, is_global, owner_id FROM chat_conversations WHERE id = ?').bind(convId).first();
+  if (!conv || conv.type !== 'group') return c.json({ error: 'not_group' }, 400);
+  if (conv.is_global) return c.json({ error: 'cannot_dissolve_global' }, 400);
+  if (member.role !== 'owner' && conv.owner_id !== identity.userId) return c.json({ error: 'not_owner' }, 403);
+  await db.prepare('DELETE FROM chat_messages WHERE conv_id = ?').bind(convId).run();
+  await chatBumpVersion(c.env.SITE_KV, convId); // v4.30：解散群后失效缓存
+  await db.prepare('DELETE FROM chat_members WHERE conv_id = ?').bind(convId).run();
+  await db.prepare('DELETE FROM chat_conversations WHERE id = ?').bind(convId).run();
+  return c.json({ ok: true });
+});
+
+// 标记已读
+app.post('/api/chat/conversations/:id/read', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required' }, 401);
+  const convId = parseInt(c.req.param('id'), 10);
+  const member = await getChatMember(db, convId, identity.userId);
+  if (!member) return c.json({ error: 'forbidden' }, 403);
+  let body = {};
+  try { body = await c.req.json(); } catch { /* ignore */ }
+  let msgId = parseInt(body.messageId, 10);
+  if (!msgId || isNaN(msgId)) {
+    const last = await db.prepare('SELECT MAX(id) AS m FROM chat_messages WHERE conv_id = ?').bind(convId).first();
+    msgId = last ? last.m : 0;
+  }
+  await db.prepare('UPDATE chat_members SET last_read_id = ? WHERE conv_id = ? AND user_id = ?').bind(msgId, convId, identity.userId).run();
+  return c.json({ ok: true });
+});
+
+// 消息免打扰（v4.18）：置 1 后该会话不再触发浏览器通知，列表未读改为静默小点
+app.post('/api/chat/conversations/:id/mute', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required' }, 401);
+  const convId = parseInt(c.req.param('id'), 10);
+  const member = await getChatMember(db, convId, identity.userId);
+  if (!member) return c.json({ error: 'forbidden' }, 403);
+  let body = {};
+  try { body = await c.req.json(); } catch { /* ignore */ }
+  // 不传 muted 则取反（前端切换按钮用）
+  const muted = body.muted === undefined ? (member.muted ? 0 : 1) : (body.muted ? 1 : 0);
+  await db.prepare('UPDATE chat_members SET muted = ? WHERE conv_id = ? AND user_id = ?').bind(muted, convId, identity.userId).run();
+  return c.json({ ok: true, muted: !!muted });
+});
+
+// ========== 用户快速部署网站（v4.19，独立托管 qsites.pages.dev，KV 存储） ==========
+// 安全底线：用户站部署在独立 origin（qsites），与主站 mdqp 不同源，同源策略自动阻断
+// 用户站 JS 读取主站 cookie / 调主站接口。文件本体存 KV（SITE_KV），元数据存 D1（sites）。
+
+/** 用户站托管的公网 origin（与主站不同源，天然隔离） */
+const SITES_HOST = 'https://qsites.pages.dev';
+
+const RESERVED_SLUGS = new Set([
+  'api', 'admin', 'chat', 's', 'u', 'www', 'assets', 'about', 'help', 'vip',
+  'invite', 'tickets', 'me', 'new', 'edit', 'c', 'error', '404', 'legacy',
+  'sites', 'qsite', 'qsites', 'code', 'admin', 'home', 'feedback'
+]);
+function siteQuota(isVip) {
+  return isVip
+    ? { maxSites: 10, maxSiteBytes: 20 * 1024 * 1024, maxFileBytes: 5 * 1024 * 1024, maxFiles: 500 }
+    : { maxSites: 3, maxSiteBytes: 5 * 1024 * 1024, maxFileBytes: 1 * 1024 * 1024, maxFiles: 200 };
+}
+function validSiteSlug(s) { return /^[a-z0-9][a-z0-9-]{1,30}$/.test(s || '') && !RESERVED_SLUGS.has(s); }
+function guessType(p) {
+  const m = (p.split('.').pop() || '').toLowerCase();
+  const map = {
+    html: 'text/html', htm: 'text/html', css: 'text/css', js: 'application/javascript',
+    mjs: 'application/javascript', json: 'application/json', txt: 'text/plain', md: 'text/markdown',
+    svg: 'image/svg+xml', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+    webp: 'image/webp', ico: 'image/x-icon', pdf: 'application/pdf', xml: 'application/xml',
+    woff: 'font/woff', woff2: 'font/woff2', ttf: 'font/ttf', map: 'application/json'
+  };
+  return map[m] || 'application/octet-stream';
+}
+function b64ToBytes(b64) {
+  const bin = atob(b64);
+  const len = bin.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+// base64 字符串解码后的真实字节数（去掉 padding），用于精确的容量配额计算
+function b64DecodedLen(b64) {
+  const s = String(b64 || '');
+  const pad = (s.match(/=+$/) || [''])[0].length;
+  return Math.max(0, Math.floor(s.length * 3 / 4) - pad);
+}
+const SITE_PREFIX = (slug) => 'sites/' + slug + '/';
+
+// 创建站点（仅登录用户）
+app.post('/api/sites', async (c) => {
+  const db = c.env.db;
+  const kv = c.env.SITE_KV;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required', message: '登录后才能创建网站' }, 401);
+  if (!kv) return c.json({ error: 'kv_unbound' }, 500);
+  let body;
+  try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
+  const slug = (body.slug || '').toString().trim().toLowerCase();
+  const title = (body.title || '').toString().slice(0, 120);
+  const description = (body.description || '').toString().slice(0, 500);
+  if (!validSiteSlug(slug)) return c.json({ error: 'invalid_slug', message: 'slug 须为 2–31 位小写字母/数字/连字符，且非保留字' }, 400);
+  const existing = await db.prepare('SELECT id FROM sites WHERE slug = ?').bind(slug).first();
+  if (existing) return c.json({ error: 'slug_taken', message: '该网址标识已被占用' }, 409);
+  const isVip = await isVipIdentity(db, identity);
+  const quota = siteQuota(isVip);
+  const cnt = (await db.prepare("SELECT COUNT(*) as c FROM sites WHERE owner_id = ?").bind(String(identity.userId)).first()).c;
+  if (cnt >= quota.maxSites) return c.json({ error: 'site_limit', message: `你最多可创建 ${quota.maxSites} 个网站（VIP ${siteQuota(true).maxSites} 个）`, limit: quota.maxSites }, 403);
+  await db.prepare(
+    "INSERT INTO sites (slug, owner_id, title, description, status, size_bytes, file_count) VALUES (?, ?, ?, ?, 'draft', 0, 0)"
+  ).bind(slug, String(identity.userId), title, description).run();
+  await kv.put(SITE_PREFIX(slug) + '__status', 'draft');
+  return c.json({ ok: true, slug, title, status: 'draft' });
+});
+
+// 列出我的站点
+app.get('/api/sites', async (c) => {
+  const db = c.env.db;
+  const kv = c.env.SITE_KV;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required' }, 401);
+  const rows = await db.prepare(
+    "SELECT slug, title, description, status, size_bytes, file_count, suspend_reason, created_at, updated_at FROM sites WHERE owner_id = ? ORDER BY updated_at DESC"
+  ).bind(String(identity.userId)).all();
+  const sites = rows.results || [];
+  // v4.24：附上托管侧访问统计（KV 异步累计，最终一致；失败不影响列表）
+  if (kv) {
+    await Promise.all(sites.map(async (s) => {
+      try {
+        const raw = await kv.get(SITE_PREFIX(s.slug) + '__stats');
+        const o = raw ? JSON.parse(raw) : null;
+        s.visits = { total: (o && o.total) || 0, days: (o && o.days) || {} };
+      } catch { s.visits = { total: 0, days: {} }; }
+    }));
+  }
+  return c.json({ sites });
+});
+
+// 获取单个站点（仅拥有者）
+app.get('/api/sites/:slug', async (c) => {
+  const db = c.env.db;
+  const kv = c.env.SITE_KV;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required' }, 401);
+  const slug = c.req.param('slug');
+  const row = await db.prepare('SELECT * FROM sites WHERE slug = ?').bind(slug).first();
+  if (!row || String(row.owner_id) !== String(identity.userId)) return c.json({ error: 'not_found' }, 404);
+  // v4.24.1：附上托管侧访问统计（与列表接口一致；失败不影响返回）
+  let visits = { total: 0, days: {} };
+  if (kv) {
+    try {
+      const raw = await kv.get(SITE_PREFIX(slug) + '__stats');
+      const o = raw ? JSON.parse(raw) : null;
+      visits = { total: (o && o.total) || 0, days: (o && o.days) || {} };
+    } catch { /* ignore */ }
+  }
+  // v4.26 2.3：附带快照配额信息（前端面板用）
+  let snapshot = { limit: await snapshotQuotaOf(db, identity), used: 0 };
+  try {
+    const idxRaw = await kv.get(SNAP_INDEX(slug));
+    snapshot.used = idxRaw ? JSON.parse(idxRaw).length : 0;
+  } catch { /* ignore */ }
+  return c.json({ site: Object.assign({}, row, { visits, snapshot }) });
+});
+
+// 上传文件（base64 数组 → KV）
+app.post('/api/sites/:slug/files', async (c) => {
+  const db = c.env.db;
+  const kv = c.env.SITE_KV;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required' }, 401);
+  if (!kv) return c.json({ error: 'kv_unbound' }, 500);
+  const slug = c.req.param('slug');
+  const row = await db.prepare('SELECT * FROM sites WHERE slug = ?').bind(slug).first();
+  if (!row || String(row.owner_id) !== String(identity.userId)) return c.json({ error: 'not_found' }, 404);
+  // v4.20：被管理员封禁的站点，站长不能再改动内容
+  if (row.status === 'suspended') return c.json({ error: 'suspended', message: '站点已被封禁，无法修改内容。如有异议请通过工单申诉。' }, 403);
+  const isVip = await isVipIdentity(db, identity);
+  const quota = siteQuota(isVip);
+  let body;
+  try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
+  const files = Array.isArray(body.files) ? body.files : [];
+  if (!files.length) return c.json({ error: 'empty', message: '没有文件' }, 400);
+  // 校验每个文件路径
+  const seen = new Set();
+  let incomingBytes = 0;
+  for (const f of files) {
+    let p = (f.path || '').toString().replace(/^\/+/, '');
+    if (!p || p.includes('..') || p.startsWith('__status')) return c.json({ error: 'bad_path', message: '非法文件路径：' + p }, 400);
+    if (seen.has(p)) return c.json({ error: 'dup_path', message: '重复文件：' + p }, 400);
+    seen.add(p);
+    if (!/^[\x20-\x7e]+$/.test(p)) return c.json({ error: 'bad_path', message: '路径仅支持 ASCII：' + p }, 400);
+    const sz = b64DecodedLen(f.content);
+    if (sz > quota.maxFileBytes) return c.json({ error: 'file_too_large', message: `文件 ${p} 超过单文件上限 ${(quota.maxFileBytes / 1024 / 1024).toFixed(0)}MB`, max: quota.maxFileBytes }, 413);
+    incomingBytes += sz;
+  }
+  const curBytes = row.size_bytes || 0;
+  const curCount = row.file_count || 0;
+  // v4.19.2：同名文件是「覆盖」而非新增，必须按差额累加。
+  // 旧实现直接 curBytes + incomingBytes / curCount + files.length，
+  // 反复编辑保存同一个 index.html 会让容量与文件数虚高，几次就顶满配额、无法再保存。
+  const listed = await kv.list({ prefix: SITE_PREFIX(slug) });
+  const existSizes = new Map();
+  for (const k of (listed.keys || [])) {
+    if (k.name.endsWith('/__status')) continue;
+    existSizes.set(k.name.slice(SITE_PREFIX(slug).length), (k.metadata && k.metadata.size) || 0);
+  }
+  let deltaBytes = 0, deltaCount = 0;
+  for (const f of files) {
+    const p = (f.path || '').toString().replace(/^\/+/, '');
+    const sz = b64DecodedLen(f.content);
+    if (existSizes.has(p)) deltaBytes += sz - existSizes.get(p);
+    else { deltaBytes += sz; deltaCount += 1; }
+  }
+  const newBytes = Math.max(0, curBytes + deltaBytes);
+  const newCount = curCount + deltaCount;
+  if (newBytes > quota.maxSiteBytes) return c.json({ error: 'site_too_large', message: `总大小超过 ${(quota.maxSiteBytes / 1024 / 1024).toFixed(0)}MB 上限`, max: quota.maxSiteBytes }, 413);
+  if (newCount > quota.maxFiles) return c.json({ error: 'too_many_files', message: `文件数超过 ${quota.maxFiles} 上限`, max: quota.maxFiles }, 413);
+  // 写入 KV
+  for (const f of files) {
+    let p = (f.path || '').toString().replace(/^\/+/, '');
+    const ct = (f.contentType && /^[\w/-]+$/.test(f.contentType)) ? f.contentType : guessType(p);
+    const bytes = b64ToBytes(f.content || '');
+    await kv.put(SITE_PREFIX(slug) + p, bytes, { metadata: { contentType: ct, size: bytes.length } });
+  }
+  const newStatus = newCount > 0 ? 'published' : 'draft';
+  await db.prepare("UPDATE sites SET size_bytes = ?, file_count = ?, status = ?, updated_at = datetime('now') WHERE slug = ?")
+    .bind(newBytes, newCount, newStatus, slug).run();
+  await kv.put(SITE_PREFIX(slug) + '__status', newStatus);
+  return c.json({ ok: true, size_bytes: newBytes, file_count: newCount, status: newStatus });
+});
+
+// 列出文件
+app.get('/api/sites/:slug/files', async (c) => {
+  const db = c.env.db;
+  const kv = c.env.SITE_KV;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required' }, 401);
+  if (!kv) return c.json({ error: 'kv_unbound' }, 500);
+  const slug = c.req.param('slug');
+  const row = await db.prepare('SELECT * FROM sites WHERE slug = ?').bind(slug).first();
+  if (!row || String(row.owner_id) !== String(identity.userId)) return c.json({ error: 'not_found' }, 404);
+  const listed = await kv.list({ prefix: SITE_PREFIX(slug) });
+  const files = (listed.keys || [])
+    .filter((k) => !k.name.endsWith('/__status'))
+    .map((k) => {
+      const path = k.name.slice(SITE_PREFIX(slug).length);
+      return { path, size: (k.metadata && k.metadata.size) || 0, contentType: (k.metadata && k.metadata.contentType) || guessType(path) };
+    })
+    .sort((a, b) => a.path.localeCompare(b.path));
+  return c.json({ files });
+});
+
+// 取单个文件原始内容（供编辑使用）：返回 base64 + contentType
+app.get('/api/sites/:slug/file/*', async (c) => {
+  const kv = c.env.SITE_KV;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required' }, 401);
+  if (!kv) return c.json({ error: 'kv_unbound' }, 500);
+  const slug = c.req.param('slug');
+  const up = new URL(c.req.url);
+  const fprefix = '/api/sites/' + slug + '/file/';
+  const path = up.pathname.startsWith(fprefix) ? decodeURIComponent(up.pathname.slice(fprefix.length)) : '';
+  if (!path || path.includes('..') || path.startsWith('__status')) return c.json({ error: 'bad_path' }, 400);
+  const row = await c.env.db.prepare('SELECT * FROM sites WHERE slug = ?').bind(slug).first();
+  if (!row || String(row.owner_id) !== String(identity.userId)) return c.json({ error: 'not_found' }, 404);
+  // KV 坑：{type:'arrayBuffer',metadata:true} 同时传会丢 value → 值/metadata 分两次读。
+  // 且 {type:'arrayBuffer'} 的返回形态随运行时不同：可能是裸 ArrayBuffer，也可能是 {value:ArrayBuffer}。
+  const raw = await kv.get(SITE_PREFIX(slug) + path, { type: 'arrayBuffer' });
+  const meta = await kv.get(SITE_PREFIX(slug) + path, { metadata: true });
+  const buf = (raw && raw.value !== undefined) ? raw.value : raw;
+  if (!buf) return c.json({ error: 'not_found' }, 404);
+  const bytes = new Uint8Array(buf);
+  let bin = '';
+  const CH = 0x8000;
+  for (let i = 0; i < bytes.length; i += CH) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+  const b64 = btoa(bin);
+  const ct = (meta && meta.metadata && meta.metadata.contentType) || guessType(path);
+  return c.json({ path, contentType: ct, content: b64, size: bytes.length });
+});
+
+// 覆盖写单个文件（编辑后保存）
+app.put('/api/sites/:slug/files/*', async (c) => {
+  const db = c.env.db;
+  const kv = c.env.SITE_KV;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required' }, 401);
+  if (!kv) return c.json({ error: 'kv_unbound' }, 500);
+  const slug = c.req.param('slug');
+  const up = new URL(c.req.url);
+  const fprefix = '/api/sites/' + slug + '/files/';
+  const path = up.pathname.startsWith(fprefix) ? decodeURIComponent(up.pathname.slice(fprefix.length)) : '';
+  if (!path || path.includes('..') || path.startsWith('__status')) return c.json({ error: 'bad_path' }, 400);
+  if (!/^[\x20-\x7e]+$/.test(path)) return c.json({ error: 'bad_path', message: '路径仅支持 ASCII' }, 400);
+  const row = await db.prepare('SELECT * FROM sites WHERE slug = ?').bind(slug).first();
+  if (!row || String(row.owner_id) !== String(identity.userId)) return c.json({ error: 'not_found' }, 404);
+  if (row.status === 'suspended') return c.json({ error: 'suspended', message: '站点已被封禁，无法修改内容。如有异议请通过工单申诉。' }, 403);
+  const isVip = await isVipIdentity(db, identity);
+  const quota = siteQuota(isVip);
+  let body;
+  try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
+  const content = body.content || '';
+  const sz = b64DecodedLen(content);
+  if (sz > quota.maxFileBytes) return c.json({ error: 'file_too_large', message: `文件超过单文件上限 ${(quota.maxFileBytes / 1024 / 1024).toFixed(0)}MB` }, 413);
+  // 取旧大小用于差额计算
+  const listed = await kv.list({ prefix: SITE_PREFIX(slug) });
+  const oldMeta = (listed.keys || []).find((k) => k.name === SITE_PREFIX(slug) + path);
+  const oldSize = (oldMeta && oldMeta.metadata && oldMeta.metadata.size) || 0;
+  const newTotal = (row.size_bytes || 0) - oldSize + sz;
+  if (newTotal > quota.maxSiteBytes) return c.json({ error: 'site_too_large', message: `总大小超过 ${(quota.maxSiteBytes / 1024 / 1024).toFixed(0)}MB 上限` }, 413);
+  const ct = (body.contentType && /^[\w/-]+$/.test(body.contentType)) ? body.contentType : guessType(path);
+  await kv.put(SITE_PREFIX(slug) + path, b64ToBytes(content), { metadata: { contentType: ct, size: sz } });
+  // 覆盖已有文件：文件数不变；写到新路径：文件数 +1
+  const newCount = oldMeta ? (row.file_count || 0) : (row.file_count || 0) + 1;
+  const newStatus = newCount > 0 ? 'published' : 'draft';
+  await db.prepare("UPDATE sites SET size_bytes = ?, file_count = ?, status = ?, updated_at = datetime('now') WHERE slug = ?")
+    .bind(newTotal, newCount, newStatus, slug).run();
+  await kv.put(SITE_PREFIX(slug) + '__status', newStatus);
+  return c.json({ ok: true, size_bytes: newTotal, file_count: newCount, contentType: ct });
+});
+
+// 删除单个文件（通配路径）
+app.delete('/api/sites/:slug/files/*', async (c) => {
+  const db = c.env.db;
+  const kv = c.env.SITE_KV;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required' }, 401);
+  if (!kv) return c.json({ error: 'kv_unbound' }, 500);
+  const slug = c.req.param('slug');
+  // 注意：本版本 Hono 的 c.req.param('*') 通配符捕获失效，改从 URL pathname 切片取值
+  const up = new URL(c.req.url);
+  const fprefix = '/api/sites/' + slug + '/files/';
+  const path = up.pathname.startsWith(fprefix) ? decodeURIComponent(up.pathname.slice(fprefix.length)) : '';
+  if (!path || path.includes('..') || path.startsWith('__status')) return c.json({ error: 'bad_path' }, 400);
+  const row = await db.prepare('SELECT * FROM sites WHERE slug = ?').bind(slug).first();
+  if (!row || String(row.owner_id) !== String(identity.userId)) return c.json({ error: 'not_found' }, 404);
+  const key = SITE_PREFIX(slug) + path;
+  const listed = await kv.list({ prefix: SITE_PREFIX(slug) });
+  const meta = (listed.keys || []).find((k) => k.name === key);
+  const sz = (meta && meta.metadata && meta.metadata.size) || 0;
+  await kv.delete(key);
+  const newCount = Math.max(0, (row.file_count || 0) - 1);
+  const newBytes = Math.max(0, (row.size_bytes || 0) - sz);
+  const newStatus = newCount > 0 ? row.status : 'draft';
+  await db.prepare("UPDATE sites SET size_bytes = ?, file_count = ?, status = ?, updated_at = datetime('now') WHERE slug = ?")
+    .bind(newBytes, newCount, newStatus, slug).run();
+  await kv.put(SITE_PREFIX(slug) + '__status', newStatus);
+  return c.json({ ok: true, size_bytes: newBytes, file_count: newCount, status: newStatus });
+});
+
+// 重命名 / 移动文件（v4.24：站点编辑器工作台的「重命名」按钮使用）
+app.post('/api/sites/:slug/rename', async (c) => {
+  const db = c.env.db;
+  const kv = c.env.SITE_KV;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required' }, 401);
+  if (!kv) return c.json({ error: 'kv_unbound' }, 500);
+  const slug = c.req.param('slug');
+  let body;
+  try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
+  const from = (body.from || '').trim();
+  const to = (body.to || '').trim();
+  if (!from || !to || from === to) return c.json({ error: 'bad_path' }, 400);
+  if (from.includes('..') || to.includes('..') || from.startsWith('__') || to.startsWith('__')) return c.json({ error: 'bad_path' }, 400);
+  if (!/^[\x20-\x7e]+$/.test(to)) return c.json({ error: 'bad_path', message: '路径仅支持 ASCII' }, 400);
+  const row = await db.prepare('SELECT * FROM sites WHERE slug = ?').bind(slug).first();
+  if (!row || String(row.owner_id) !== String(identity.userId)) return c.json({ error: 'not_found' }, 404);
+  if (row.status === 'suspended') return c.json({ error: 'suspended', message: '站点已被封禁，无法修改内容。' }, 403);
+  const fromKey = SITE_PREFIX(slug) + from;
+  const toKey = SITE_PREFIX(slug) + to;
+  const meta = await kv.get(fromKey, { metadata: 'json' }); // 单独读 metadata（与 value 分两次，避免组合丢值）
+  const raw = await kv.get(fromKey, { type: 'arrayBuffer' });
+  const buf = (raw && raw.value !== undefined) ? raw.value : raw; // {type:'arrayBuffer'} 返回裸 ArrayBuffer
+  if (!buf) return c.json({ error: 'not_found' }, 404);
+  const m = (meta && meta.metadata) ? meta.metadata : { contentType: guessType(to), size: buf.byteLength };
+  await kv.put(toKey, buf, { metadata: m });
+  await kv.delete(fromKey);
+  return c.json({ ok: true, from, to });
+});
+
+// 删除整个站点
+app.delete('/api/sites/:slug', async (c) => {
+  const db = c.env.db;
+  const kv = c.env.SITE_KV;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required' }, 401);
+  if (!kv) return c.json({ error: 'kv_unbound' }, 500);
+  const slug = c.req.param('slug');
+  const row = await db.prepare('SELECT * FROM sites WHERE slug = ?').bind(slug).first();
+  if (!row || String(row.owner_id) !== String(identity.userId)) return c.json({ error: 'not_found' }, 404);
+  const listed = await kv.list({ prefix: SITE_PREFIX(slug) });
+  for (const k of (listed.keys || [])) { try { await kv.delete(k.name); } catch { /* ignore */ } }
+  await db.prepare('DELETE FROM sites WHERE slug = ?').bind(slug).run();
+  return c.json({ ok: true });
+});
+
+// 发布 / 下架（拥有者）
+app.post('/api/sites/:slug/publish', async (c) => {
+  const db = c.env.db, kv = c.env.SITE_KV;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required' }, 401);
+  if (!kv) return c.json({ error: 'kv_unbound' }, 500);
+  const slug = c.req.param('slug');
+  const row = await db.prepare('SELECT * FROM sites WHERE slug = ?').bind(slug).first();
+  if (!row || String(row.owner_id) !== String(identity.userId)) return c.json({ error: 'not_found' }, 404);
+  if (row.status === 'suspended') return c.json({ error: 'suspended', message: '站点已被封禁，无法发布。如有异议请通过工单申诉。' }, 403);
+  if ((row.file_count || 0) === 0) return c.json({ error: 'no_files', message: '请先上传文件再发布' }, 400);
+  // v4.27：全局站点托管禁用 + 单用户托管禁用
+  const sdf = await db.prepare("SELECT value FROM site_settings WHERE key='disabled_features'").first();
+  if (parseInt(sdf?.value || '0', 10) & DF_SITE) return c.json({ error: 'sites_disabled', message: '站点托管功能已临时关闭' }, 503);
+  if (await isUserFeatureDisabled(db, identity.userId, DF_SITE)) return c.json({ error: 'your_sites_disabled', message: '你的站点托管功能已被管理员关闭' }, 403);
+  await db.prepare("UPDATE sites SET status = 'published', updated_at = datetime('now') WHERE slug = ?").bind(slug).run();
+  await kv.put(SITE_PREFIX(slug) + '__status', 'published');
+  // v4.26 2.3：发布时自动留一份快照；超配额则删除最旧的自动快照（保留手动快照）
+  try {
+    const limit = await snapshotQuotaOf(db, identity);
+    await createSnapshot(kv, slug, '', 1);
+    const idxRaw = await kv.get(SNAP_INDEX(slug));
+    let idx = idxRaw ? JSON.parse(idxRaw) : [];
+    while (idx.length > limit) {
+      const old = idx[idx.length - 1];
+      if (!old || !old.auto) break;
+      const snapList = await kv.list({ prefix: SNAP_DIR(slug, old.v), limit: 1000 });
+      for (const k of (snapList.keys || [])) { try { await kv.delete(k.name); } catch { /* ignore */ } }
+      idx = idx.filter((x) => x.v !== old.v);
+    }
+    await kv.put(SNAP_INDEX(slug), JSON.stringify(idx));
+  } catch { /* 快照失败不影响发布 */ }
+  return c.json({ ok: true, status: 'published' });
+});
+app.post('/api/sites/:slug/unpublish', async (c) => {
+  const db = c.env.db, kv = c.env.SITE_KV;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required' }, 401);
+  if (!kv) return c.json({ error: 'kv_unbound' }, 500);
+  const slug = c.req.param('slug');
+  const row = await db.prepare('SELECT * FROM sites WHERE slug = ?').bind(slug).first();
+  if (!row || String(row.owner_id) !== String(identity.userId)) return c.json({ error: 'not_found' }, 404);
+  await db.prepare("UPDATE sites SET status = 'draft', updated_at = datetime('now') WHERE slug = ?").bind(slug).run();
+  await kv.put(SITE_PREFIX(slug) + '__status', 'draft');
+  return c.json({ ok: true, status: 'draft' });
+});
+
+// 管理员封禁 / 解封站点（滥用治理）
+app.post('/api/sites/:slug/suspend', async (c) => {
+  const db = c.env.db, kv = c.env.SITE_KV;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required' }, 401);
+  if (!kv) return c.json({ error: 'kv_unbound' }, 500);
+  if (!(await hasAdminPerm(db, identity, 'ban_sites'))) return c.json({ error: 'forbidden', message: '无封禁站点权限（需 ban_sites）' }, 403);
+  const slug = c.req.param('slug');
+  const row = await db.prepare('SELECT * FROM sites WHERE slug = ?').bind(slug).first();
+  if (!row) return c.json({ error: 'not_found' }, 404);
+  let reason = '';
+  try { const b = await c.req.json(); reason = (b?.reason || '').toString().slice(0, 200); } catch { /* 无 body 也可封禁 */ }
+  if (!reason) reason = '违反站点托管规范';
+  await db.prepare("UPDATE sites SET status = 'suspended', suspend_reason = ?, updated_at = datetime('now') WHERE slug = ?").bind(reason, slug).run();
+  await kv.put(SITE_PREFIX(slug) + '__status', 'suspended');
+  // 通知站长
+  try {
+    await createNotification(db, row.owner_id, 'site',
+      '⛔ 你的站点 ' + slug + ' 已被下架',
+      '原因：' + reason + '。如有异议请通过工单申诉。',
+      '/sites/' + slug);
+  } catch { /* 通知失败不影响主流程 */ }
+  return c.json({ ok: true, status: 'suspended', reason });
+});
+app.post('/api/sites/:slug/unsuspend', async (c) => {
+  const db = c.env.db, kv = c.env.SITE_KV;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required' }, 401);
+  if (!kv) return c.json({ error: 'kv_unbound' }, 500);
+  if (!(await hasAdminPerm(db, identity, 'ban_sites'))) return c.json({ error: 'forbidden', message: '无解封站点权限（需 ban_sites）' }, 403);
+  const slug = c.req.param('slug');
+  const row = await db.prepare('SELECT * FROM sites WHERE slug = ?').bind(slug).first();
+  if (!row) return c.json({ error: 'not_found' }, 404);
+  const status = (row.file_count || 0) > 0 ? 'published' : 'draft';
+  await db.prepare("UPDATE sites SET status = ?, suspend_reason = NULL, updated_at = datetime('now') WHERE slug = ?").bind(status, slug).run();
+  await kv.put(SITE_PREFIX(slug) + '__status', status);
+  try {
+    await createNotification(db, row.owner_id, 'site',
+      '✅ 你的站点 ' + slug + ' 已恢复',
+      '站点已解除封禁，可正常访问。',
+      '/sites/' + slug);
+  } catch { /* 通知失败不影响主流程 */ }
+  return c.json({ ok: true, status });
+});
+
+// ========== v4.20：管理后台「站点管理」 ==========
+// 列表：全站站点 + 站长信息 + 待处理举报数；支持封禁/解封/删除。
+
+app.get('/api/admin/sites', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (!(await hasAdminPerm(db, identity, 'view_sites'))) return c.json({ error: 'forbidden', message: '无查看站点权限（需 view_sites）' }, 403);
+  const q = (c.req.query('q') || '').trim();
+  const status = (c.req.query('status') || '').trim();
+  const where = [], binds = [];
+  if (q) { where.push('(s.slug LIKE ? OR s.title LIKE ? OR u.username LIKE ?)'); binds.push('%' + q + '%', '%' + q + '%', '%' + q + '%'); }
+  if (status) { where.push('s.status = ?'); binds.push(status); }
+  const whereSql = where.length ? 'WHERE ' + where.join(' AND ') : '';
+  const rows = await db.prepare(
+    `SELECT s.slug, s.title, s.status, s.owner_id, s.file_count, s.size_bytes, s.suspend_reason, s.created_at, s.updated_at,
+            u.username AS owner_name, u.display_name AS owner_display,
+            (SELECT COUNT(*) FROM tickets tk WHERE tk.category='report' AND tk.related_site_slug = s.slug AND tk.status IN ('open','reviewing')) AS report_count
+     FROM sites s LEFT JOIN users u ON u.id = s.owner_id
+     ${whereSql} ORDER BY s.updated_at DESC LIMIT 100`
+  ).bind(...binds).all();
+  const sites = (rows.results || []).map((r) => ({ ...r, url: SITES_HOST + '/' + r.slug }));
+  // v4.24：附上托管侧访问统计（最终一致；失败不影响列表）
+  const kv = c.env.SITE_KV;
+  if (kv) {
+    await Promise.all(sites.map(async (s) => {
+      try {
+        const raw = await kv.get(SITE_PREFIX(s.slug) + '__stats');
+        const o = raw ? JSON.parse(raw) : null;
+        s.visits = { total: (o && o.total) || 0, days: (o && o.days) || {} };
+      } catch { s.visits = { total: 0, days: {} }; }
+    }));
+  }
+  return c.json({ sites });
+});
+
+app.delete('/api/admin/sites/:slug', async (c) => {
+  const db = c.env.db, kv = c.env.SITE_KV;
+  const identity = await getIdentity(c);
+  if (!(await hasAdminPerm(db, identity, 'delete_sites'))) return c.json({ error: 'forbidden', message: '无删除站点权限（需 delete_sites）' }, 403);
+  const slug = c.req.param('slug');
+  const row = await db.prepare('SELECT slug, owner_id FROM sites WHERE slug = ?').bind(slug).first();
+  if (!row) return c.json({ error: 'not_found' }, 404);
+  if (kv) {
+    try {
+      const listed = await kv.list({ prefix: SITE_PREFIX(slug) });
+      for (const k of (listed.keys || [])) { try { await kv.delete(k.name); } catch { /* ignore */ } }
+    } catch { /* ignore */ }
+  }
+  await db.prepare('DELETE FROM sites WHERE slug = ?').bind(slug).run();
+  try {
+    await createNotification(db, row.owner_id, 'site',
+      '🗑 你的站点 ' + slug + ' 已被管理员删除',
+      '如有异议请通过工单申诉。', '/sites');
+  } catch { /* ignore */ }
+  return c.json({ ok: true });
+});
+
+// ========== v4.26：2.3 站点版本快照 + 配额 ==========
+
+// 快照配额：NULL=按 VIP 派生（普通 3 / VIP 5），否则用管理员单独设置的值
+function snapshotQuotaForRow(u) {
+  if (u && u.snapshot_quota != null && u.snapshot_quota !== '') return Math.max(0, parseInt(u.snapshot_quota, 10) || 0);
+  return isVipActive(u) ? 5 : 3;
+}
+async function snapshotQuotaOf(db, identity) {
+  const u = await db.prepare('SELECT snapshot_quota, is_vip, vip_until FROM users WHERE id = ?').bind(String(identity.userId)).first();
+  return snapshotQuotaForRow(u);
+}
+const SNAP_INDEX = (slug) => SITE_PREFIX(slug) + '__snapshots/__index';
+const SNAP_DIR = (slug, v) => SITE_PREFIX(slug) + '__snapshots/' + v + '/';
+
+// 取当前站点真实文件（排除 __status / __stats / __snapshots）
+async function listSiteFiles(kv, slug) {
+  const listed = await kv.list({ prefix: SITE_PREFIX(slug), limit: 1000 });
+  return (listed.keys || []).filter((k) => {
+    const p = k.name.slice(SITE_PREFIX(slug).length);
+    return p && !p.startsWith('__') && !k.name.endsWith('/');
+  });
+}
+async function readKVBytes(kv, name) {
+  const raw = await kv.get(name, { type: 'arrayBuffer' });
+  return (raw && raw.value !== undefined) ? raw.value : raw;
+}
+async function readKVMeta(kv, name) {
+  const r = await kv.get(name, { metadata: true });
+  return (r && r.metadata) || {};
+}
+
+// 创建快照：把当前站点文件复制到 __snapshots/{v}/
+async function createSnapshot(kv, slug, label, auto) {
+  const files = await listSiteFiles(kv, slug);
+  const idxRaw = await kv.get(SNAP_INDEX(slug));
+  const idx = idxRaw ? JSON.parse(idxRaw) : [];
+  const nextV = (idx.reduce((a, b) => Math.max(a, b.v), 0) || 0) + 1;
+  let size = 0;
+  for (const k of files) {
+    const path = k.name.slice(SITE_PREFIX(slug).length);
+    const buf = await readKVBytes(kv, k.name);
+    const meta = await readKVMeta(kv, k.name);
+    await kv.put(SNAP_DIR(slug, nextV) + path, buf, { metadata: meta });
+    size += (meta && meta.size) || (buf && buf.byteLength) || 0;
+  }
+  const filesList = files.map((k) => k.name.slice(SITE_PREFIX(slug).length));
+  const meta = {
+    v: nextV,
+    created_at: new Date().toISOString().slice(0, 19).replace('T', ' '),
+    label: label || (auto ? '自动快照 #' + nextV : '快照 #' + nextV),
+    size, files: files.length, filesList, auto: auto ? 1 : 0
+  };
+  idx.unshift(meta);
+  await kv.put(SNAP_INDEX(slug), JSON.stringify(idx));
+  return meta;
+}
+
+// 手动保存快照
+app.post('/api/sites/:slug/snapshots', async (c) => {
+  const db = c.env.db, kv = c.env.SITE_KV;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required' }, 401);
+  if (!kv) return c.json({ error: 'kv_unbound' }, 500);
+  const slug = c.req.param('slug');
+  const row = await db.prepare('SELECT * FROM sites WHERE slug = ?').bind(slug).first();
+  if (!row || String(row.owner_id) !== String(identity.userId)) return c.json({ error: 'not_found' }, 404);
+  if (row.status === 'suspended') return c.json({ error: 'suspended' }, 403);
+  const limit = await snapshotQuotaOf(db, identity);
+  const idxRaw = await kv.get(SNAP_INDEX(slug));
+  const idx = idxRaw ? JSON.parse(idxRaw) : [];
+  if (idx.length >= limit) return c.json({ error: 'snapshot_limit', message: `快照已达上限（${limit} 份），请先删除旧快照`, limit }, 413);
+  let label = '';
+  try { const b = await c.req.json(); label = (b.label || '').toString().slice(0, 60); } catch { /* 可无 body */ }
+  const meta = await createSnapshot(kv, slug, label, 0);
+  return c.json({ ok: true, snapshot: meta });
+});
+
+// 列出快照 + 配额
+app.get('/api/sites/:slug/snapshots', async (c) => {
+  const db = c.env.db, kv = c.env.SITE_KV;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required' }, 401);
+  const slug = c.req.param('slug');
+  const row = await db.prepare('SELECT * FROM sites WHERE slug = ?').bind(slug).first();
+  if (!row || String(row.owner_id) !== String(identity.userId)) return c.json({ error: 'not_found' }, 404);
+  const limit = await snapshotQuotaOf(db, identity);
+  const idxRaw = await kv.get(SNAP_INDEX(slug));
+  const snapshots = idxRaw ? JSON.parse(idxRaw) : [];
+  return c.json({ limit, used: snapshots.length, snapshots });
+});
+
+// 回滚到某快照（精确还原：删除现存真实文件，再写回快照文件）
+app.post('/api/sites/:slug/snapshots/:v/restore', async (c) => {
+  const db = c.env.db, kv = c.env.SITE_KV;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required' }, 401);
+  if (!kv) return c.json({ error: 'kv_unbound' }, 500);
+  const slug = c.req.param('slug');
+  const v = parseInt(c.req.param('v'), 10);
+  const row = await db.prepare('SELECT * FROM sites WHERE slug = ?').bind(slug).first();
+  if (!row || String(row.owner_id) !== String(identity.userId)) return c.json({ error: 'not_found' }, 404);
+  if (row.status === 'suspended') return c.json({ error: 'suspended' }, 403);
+  const idxRaw = await kv.get(SNAP_INDEX(slug));
+  const idx = idxRaw ? JSON.parse(idxRaw) : [];
+  const meta = idx.find((x) => x.v === v);
+  if (!meta) return c.json({ error: 'snapshot_not_found' }, 404);
+  // 删除当前真实文件
+  const live = await listSiteFiles(kv, slug);
+  for (const k of live) { try { await kv.delete(k.name); } catch { /* ignore */ } }
+  // 写回快照文件（按快照索引里记录的精确路径读取，绕开 kv.list 的最终一致性延迟）
+  let filesList = (meta.filesList && meta.filesList.length) ? meta.filesList : null;
+  if (!filesList) {
+    const snapList = await kv.list({ prefix: SNAP_DIR(slug, v), limit: 1000 });
+    filesList = (snapList.keys || []).filter((k) => !k.name.endsWith('/') && !k.name.endsWith('__meta')).map((k) => k.name.slice(SNAP_DIR(slug, v).length));
+  }
+  let restored = 0;
+  for (const path of filesList) {
+    const buf = await readKVBytes(kv, SNAP_DIR(slug, v) + path);
+    if (!buf) continue; // 跳过读取失败的文件，避免写出空文件导致站点损坏
+    const m = await readKVMeta(kv, SNAP_DIR(slug, v) + path);
+    await kv.put(SITE_PREFIX(slug) + path, buf, { metadata: m });
+    restored++;
+  }
+  await db.prepare('UPDATE sites SET size_bytes = ?, file_count = ?, updated_at = datetime(\'now\') WHERE slug = ?').bind(meta.size || 0, meta.files || 0, slug).run();
+  await kv.put(SITE_PREFIX(slug) + '__status', row.status === 'published' ? 'published' : 'draft');
+  return c.json({ ok: true, size_bytes: meta.size || 0, file_count: meta.files || 0 });
+});
+
+// 删除某快照
+app.delete('/api/sites/:slug/snapshots/:v', async (c) => {
+  const db = c.env.db, kv = c.env.SITE_KV;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required' }, 401);
+  if (!kv) return c.json({ error: 'kv_unbound' }, 500);
+  const slug = c.req.param('slug');
+  const v = parseInt(c.req.param('v'), 10);
+  const row = await db.prepare('SELECT * FROM sites WHERE slug = ?').bind(slug).first();
+  if (!row || String(row.owner_id) !== String(identity.userId)) return c.json({ error: 'not_found' }, 404);
+  const idxRaw = await kv.get(SNAP_INDEX(slug));
+  const idx = idxRaw ? JSON.parse(idxRaw) : [];
+  const newIdx = idx.filter((x) => x.v !== v);
+  if (newIdx.length === idx.length) return c.json({ error: 'snapshot_not_found' }, 404);
+  const filesList = (meta.filesList && meta.filesList.length) ? meta.filesList : [];
+  for (const path of filesList) { try { await kv.delete(SNAP_DIR(slug, v) + path); } catch { /* ignore */ } }
+  await kv.put(SNAP_INDEX(slug), JSON.stringify(newIdx));
+  return c.json({ ok: true, limit: await snapshotQuotaOf(db, identity), used: newIdx.length });
+});
+
+// 管理员单人设置快照配额
+app.post('/api/admin/users/:id/snapshot-quota', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (!(await hasAdminPerm(db, identity, 'manage_snapshot_quota'))) return c.json({ error: 'forbidden', message: '需 manage_snapshot_quota 权限' }, 403);
+  const id = c.req.param('id');
+  let body; try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
+  const q = body.quota;
+  if (q === null || q === undefined || q === '') {
+    await db.prepare('UPDATE users SET snapshot_quota = NULL WHERE id = ?').bind(id).run();
+    return c.json({ ok: true, quota: null });
+  }
+  const n = parseInt(q, 10);
+  if (isNaN(n) || n < 0 || n > 50) return c.json({ error: 'bad_quota' }, 400);
+  await db.prepare('UPDATE users SET snapshot_quota = ? WHERE id = ?').bind(n, id).run();
+  return c.json({ ok: true, quota: n });
+});
+
+// 管理员批量设置快照配额：scope = all | vip | normal |（ids 数组精确指定）
+app.post('/api/admin/users/snapshot-quota', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (!(await hasAdminPerm(db, identity, 'manage_snapshot_quota'))) return c.json({ error: 'forbidden', message: '需 manage_snapshot_quota 权限' }, 403);
+  let body; try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
+  const n = parseInt(body.quota, 10);
+  if (isNaN(n) || n < 0 || n > 50) return c.json({ error: 'bad_quota' }, 400);
+  const scope = body.scope || 'ids';
+  const ids = Array.isArray(body.ids) ? body.ids.map((x) => parseInt(x, 10)).filter((x) => x) : [];
+  let count = 0;
+  if (scope === 'all') {
+    const r = await db.prepare('UPDATE users SET snapshot_quota = ?').bind(n).run(); count = r.meta.changes || 0;
+  } else if (scope === 'vip') {
+    const r = await db.prepare("UPDATE users SET snapshot_quota = ? WHERE is_vip = 1 AND (vip_until IS NULL OR vip_until > datetime('now'))").bind(n).run(); count = r.meta.changes || 0;
+  } else if (scope === 'normal') {
+    const r = await db.prepare("UPDATE users SET snapshot_quota = ? WHERE NOT (is_vip = 1 AND (vip_until IS NULL OR vip_until > datetime('now')))").bind(n).run(); count = r.meta.changes || 0;
+  } else if (ids.length) {
+    const ph = ids.map(() => '?').join(',');
+    const r = await db.prepare('UPDATE users SET snapshot_quota = ? WHERE id IN (' + ph + ')').bind(n, ...ids).run(); count = r.meta.changes || 0;
+  }
+  return c.json({ ok: true, scope, quota: n, affected: count });
+});
+
+// ========== v4.26：2.4 聊天增强 ==========
+const CHAT_FILE_MAX = 5 * 1024 * 1024; // 单附件上限 5MB
+
+// 上传聊天附件（base64）→ KV，返回可访问 URL
+app.post('/api/chat/upload', async (c) => {
+  const db = c.env.db, kv = c.env.SITE_KV;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required' }, 401);
+  if (!kv) return c.json({ error: 'kv_unbound' }, 500);
+  let body; try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
+  const convId = parseInt(body.conv_id, 10);
+  const member = await getChatMember(db, convId, identity.userId);
+  if (!member) return c.json({ error: 'forbidden' }, 403);
+  const name = (body.name || 'file').toString().slice(0, 120);
+  const type = (body.type || 'application/octet-stream').toString().slice(0, 120);
+  const data = String(body.data || '');
+  const bytes = b64DecodedLen(data);
+  if (!bytes) return c.json({ error: 'empty' }, 400);
+  if (bytes > CHAT_FILE_MAX) return c.json({ error: 'too_large', max: CHAT_FILE_MAX }, 413);
+  const id = 'cf' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  await kv.put('chat_files/' + id, b64ToBytes(data), { metadata: { name, type, size: bytes, conv_id: convId, uploader: String(identity.userId) } });
+  return c.json({ ok: true, id, url: '/api/chat/files/' + id, name, type, size: bytes });
+});
+
+// 取聊天附件（图片 inline，其余下载）
+app.get('/api/chat/files/:id', async (c) => {
+  const kv = c.env.SITE_KV;
+  if (!kv) return c.text('kv_unbound', 500);
+  const id = c.req.param('id');
+  const raw = await kv.get('chat_files/' + id, { type: 'arrayBuffer' });
+  const meta = await kv.get('chat_files/' + id, { metadata: true });
+  const buf = (raw && raw.value !== undefined) ? raw.value : raw;
+  if (!buf) return c.text('not found', 404);
+  const m = (meta && meta.metadata) || {};
+  const headers = { 'Content-Type': m.type || 'application/octet-stream', 'Cache-Control': 'public, max-age=86400' };
+  if ((m.type || '').startsWith('image/')) headers['Content-Disposition'] = 'inline';
+  else headers['Content-Disposition'] = 'attachment; filename="' + encodeURIComponent(m.name || 'file') + '"';
+  return new Response(buf, { status: 200, headers });
+});
+
+// 撤回消息（发送者本人、2 分钟内）
+app.post('/api/chat/conversations/:id/messages/:mid/recall', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required' }, 401);
+  const convId = parseInt(c.req.param('id'), 10);
+  const mid = parseInt(c.req.param('mid'), 10);
+  const member = await getChatMember(db, convId, identity.userId);
+  if (!member) return c.json({ error: 'forbidden' }, 403);
+  const msg = await db.prepare('SELECT id, sender_id, created_at FROM chat_messages WHERE id = ? AND conv_id = ?').bind(mid, convId).first();
+  if (!msg) return c.json({ error: 'not_found' }, 404);
+  if (String(msg.sender_id) !== String(identity.userId)) return c.json({ error: 'not_sender' }, 403);
+  const ts = new Date(String(msg.created_at).replace(' ', 'T') + 'Z').getTime();
+  if (Date.now() - ts > 2 * 60 * 1000) return c.json({ error: 'too_late', message: '超过 2 分钟，无法撤回' }, 403);
+  await db.prepare("UPDATE chat_messages SET recalled = 1, content = '' WHERE id = ?").bind(mid).run();
+  await chatBumpVersion(c.env.SITE_KV, Number(msg.conv_id)); // v4.30：撤回后失效缓存
+  return c.json({ ok: true });
+});
+
+// 群公告 / 群头像（仅群主、非总群）
+app.post('/api/chat/groups/:id/announcement', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required' }, 401);
+  const convId = parseInt(c.req.param('id'), 10);
+  const member = await getChatMember(db, convId, identity.userId);
+  if (!member) return c.json({ error: 'forbidden' }, 403);
+  const conv = await db.prepare('SELECT id, type, is_global, owner_id FROM chat_conversations WHERE id = ?').bind(convId).first();
+  if (!conv || conv.type !== 'group' || conv.is_global) return c.json({ error: 'not_allowed' }, 400);
+  if (member.role !== 'owner' && conv.owner_id !== identity.userId) return c.json({ error: 'not_owner' }, 403);
+  let body; try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
+  const announcement = String(body.announcement || '').slice(0, 500);
+  await db.prepare('UPDATE chat_conversations SET announcement = ? WHERE id = ?').bind(announcement, convId).run();
+  return c.json({ ok: true, announcement });
+});
+app.post('/api/chat/groups/:id/avatar', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'login_required' }, 401);
+  const convId = parseInt(c.req.param('id'), 10);
+  const member = await getChatMember(db, convId, identity.userId);
+  if (!member) return c.json({ error: 'forbidden' }, 403);
+  const conv = await db.prepare('SELECT id, type, is_global, owner_id FROM chat_conversations WHERE id = ?').bind(convId).first();
+  if (!conv || conv.type !== 'group' || conv.is_global) return c.json({ error: 'not_allowed' }, 400);
+  if (member.role !== 'owner' && conv.owner_id !== identity.userId) return c.json({ error: 'not_owner' }, 403);
+  let body; try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
+  const avatar = String(body.avatar || '').slice(0, 500);
+  await db.prepare('UPDATE chat_conversations SET avatar = ? WHERE id = ?').bind(avatar, convId).run();
+  return c.json({ ok: true, avatar });
+});
+
+// ========== v4.29：IP 治理 ==========
+
+// 同 IP 聚合：近 N 天内用同一 IP 注册的账号分组
+app.get('/api/admin/ip-groups', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (!(await hasAdminPerm(db, identity, 'manage_ip'))) return c.json({ error: 'forbidden', message: '无 IP 治理权限（需 manage_ip）' }, 403);
+  const days = Math.min(30, Math.max(1, parseInt(c.req.query('days') || '1', 10) || 1));
+  const q = (c.req.query('q') || '').trim().slice(0, 40);
+  let rows;
+  try {
+    rows = await db.prepare(
+      `SELECT ui.ip AS ip, ui.created_at AS first_at, u.id AS id, u.username, u.display_name, u.banned, u.ban_until, u.role, u.created_at AS user_created
+       FROM user_ips ui JOIN users u ON u.id = ui.user_id
+       WHERE ui.created_at >= datetime('now', ?)` + (q ? ' AND ui.ip LIKE ?' : '') +
+      ` ORDER BY ui.ip ASC, ui.created_at DESC LIMIT 500`
+    ).bind('-' + days + ' days', ...(q ? ['%' + q + '%'] : [])).all();
+  } catch (e) { return c.json({ error: 'query_failed', message: String((e && e.message) || e) }, 500); }
+  const byIp = new Map();
+  for (const r of (rows.results || [])) {
+    if (!byIp.has(r.ip)) byIp.set(r.ip, { ip: r.ip, first_at: r.first_at, users: [] });
+    const g = byIp.get(r.ip);
+    // 同 IP 同账号只列一次（user_ips 可能有多行）
+    if (!g.users.some((u) => String(u.id) === String(r.id))) {
+      g.users.push({ id: r.id, username: r.username, display_name: r.display_name || r.username, banned: !!r.banned, ban_until: r.ban_until || null, role: r.role });
+    }
+  }
+  const groups = [...byIp.values()].filter((g) => g.users.length > 0).sort((a, b) => b.users.length - a.users.length || String(a.ip).localeCompare(String(b.ip)));
+  return c.json({ groups, days });
+});
+
+// 封禁 IP / 网段
+app.post('/api/admin/ip-bans', async (c) => {
+  const identity = await getIdentity(c);
+  if (!(await hasAdminPerm(c.env.db, identity, 'manage_ip'))) return c.json({ error: 'forbidden', message: '无 IP 治理权限（需 manage_ip）' }, 403);
+  const db = c.env.db;
+  let body; try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
+  const target = normalizeBanTarget(body.value);
+  if (!target) return c.json({ error: 'invalid_target', message: '请输入合法的 IPv4 或网段（如 1.2.3.4 或 1.2.3.0/24）' }, 400);
+  // days 支持小数；<0 视为取消永久；0 表示立即解封（删除记录）
+  const daysRaw = body.days === undefined || body.days === null || body.days === '' ? null : Number(body.days);
+  if (daysRaw !== null && !Number.isFinite(daysRaw)) return c.json({ error: 'invalid_days' }, 400);
+  const reason = String(body.reason || '').slice(0, 200);
+  if (daysRaw !== null && daysRaw <= 0) {
+    await db.prepare('DELETE FROM ip_bans WHERE kind = ? AND value = ?').bind(target.kind, target.value).run();
+    return c.json({ ok: true, removed: true });
+  }
+  // v4.32.1：自锁保护——禁止把开发者（站长）或执行者自己当前的 IP / 网段拉黑，避免运维被锁在门外
+  const execIp = clientIp(c);
+  let devIps = [];
+  try {
+    const dres = await db.prepare("SELECT DISTINCT ui.ip AS ip FROM user_ips ui JOIN users u ON u.id = ui.user_id WHERE u.role = 'developer'").all();
+    devIps = (dres.results || []).map((r) => r.ip).filter((x) => ipToInt(x) !== null);
+  } catch { /* 表未迁移则跳过开发者保护，不阻断正常封禁 */ }
+  const hitsSelfOrDev = (kind, value) => {
+    if (kind === 'ip') {
+      if (execIp && value === execIp) return true;
+      if (devIps.includes(value)) return true;
+    } else {
+      if (execIp && cidrContains(value, execIp)) return true;
+      if (devIps.some((ip) => cidrContains(value, ip))) return true;
+    }
+    return false;
+  };
+  if (hitsSelfOrDev(target.kind, target.value)) {
+    return c.json({ error: 'ban_self_or_dev', message: '不能封禁你自己或开发者（站长）的 IP / 网段（含覆盖其 IP 的网段）' }, 400);
+  }
+  const until = daysRaw === null ? null : new Date(Date.now() + daysRaw * 86400e3).toISOString().replace('T', ' ').slice(0, 19);
+  await db.prepare(
+    `INSERT INTO ip_bans (kind, value, reason, banned_by, ban_until) VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(kind, value) DO UPDATE SET reason = excluded.reason, banned_by = excluded.banned_by, ban_until = excluded.ban_until, banned_at = datetime('now')`
+  ).bind(target.kind, target.value, reason, identity?.userId ?? null, until).run();
+  return c.json({ ok: true, kind: target.kind, value: target.value, ban_until: until });
+});
+
+app.get('/api/admin/ip-bans', async (c) => {
+  const identity = await getIdentity(c);
+  if (!(await hasAdminPerm(c.env.db, identity, 'manage_ip'))) return c.json({ error: 'forbidden', message: '无 IP 治理权限（需 manage_ip）' }, 403);
+  try {
+    const rows = await c.env.db.prepare('SELECT id, kind, value, reason, banned_at, ban_until FROM ip_bans ORDER BY banned_at DESC LIMIT 200').all();
+    return c.json({ bans: rows.results || [] });
+  } catch (e) { return c.json({ bans: [], error: String((e && e.message) || e) }, 200); }
+});
+
+// 解除某个 IP 的所有封禁（精确 IP）
+app.delete('/api/admin/ip-bans/:kind/:value', async (c) => {
+  const identity = await getIdentity(c);
+  if (!(await hasAdminPerm(c.env.db, identity, 'manage_ip'))) return c.json({ error: 'forbidden', message: '无 IP 治理权限（需 manage_ip）' }, 403);
+  const kind = c.req.param('kind') === 'cidr' ? 'cidr' : 'ip';
+  let value = c.req.param('value'); try { value = decodeURIComponent(value); } catch {}
+  const t = normalizeBanTarget(value);
+  if (!t) return c.json({ error: 'invalid_target' }, 400);
+  await c.env.db.prepare('DELETE FROM ip_bans WHERE kind = ? AND value = ?').bind(kind, t.value).run();
+  return c.json({ ok: true });
+});
+
+// ========== v4.29：聊天治理 ==========
+
+// 群聊列表（私聊走 separate=1）
+app.get('/api/admin/chat-conversations', async (c) => {
+  const identity = await getIdentity(c);
+  if (!(await isAdminIdentity(c.env.db, identity))) return c.json({ error: 'forbidden' }, 403);
+  const db = c.env.db;
+  const mode = c.req.query('type') === 'single' ? 'single' : 'group';
+  const page = Math.max(1, parseInt(c.req.query('page') || '1', 10) || 1);
+  const pageSize = Math.min(100, Math.max(1, parseInt(c.req.query('pageSize') || '50', 10) || 50));
+  const q = (c.req.query('q') || '').trim();
+  try {
+    const where = ["type = ?"]; const params = [mode];
+    if (q) { where.push('(name LIKE ? OR id = ?)'); params.push('%' + q + '%', parseInt(q, 10) || 0); }
+    const W = where.join(' AND ');
+    const total = await db.prepare(`SELECT COUNT(*) AS c FROM chat_conversations WHERE ${W}`).bind(...params).first();
+    const rows = await db.prepare(
+      `SELECT c.id, c.name, c.is_global, c.owner_id, c.join_mode, c.created_at, u.username AS owner_name, u.display_name AS owner_display,
+              (SELECT COUNT(*) FROM chat_members m WHERE m.conv_id = c.id AND m.left = 0) AS member_count,
+              (SELECT COUNT(*) FROM chat_messages msg WHERE msg.conv_id = c.id) AS msg_count,
+              (SELECT MAX(created_at) FROM chat_messages msg2 WHERE msg2.conv_id = c.id) AS last_at
+       FROM chat_conversations c LEFT JOIN users u ON u.id = c.owner_id
+       WHERE ${W} ORDER BY c.is_global DESC, member_count DESC, c.id DESC LIMIT ? OFFSET ?`
+    ).bind(...params, pageSize, (page - 1) * pageSize).all();
+    return c.json({
+      conversations: (rows.results || []).map((r) => ({
+        id: r.id, name: r.name || (r.is_global ? '全站总群' : '群聊 #' + r.id), is_global: !!r.is_global,
+        owner_id: r.owner_id, owner_name: r.owner_display || r.owner_name || '', join_mode: r.join_mode || 'open',
+        member_count: r.member_count || 0, msg_count: r.msg_count || 0, last_at: r.last_at || r.created_at
+      })),
+      page, pageSize, total: total?.c || 0, totalPages: Math.max(1, Math.ceil((total?.c || 0) / pageSize))
+    });
+  } catch (e) { return c.json({ error: 'query_failed', message: String((e && e.message) || e) }, 500); }
+});
+
+// 一键删群（连同消息与成员）
+app.delete('/api/admin/chat-conversations/:id', async (c) => {
+  const identity = await getIdentity(c);
+  if (!(await hasAdminPerm(c.env.db, identity, 'delete_user'))) return c.json({ error: 'forbidden', message: '无删除权限' }, 403);
+  const db = c.env.db;
+  const id = parseInt(c.req.param('id'), 10);
+  if (!Number.isFinite(id) || id <= 0) return c.json({ error: 'bad_id' }, 400);
+  const conv = await db.prepare('SELECT id, is_global FROM chat_conversations WHERE id = ?').bind(id).first();
+  if (!conv) return c.json({ error: 'not_found' }, 404);
+  if (conv.is_global) return c.json({ error: 'cannot_delete_global', message: '全站总群不可删除' }, 400);
+  await db.prepare('DELETE FROM chat_messages WHERE conv_id = ?').bind(id).run();
+  await chatBumpVersion(c.env.SITE_KV, id); // v4.30：后台删群后失效缓存
+  await db.prepare('DELETE FROM chat_members WHERE conv_id = ?').bind(id).run();
+  await db.prepare('DELETE FROM chat_join_requests WHERE conv_id = ?').bind(id).run();
+  await db.prepare('DELETE FROM chat_conversations WHERE id = ?').bind(id).run();
+  return c.json({ ok: true, deleted: id });
+});
+
+// ========== v4.29：群管理（管理员 / 审核 / 邀请链接）============
+
+/** 群权限：owner / admin 可管理；返回 null 表示无权 */
+async function chatGroupAdminRole(db, convId, userId) {
+  if (!userId) return null;
+  const m = await db.prepare('SELECT role FROM chat_members WHERE conv_id = ? AND user_id = ? AND left = 0').bind(convId, String(userId)).first();
+  if (m && (m.role === 'owner' || m.role === 'admin')) return m.role;
+  const conv = await db.prepare('SELECT owner_id FROM chat_conversations WHERE id = ?').bind(convId).first();
+  if (conv && String(conv.owner_id) === String(userId)) return 'owner';
+  return null;
+}
+
+// 群详情（含我在其中的角色、成员、待审列表）
+app.get('/api/chat/conversations/:id/manage', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (identity?.type !== 'user') return c.json({ error: 'unauthorized' }, 401);
+  const convId = parseInt(c.req.param('id'), 10);
+  const conv = await db.prepare('SELECT id, type, name, owner_id, is_global, join_mode, invite_code FROM chat_conversations WHERE id = ?').bind(convId).first();
+  if (!conv) return c.json({ error: 'not_found' }, 404);
+  const myRole = await chatGroupAdminRole(db, convId, identity.userId);
+  const isMember = !!(await db.prepare('SELECT 1 AS x FROM chat_members WHERE conv_id = ? AND user_id = ? AND left = 0').bind(convId, String(identity.userId)).first());
+  if (conv.type !== 'group') return c.json({ error: 'not_group' }, 400);
+  if (!isMember && !myRole) return c.json({ error: 'not_member' }, 403);
+
+  const members = await db.prepare(
+    `SELECT m.user_id, m.role, m.joined_at, u.username, u.display_name, u.tag
+     FROM chat_members m LEFT JOIN users u ON u.id = m.user_id
+     WHERE m.conv_id = ? AND m.left = 0 ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, m.user_id ASC LIMIT 200`
+  ).bind(convId).all();
+
+  let requests = [];
+  if (myRole) {
+    const rq = await db.prepare(
+      `SELECT r.id, r.user_id, r.created_at, u.username, u.display_name, u.tag
+       FROM chat_join_requests r LEFT JOIN users u ON u.id = r.user_id
+       WHERE r.conv_id = ? AND r.status = 'pending' ORDER BY r.created_at ASC LIMIT 100`
+    ).bind(convId).all();
+    requests = rq.results || [];
+  }
+  return c.json({
+    conv: {
+      id: conv.id, name: conv.name, owner_id: conv.owner_id, is_global: !!conv.is_global,
+      join_mode: conv.join_mode || 'open', invite_code: conv.invite_code || null
+    },
+    my_role: myRole, is_member: isMember,
+    members: (members.results || []).map((m) => ({ user_id: m.user_id, role: m.role, username: m.username, display_name: m.display_name || m.username, tag: m.tag || '', joined_at: m.joined_at })),
+    requests: requests.map((r) => ({ id: r.id, user_id: r.user_id, username: r.username, display_name: r.display_name || r.username, tag: r.tag || '', created_at: r.created_at }))
+  });
+});
+
+// 设置成员角色（owner/admin 才有权；群主才能任命/撤销 admin）
+app.post('/api/chat/conversations/:id/members/:userId', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (identity?.type !== 'user') return c.json({ error: 'unauthorized' }, 401);
+  const convId = parseInt(c.req.param('id'), 10);
+  const targetId = parseInt(c.req.param('userId'), 10);
+  let body; try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
+  const role = String(body.role || '');
+  if (!['member', 'admin'].includes(role)) return c.json({ error: 'bad_role', message: 'role 只能是 member 或 admin' }, 400);
+  const myRole = await chatGroupAdminRole(db, convId, identity.userId);
+  if (!myRole) return c.json({ error: 'forbidden' }, 403);
+  // 只有 owner 能任免 admin；admin 只能管普通成员
+  if (myRole !== 'owner' && role === 'admin') return c.json({ error: 'forbidden', message: '仅群主可设置管理员' }, 403);
+  const target = await db.prepare('SELECT role FROM chat_members WHERE conv_id = ? AND user_id = ? AND left = 0').bind(convId, String(targetId)).first();
+  if (!target) return c.json({ error: 'not_member' }, 404);
+  if (target.role === 'owner') return c.json({ error: 'cannot_change_owner', message: '不能修改群主角色' }, 400);
+  if (myRole !== 'owner' && target.role === 'admin') return c.json({ error: 'forbidden', message: '仅群主可任免管理员' }, 403);
+  await db.prepare('UPDATE chat_members SET role = ? WHERE conv_id = ? AND user_id = ?').bind(role, convId, String(targetId)).run();
+  return c.json({ ok: true, user_id: targetId, role });
+});
+
+// 移出成员（owner/admin 可踢；admin 不能踢 admin/owner）
+app.delete('/api/chat/conversations/:id/members/:userId', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (identity?.type !== 'user') return c.json({ error: 'unauthorized' }, 401);
+  const convId = parseInt(c.req.param('id'), 10);
+  const targetId = parseInt(c.req.param('userId'), 10);
+  const myRole = await chatGroupAdminRole(db, convId, identity.userId);
+  if (!myRole) return c.json({ error: 'forbidden' }, 403);
+  const target = await db.prepare('SELECT role FROM chat_members WHERE conv_id = ? AND user_id = ? AND left = 0').bind(convId, String(targetId)).first();
+  if (!target) return c.json({ error: 'not_member' }, 404);
+  if (target.role === 'owner') return c.json({ error: 'cannot_kick_owner' }, 400);
+  if (myRole !== 'owner' && target.role === 'admin') return c.json({ error: 'forbidden', message: '仅群主可移出管理员' }, 403);
+  await db.prepare('UPDATE chat_members SET left = 1 WHERE conv_id = ? AND user_id = ?').bind(convId, String(targetId)).run();
+  return c.json({ ok: true });
+});
+
+// 群设置：入群审核开关 / 重置邀请码
+app.post('/api/chat/conversations/:id/settings', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (identity?.type !== 'user') return c.json({ error: 'unauthorized' }, 401);
+  const convId = parseInt(c.req.param('id'), 10);
+  let body; try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
+  const myRole = await chatGroupAdminRole(db, convId, identity.userId);
+  if (!myRole) return c.json({ error: 'forbidden' }, 403);
+  if (body.join_mode !== undefined) {
+    const jm = String(body.join_mode);
+    if (!['open', 'approval'].includes(jm)) return c.json({ error: 'bad_join_mode' }, 400);
+    await db.prepare('UPDATE chat_conversations SET join_mode = ? WHERE id = ?').bind(jm, convId).run();
+  }
+  if (body.reset_invite === true) {
+    const code = 'g' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+    await db.prepare('UPDATE chat_conversations SET invite_code = ? WHERE id = ?').bind(code, convId).run();
+    return c.json({ ok: true, invite_code: code });
+  }
+  const row = await db.prepare('SELECT join_mode, invite_code FROM chat_conversations WHERE id = ?').bind(convId).first();
+  return c.json({ ok: true, join_mode: row?.join_mode || 'open', invite_code: row?.invite_code || null });
+});
+
+// 通过邀请链接主动加入：GET 先看群信息，POST 提交加入
+app.get('/api/chat/invite/:code', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  const code = String(c.req.param('code') || '').trim();
+  const conv = await db.prepare('SELECT id, name, is_global, join_mode FROM chat_conversations WHERE invite_code = ?').bind(code).first();
+  if (!conv) return c.json({ error: 'invalid_code', message: '邀请链接无效或已失效' }, 404);
+  let isMember = false, pending = false;
+  if (identity?.type === 'user') {
+    isMember = !!(await db.prepare('SELECT 1 AS x FROM chat_members WHERE conv_id = ? AND user_id = ? AND left = 0').bind(conv.id, String(identity.userId)).first());
+    if (!isMember) pending = !!(await db.prepare("SELECT 1 AS x FROM chat_join_requests WHERE conv_id = ? AND user_id = ? AND status = 'pending'").bind(conv.id, String(identity.userId)).first());
+  }
+  return c.json({ conv: { id: conv.id, name: conv.name, is_global: !!conv.is_global, join_mode: conv.join_mode || 'open' }, is_member: isMember, pending, logged_in: identity?.type === 'user' });
+});
+
+app.post('/api/chat/invite/:code', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (identity?.type !== 'user') return c.json({ error: 'unauthorized', message: '请先登录' }, 401);
+  const code = String(c.req.param('code') || '').trim();
+  const conv = await db.prepare('SELECT id, name, join_mode, is_global FROM chat_conversations WHERE invite_code = ?').bind(code).first();
+  if (!conv) return c.json({ error: 'invalid_code', message: '邀请链接无效或已失效' }, 404);
+  const exists = await db.prepare('SELECT 1 AS x FROM chat_members WHERE conv_id = ? AND user_id = ? AND left = 0').bind(conv.id, String(identity.userId)).first();
+  if (exists) return c.json({ ok: true, status: 'already_member' });
+  // 需要审核：记申请，等群主/管理员处理
+  if ((conv.join_mode || 'open') === 'approval') {
+    try {
+      await db.prepare("INSERT INTO chat_join_requests (conv_id, user_id, status) VALUES (?, ?, 'pending') ON CONFLICT(conv_id, user_id) DO UPDATE SET status = 'pending', created_at = datetime('now')").bind(conv.id, identity.userId).run();
+    } catch {
+      await db.prepare("INSERT OR REPLACE INTO chat_members (conv_id, user_id, role) VALUES (?, ?, 'member')").bind(conv.id, identity.userId).run();
+      return c.json({ ok: true, status: 'joined' });
+    }
+    return c.json({ ok: true, status: 'pending', message: '已提交申请，等待群主或管理员审核' });
+  }
+  await db.prepare("INSERT OR IGNORE INTO chat_members (conv_id, user_id, role) VALUES (?, ?, 'member')").bind(conv.id, identity.userId).run();
+  await db.prepare("UPDATE chat_members SET left = 0 WHERE conv_id = ? AND user_id = ?").bind(conv.id, identity.userId).run();
+  return c.json({ ok: true, status: 'joined', conv_id: conv.id });
+});
+
+// 处理入群申请：approve / reject（owner 或 admin 均可，和微信群管一致）
+app.post('/api/chat/conversations/:id/requests/:reqId', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (identity?.type !== 'user') return c.json({ error: 'unauthorized' }, 401);
+  const convId = parseInt(c.req.param('id'), 10);
+  const reqId = parseInt(c.req.param('reqId'), 10);
+  let body; try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
+  const action = String(body.action || '');
+  if (!['approve', 'reject'].includes(action)) return c.json({ error: 'bad_action' }, 400);
+  const myRole = await chatGroupAdminRole(db, convId, identity.userId);
+  if (!myRole) return c.json({ error: 'forbidden', message: '仅群主或管理员可审核' }, 403);
+  const rq = await db.prepare("SELECT id, user_id FROM chat_join_requests WHERE id = ? AND conv_id = ? AND status = 'pending'").bind(reqId, convId).first();
+  if (!rq) return c.json({ error: 'not_found' }, 404);
+  if (action === 'approve') {
+    await db.prepare("INSERT OR IGNORE INTO chat_members (conv_id, user_id, role) VALUES (?, ?, 'member')").bind(convId, rq.user_id).run();
+    await db.prepare("UPDATE chat_members SET left = 0 WHERE conv_id = ? AND user_id = ?").bind(convId, rq.user_id).run();
+  }
+  await db.prepare("UPDATE chat_join_requests SET status = ?, handled_at = datetime('now'), handled_by = ? WHERE id = ?").bind(action === 'approve' ? 'approved' : 'rejected', identity.userId, reqId).run();
+  return c.json({ ok: true, action, user_id: rq.user_id });
+});
+
+// ========== v4.31：配额治理后台 API ==========
+// 查看当前 D1 / KV 额度进度（估算值，见quotaGet 上方说明）
+app.get('/api/admin/quota', async (c) => {
+  const identity = await getIdentity(c);
+  if (!(await isAdminIdentity(c.env.db, identity))) return c.json({ error: 'forbidden' }, 403);
+  const q = await quotaGet(c.env.SITE_KV, c.env.db);
+  // 仅站长（developer）可修改额度上限
+  q.can_edit_limits = await hasAdminPerm(c.env.db, identity, 'manage_quota');
+  return c.json({ ...q, trip_threshold: QUOTA_TRIP_RATIO });
+});
+
+// 修改额度上限（**仅站长 developer**，普通管理员无权）
+app.post('/api/admin/quota/limits', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (!(await isAdminIdentity(db, identity))) return c.json({ error: 'forbidden' }, 403);
+  if (!(await hasAdminPerm(db, identity, 'manage_quota'))) {
+    return c.json({ error: 'forbidden', message: '无配额管理权限（需 manage_quota）' }, 403);
+  }
+  let body; try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
+  const next = {};
+  for (const k of ['d1', 'kv']) {
+    if (body[k] === undefined || body[k] === null || body[k] === '') continue;
+    const n = Number(body[k]);
+    if (!Number.isFinite(n) || n <= 0) {
+      return c.json({ error: 'invalid_limit', message: k.toUpperCase() + ' 额度必须是大于 0 的数字' }, 400);
+    }
+    if (n > 1_000_000_000) {
+      return c.json({ error: 'too_large', message: '额度上限似乎过大（>10 亿），请确认' }, 400);
+    }
+    next[k] = Math.floor(n);
+  }
+  if (!Object.keys(next).length) {
+    return c.json({ error: 'nothing_to_update', message: '没有提供有效的额度值' }, 400);
+  }
+  const cur = await quotaLimits(c.env.SITE_KV);
+  const merged = {
+    d1: next.d1 ?? cur.d1,
+    kv: next.kv ?? cur.kv,
+    updated_at: Date.now(),
+    updated_by: identity.userId
+  };
+  try {
+    await c.env.SITE_KV.put('quota_limits', JSON.stringify(merged));
+  } catch {
+    return c.json({ error: 'kv_write_failed', message: 'KV 写入失败，无法保存额度设置' }, 500);
+  }
+  // 立刻重算刹车状态：改完上限后如果已经超过阈值，应当放行而不是继续关着
+  _quotaState.trip = 0;
+  const q = await quotaGet(c.env.SITE_KV, c.env.db);
+  if (q.worst >= QUOTA_TRIP_RATIO) {
+    await quotaAutoTrip(c.env.SITE_KV, c.env.db);
+  } else {
+    try { await c.env.SITE_KV.delete('chat_autodisable'); } catch {}
+  }
+  const after = await quotaGet(c.env.SITE_KV, c.env.db);
+  return c.json({ ok: true, limits: after.limits, tripped: after.tripped });
+});
+
+// 恢复为Cloudflare 默认额度
+app.post('/api/admin/quota/limits/reset', async (c) => {
+  const identity = await getIdentity(c);
+  if (!(await isAdminIdentity(c.env.db, identity))) return c.json({ error: 'forbidden' }, 403);
+  if (!(await hasAdminPerm(c.env.db, identity, 'manage_quota'))) return c.json({ error: 'forbidden', message: '无配额管理权限（需 manage_quota）' }, 403);
+  try { await c.env.SITE_KV.delete('quota_limits'); } catch {}
+  _quotaState.trip = 0;
+  const after = await quotaGet(c.env.SITE_KV, c.env.db);
+  return c.json({ ok: true, limits: after.limits, message: '已恢复为 Cloudflare 默认额度' });
+});
+
+// 手动恢复聊天（清除自动刹车标记）——管理员点了就立刻放行
+app.post('/api/admin/quota/reset-trip', async (c) => {
+  const identity = await getIdentity(c);
+  if (!(await isAdminIdentity(c.env.db, identity))) return c.json({ error: 'forbidden' }, 403);
+  _quotaState.trip = 0;
+  try { await c.env.SITE_KV.delete('quota_tripped'); await c.env.SITE_KV.delete('chat_autodisable'); } catch {}
+  return c.json({ ok: true, message: '已恢复聊天功能。注意：配额若仍高于阈值，稍后会再次自动关闭。' });
+});
+
+// 手动清零当日计数（用于压测后重置统计，不影响真实配额）
+app.post('/api/admin/quota/reset-counter', async (c) => {
+  const identity = await getIdentity(c);
+  if (!(await isAdminIdentity(c.env.db, identity))) return c.json({ error: 'forbidden' }, 403);
+  const day = quotaDayKey();
+  try { await c.env.SITE_KV.put('quota:' + day, JSON.stringify({ d1: 0, kv: 0, day }), { expirationTtl: 259_200 }); } catch {}
+  _quotaState._pending = { d1: 0, kv: 0 };
+  _quotaState.day = ''; // 触发下次 flush 重新归零
+  return c.json({ ok: true });
+});
+
 // ========== SPA 回退 ==========
 
 app.all('*', async (c) => {
@@ -2708,6 +5165,58 @@ app.all('*', async (c) => {
   url.pathname = '/index.html';
   const fallback = await c.env.ASSETS.fetch(new Request(url.toString(), { headers: c.req.raw.headers }));
   return new Response(fallback.body, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
+});
+
+// v4.27.1：全局异常兜底——任何未捕获异常（典型：D1 读配额耗尽）不再向用户抛 500。
+// GET 返回 200 + degraded（前端降级渲染，不再整片报错）；写操作返回 503（诚实告知服务暂不可用）。
+// v4.29：IP /网段封禁中间件 —— v4.31.6 已上移到文件顶部。
+// ⚠️ 原因：Hono 按**注册顺序**匹配，中间件注册在路由之后 = 永远不会执行。
+//    这个坑曾同时让「IP 封禁」和「配额计量」两个中间件沦为死代码（额度恒为 0 的根因）。
+
+// v4.30.1：D1 读配额耗尽时的降级策略修正。
+// 旧逻辑只看 HTTP 方法：GET → 200 degraded；其余（含 POST）→ 503 一锅端。
+// 后果：**登录/注册/写剪贴板全部不可用**（实测 D1 配额耗尽时 POST /api/auth/password/login
+// 返回 503 service_unavailable），用户感知就是"聊天一崩全站都坏"。
+// 但聊天只是最先暴露症状的那个，真正被误伤的是**所有 POST/PUT/DELETE**。
+// 现在改为按「该接口是否真的需要写 D1」区分：
+//   - 幂等的读类写（标记已读、切静音、已加入群标记等）→ 返回 200 + degraded，前端照常工作
+//   - 其余写操作 → 仍拦，但带上明确文案，让用户知道是"额度用尽"而非"站点坏了"
+const DEGRADED_WRITE_OK = [
+  '/api/chat/conversations/',   // 已读标记 / 静音切换等（后缀再判定）
+  '/api/chat/read',
+  '/api/me/read'
+];
+function isIdempotentWrite(path, method) {
+  if (method === 'DELETE') return false;
+  // 群聊相关的 POST 里，只有「标记已读」与「静音」是幂等的；发消息/删群等仍需拦
+  if (path.startsWith('/api/chat/conversations/')) {
+    return /\/read(\?|$)/.test(path) || /\/mute(\?|$)/.test(path) || /\/members\/\d+\/read(\?|$)/.test(path);
+  }
+  return DEGRADED_WRITE_OK.some((p) => path.startsWith(p));
+}
+
+// v4.31：配额计量 + 定期落盘 + 超阈值自动刹车 —— v4.31.6 已上移到文件顶部。
+// ⚠️ 之前注册在这里（所有路由之后），Hono 不会执行它 → 计数永远是 0。
+//    这就是「额度一直是 0、进度条不动」的真正根因（不是 quotaFlush 的冻结 bug 那么简单）。
+
+
+app.onError((err, c) => {
+  try { console.error('[onError]', (err && err.stack) || err); } catch {}
+  const method = (c.req && c.req.method) || 'GET';
+  if (method === 'GET' || method === 'HEAD') {
+    return c.json({ degraded: true, error: 'service_degraded', message: '数据库读取额度已用尽，部分数据暂时读不到' }, 200);
+  }
+  let path = '/';
+  try { path = new URL(c.req.url).pathname; } catch {}
+  if (isIdempotentWrite(path, method)) {
+    // 幂等写：假装成功，前端体验不被打断（数据下次同步时会自然补上）
+    return c.json({ ok: true, degraded: true, message: '当前处于降级状态，该操作可能稍后生效' }, 200);
+  }
+  return c.json({
+    degraded: true,
+    error: 'service_unavailable',
+    message: '站长的数据库读取额度已用尽，暂时无法保存。请稍后再试——这不是站点故障，管理员正在处理。'
+  }, 503);
 });
 
 export default app;
