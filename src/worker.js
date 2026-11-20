@@ -19,7 +19,7 @@ const app = new Hono();
 
 const GUEST_LIMIT = 5;
 const PAGE_SIZE = 20;
-const VERSION = '4.33.0';
+const VERSION = '4.34.0';
 const SEARCH_MAX = 100;
 const RESERVED = new Set([
   'api', 'raw', 'new', 'edit', 'u', 'user', 'users', 'admin', 'login', 'logout',
@@ -1951,6 +1951,22 @@ app.put('/api/clips/:clipId', async (c) => {
 
   // v4.6: 标签（未传则保持原值；传了按等级限额截断）
   const tagsStr = body.tags !== undefined ? serializeTags(body.tags, editBen.benefits.tags) : (r.tags || '');
+
+  // === v4.34: 版本历史——编辑前留存旧内容（L0 不留存；按权益配额裁剪） ===
+  let revLimit = 0;
+  try { revLimit = Number(editBen.benefits?.revisions) || 0; } catch (_) {}
+  if (revLimit !== 0 && (title !== (r.title || '') || content !== (r.content || '') || tagsStr !== (r.tags || ''))) {
+    try {
+      await db.prepare(
+        `INSERT INTO clip_versions (clip_id, title, content, tags, saved_by) VALUES (?, ?, ?, ?, ?)`
+      ).bind(newClipId, r.title || '', r.content || '', r.tags || '', identity.type === 'user' ? String(identity.userId) : 'guest').run();
+      if (revLimit > 0) {
+        await db.prepare(
+          `DELETE FROM clip_versions WHERE clip_id = ? AND id NOT IN (SELECT id FROM clip_versions WHERE clip_id = ? ORDER BY id DESC LIMIT ?)`
+        ).bind(newClipId, newClipId, revLimit).run();
+      }
+    } catch (_) { /* 迁移未执行时不阻断保存 */ }
+  }
 
   await db.prepare(
     `UPDATE clipboards SET title = ?, content = ?, is_public = ?, expires_at = ?, max_views = ?,
@@ -5153,6 +5169,73 @@ app.post('/api/admin/quota/reset-counter', async (c) => {
   _quotaState._pending = { d1: 0, kv: 0 };
   _quotaState.day = ''; // 触发下次 flush 重新归零
   return c.json({ ok: true });
+});
+
+// ========== v4.34: 版本历史 + 数据导出（兑现 BENEFITS 里挂着的权益） ==========
+app.get('/api/clips/:clipId/versions', async (c) => {
+  const db = c.env.db;
+  const clipId = c.req.param('clipId');
+  const identity = await getIdentity(c);
+  const r = await db.prepare('SELECT * FROM clipboards WHERE clip_id = ?').bind(clipId).first();
+  if (!r) return c.json({ error: 'not_found' }, 404);
+  const mine = canWrite(identity, r) || await isAdminIdentity(db, identity);
+  if (!mine) return c.json({ error: 'forbidden' }, 403);
+  const trustBase = identity.type === 'user' ? await buildTrustBase(db, identity.userId) : null;
+  const ben = await resolveBenefits(db, identity, trustBase);
+  const limit = Number(ben.benefits?.revisions) || 0;
+  if (limit === 0) return c.json({ versions: [], limit: 0, message: '当前等级没有版本历史权益' });
+  try {
+    const rows = await db.prepare(
+      'SELECT id, title, content, tags, saved_by, created_at FROM clip_versions WHERE clip_id = ? ORDER BY id DESC LIMIT 100'
+    ).bind(clipId).all();
+    return c.json({ versions: rows.results || [], limit });
+  } catch (_) {
+    return c.json({ versions: [], limit, message: '版本历史尚未初始化' });
+  }
+});
+
+app.post('/api/clips/:clipId/restore', async (c) => {
+  const db = c.env.db;
+  const clipId = c.req.param('clipId');
+  const identity = await getIdentity(c);
+  if (identity.type === 'none') return c.json({ error: 'unauthorized' }, 401);
+  const r = await db.prepare('SELECT * FROM clipboards WHERE clip_id = ?').bind(clipId).first();
+  if (!r) return c.json({ error: 'not_found' }, 404);
+  const mine = canWrite(identity, r) || await isAdminIdentity(db, identity);
+  if (!mine) return c.json({ error: 'forbidden' }, 403);
+  let body;
+  try { body = await c.req.json(); } catch { return c.json({ error: 'bad_json' }, 400); }
+  const vid = parseInt(body.version_id, 10);
+  if (!vid) return c.json({ error: 'bad_version' }, 400);
+  let v = null;
+  try { v = await db.prepare('SELECT * FROM clip_versions WHERE id = ? AND clip_id = ?').bind(vid, clipId).first(); } catch (_) {}
+  if (!v) return c.json({ error: 'version_not_found' }, 404);
+  // 回滚前先把当前状态也存一份，防止反悔
+  try {
+    await db.prepare('INSERT INTO clip_versions (clip_id, title, content, tags, saved_by) VALUES (?, ?, ?, ?, ?)')
+      .bind(clipId, r.title || '', r.content || '', r.tags || '', identity.type === 'user' ? String(identity.userId) : 'guest').run();
+  } catch (_) {}
+  await db.prepare('UPDATE clipboards SET title = ?, content = ?, tags = ?, updated_at = datetime(\'now\') WHERE clip_id = ?')
+    .bind(v.title || '', v.content || '', v.tags || '', clipId).run();
+  return c.json({ ok: true, clip_id: clipId, title: v.title || '' });
+});
+
+app.get('/api/me/export', async (c) => {
+  const db = c.env.db;
+  const identity = await getIdentity(c);
+  if (identity.type !== 'user') return c.json({ error: 'unauthorized' }, 401);
+  const trustBase = await buildTrustBase(db, identity.userId);
+  const ben = await resolveBenefits(db, identity, trustBase);
+  if (!ben.benefits.export_data) return c.json({ error: 'forbidden', message: 'L1 或 VIP 才能导出全部数据' }, 403);
+  const rows = await db.prepare(
+    'SELECT clip_id, title, content, tags, is_public, created_at, updated_at FROM clipboards WHERE owner_type = ? AND owner_id = ? ORDER BY created_at DESC'
+  ).bind('user', String(identity.userId)).all();
+  const clips = (rows.results || []).map((r) => ({
+    clip_id: r.clip_id, title: r.title || '', content: r.content,
+    tags: parseTags(r.tags), is_public: !!r.is_public,
+    created_at: r.created_at, updated_at: r.updated_at
+  }));
+  return c.json({ ok: true, exported_at: new Date().toISOString(), count: clips.length, clips });
 });
 
 // ========== SPA 回退 ==========
