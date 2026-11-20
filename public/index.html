@@ -192,11 +192,42 @@
   if (document.readyState === 'complete' || document.readyState === 'interactive') show();
 })();
 </script>
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" id="themeColorMeta" content="#f4f5f8">
+<meta name="format-detection" content="telephone=no, address=no, email=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="mdqp">
+<meta name="mobile-web-app-capable" content="yes">
 <title>mdqp — Markdown 快速剪贴板</title>
 <meta name="description" content="mdqp (Markdown quickly paste) — 免登录可用的 Markdown 云剪贴板，支持密码保护、定时过期、阅读次数限制与自定义短链。">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📋</text></svg>">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml" sizes="any">
+<link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32">
+<link rel="icon" href="/favicon-16.png" type="image/png" sizes="16x16">
+<link rel="apple-touch-icon" href="/favicon-180.png">
+<link rel="manifest" href="/manifest.webmanifest">
+<script>
+(function(){
+  try{
+    if(localStorage.getItem('mdqp_disguise')!=='1') return;
+    function build(icon){
+      if(icon&&icon.indexOf('url:')===0) return icon.slice(4);
+      if(icon&&icon.indexOf('emoji:')===0){var ch=icon.slice(6);var svg='<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#eceff1"/><text x="32" y="46" font-size="40" text-anchor="middle">'+ch+'</text></svg>';return 'data:image/svg+xml,'+encodeURIComponent(svg);}
+      var vj='<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#1565c0"/><text x="32" y="45" font-family="Arial,sans-serif" font-size="34" font-weight="bold" fill="#ffffff" text-anchor="middle">VJ</text></svg>';
+      return 'data:image/svg+xml,'+encodeURIComponent(vj);
+    }
+    window.__buildDisguiseFavicon=build;
+    document.title=localStorage.getItem('mdqp_disguise_title')||'Virtual Judge';
+    var ic=localStorage.getItem('mdqp_disguise_icon')||'preset:vj';
+    var links=document.querySelectorAll('link[rel*="icon"]');
+    for(var i=0;i<links.length;i++) links[i].remove();
+    var l=document.createElement('link'); l.rel='icon'; l.href=build(ic); document.head.appendChild(l);
+  }catch(e){}
+})();
+</script>
 <link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/redesign.css">
+<link rel="stylesheet" href="/responsive.css">
 <link rel="stylesheet" href="/vendor/katex/katex.min.css">
 <script src="/vendor/marked.min.js"></script>
 <script src="/vendor/purify.min.js"></script>
@@ -209,50 +240,28 @@
 <!-- ========== 侧边栏 ========== -->
 <aside class="sidebar" id="sidebar">
   <a class="brand" href="/" data-link>
-    <span class="brand-logo">📋</span>
-    <span class="brand-text">mdqp<em>Markdown quickly paste</em></span>
+    <img class="brand-logo" src="/favicon.svg" alt="mdqp" width="30" height="30">
+    <img class="brand-logo-h" src="/mdqp-logo-horizontal.svg" alt="mdqp">
   </a>
 
   <nav class="nav">
-    <a class="nav-item" href="/" data-link data-nav="home">
-      <span class="nav-ico">🏠</span><span class="nav-label">首页</span>
-    </a>
-    <a class="nav-item nav-item-primary" href="/new" data-link data-nav="new">
-      <span class="nav-ico">＋</span><span class="nav-label">新建剪贴板</span>
-    </a>
-    <a class="nav-item" href="/me" data-link data-nav="me">
-      <span class="nav-ico">👤</span><span class="nav-label">我的</span>
-    </a>
-    <a class="nav-item" href="/invite" data-link data-nav="invite">
-      <span class="nav-ico">🎁</span><span class="nav-label">邀请</span>
-    </a>
-    <a class="nav-item" href="/vip" data-link data-nav="vip">
-      <span class="nav-ico">⭐</span><span class="nav-label">VIP</span>
-    </a>
-    <a class="nav-item" id="navOiwb" href="#" data-link data-nav="oiwb">
-      <span class="nav-ico">🚀</span><span class="nav-label">去 oiwb</span>
-    </a>
-    <a class="nav-item hidden" id="navAdminLink" href="/admin" data-link data-nav="admin">
-      <span class="nav-ico">🛡</span><span class="nav-label">管理后台</span>
-    </a>
-    <a class="nav-item hidden" id="navCodeLink" href="/admin/code" data-link data-nav="code">
-      <span class="nav-ico">💻</span><span class="nav-label">查看代码</span>
-    </a>
+    <a class="nav-item" href="/" data-link data-nav="home" title="首页" data-tip="首页"><span class="nav-ico"><svg class="nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 4l9 6.5"/><path d="M5 9.5V19a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V9.5"/><path d="M9.5 20v-5h5v5"/></svg></span><span class="nav-label">首页</span></a>
+    <a class="nav-item nav-item-primary" href="/new" data-link data-nav="new" title="新建剪贴板" data-tip="新建剪贴板"><span class="nav-ico"><svg class="nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg></span><span class="nav-label">新建剪贴板</span></a>
+    <a class="nav-item" href="/me" data-link data-nav="me" title="我的" data-tip="我的"><span class="nav-ico"><svg class="nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="3.4"/><path d="M5.5 20a6.5 6.5 0 0 1 13 0"/></svg></span><span class="nav-label">我的</span></a>
+    <a class="nav-item" href="/chat" data-link data-nav="chat" title="聊天" data-tip="聊天"><span class="nav-ico"><svg class="nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 14a2 2 0 0 1-2 2H9l-4 4V6a2 2 0 0 1 2-2h11a2 2 0 0 1 2 2z"/></svg></span><span class="nav-label">聊天</span></a>
+    <a class="nav-item" href="/sites" data-link data-nav="sites" title="网站" data-tip="网站"><span class="nav-ico"><svg class="nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.8 3 2.8 15 0 18M12 3c-2.8 3-2.8 15 0 18"/></svg></span><span class="nav-label">网站</span></a>
+    <a class="nav-item" href="/invite" data-link data-nav="invite" title="邀请" data-tip="邀请"><span class="nav-ico"><svg class="nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="9" width="16" height="11" rx="2"/><path d="M4 13h16M12 9v11"/><path d="M9 9c0-1.8 3-3 3-3s3 1.2 3 3"/></svg></span><span class="nav-label">邀请</span></a>
+    <a class="nav-item" href="/vip" data-link data-nav="vip" title="VIP" data-tip="VIP"><span class="nav-ico"><svg class="nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l2.5 5.2 5.7.8-4.1 4 1 5.7L12 16.9 6.9 19.2l1-5.7-4.1-4 5.7-.8z"/></svg></span><span class="nav-label">VIP</span></a>
+    <a class="nav-item" id="navOiwb" href="#" data-link data-nav="oiwb" title="去 oiwb" data-tip="去 oiwb"><span class="nav-ico"><svg class="nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3c3.2 1.8 5 5 5 9l-2.5 2H9.5L7 12c0-4 1.8-7.2 5-9z"/><circle cx="12" cy="10" r="1.7"/><path d="M9 19l-1.5 3M15 19l1.5 3"/></svg></span><span class="nav-label">去 oiwb</span></a>
+    <a class="nav-item hidden" id="navAdminLink" href="/admin" data-link data-nav="admin" title="管理后台" data-tip="管理后台"><span class="nav-ico"><svg class="nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5.5c0 4.3-3 7.5-7 9-4-1.5-7-4.7-7-9V6z"/></svg></span><span class="nav-label">管理后台</span></a>
+    <a class="nav-item hidden" id="navCodeLink" href="/admin/code" data-link data-nav="code" title="查看代码" data-tip="查看代码"><span class="nav-ico"><svg class="nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 8l-4 4 4 4M15 8l4 4-4 4"/></svg></span><span class="nav-label">查看代码</span></a>
   </nav>
 
   <div class="nav nav-bottom">
-    <a class="nav-item" href="/help" data-link data-nav="help">
-      <span class="nav-ico">❓</span><span class="nav-label">帮助</span>
-    </a>
-    <a class="nav-item" href="/about" data-link data-nav="about">
-      <span class="nav-ico">ℹ️</span><span class="nav-label">关于</span>
-    </a>
-    <a class="nav-item" href="/changelog" data-link data-nav="changelog">
-      <span class="nav-ico">📝</span><span class="nav-label">更新日志</span>
-    </a>
-    <a class="nav-item" href="/tickets" data-link data-nav="tickets">
-      <span class="nav-ico">🎫</span><span class="nav-label">工单</span>
-    </a>
+    <a class="nav-item" href="/help" data-link data-nav="help" title="帮助" data-tip="帮助"><span class="nav-ico"><svg class="nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.4a2.5 2.5 0 1 1 3.4 2.3c-.8.4-1 .9-1 1.8"/><path d="M12 17h.01"/></svg></span><span class="nav-label">帮助</span></a>
+    <a class="nav-item" href="/about" data-link data-nav="about" title="关于" data-tip="关于"><span class="nav-ico"><svg class="nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg></span><span class="nav-label">关于</span></a>
+    <a class="nav-item" href="/changelog" data-link data-nav="changelog" title="更新日志" data-tip="更新日志"><span class="nav-ico"><svg class="nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></svg></span><span class="nav-label">更新日志</span></a>
+    <a class="nav-item" href="/tickets" data-link data-nav="tickets" title="工单" data-tip="工单"><span class="nav-ico"><svg class="nav-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16v3a2 2 0 0 0 0 4v3H4v-3a2 2 0 0 0 0-4z"/><path d="M13 7v10" stroke-dasharray="2 2"/></svg></span><span class="nav-label">工单</span></a>
   </div>
 
   <button class="sidebar-toggle" id="sidebarToggle" title="折叠 / 展开侧边栏" aria-label="折叠或展开侧边栏">
@@ -267,12 +276,16 @@
   <!-- ========== 顶栏 ========== -->
   <header class="topbar">
     <div class="topbar-left">
-      <button class="icon-btn menu-toggle" id="menuToggle" title="菜单">☰</button>
+      <button class="icon-btn menu-toggle" id="menuToggle" title="菜单" aria-label="菜单">☰</button>
+    </div>
+    <div class="topbar-center">
+      <button class="search-trigger" id="cmdkTrigger" title="搜索 / 命令面板 (⌘K)" aria-label="搜索">
+        <span class="st-ico">⌕</span><span class="st-text">搜索剪贴板、用户、设置…</span><span class="st-kbd">⌘K</span>
+      </button>
     </div>
     <div class="topbar-actions">
-      <button class="icon-btn" id="cmdkTrigger" title="搜索 / 命令面板 (⌘K)">🔍</button>
-      <button class="icon-btn" id="themeBtn" title="切换主题">🌙</button>
-      <button class="icon-btn notif-bell hidden" id="notifBell" title="通知">🔔<span class="notif-badge hidden" id="notifBadge">0</span></button>
+      <button class="icon-btn" id="themeBtn" title="切换主题" aria-label="切换主题">🌙</button>
+      <button class="icon-btn notif-bell hidden" id="notifBell" title="通知" aria-label="通知">🔔<span class="notif-badge hidden" id="notifBadge">0</span></button>
       <span id="navAuth"></span>
     </div>
   </header>
@@ -498,6 +511,16 @@
       <div id="ticketBox"></div>
     </section>
 
+    <!-- ========== 聊天 ========== -->
+    <section class="view" id="view-chat">
+      <div id="chatRoot"></div>
+    </section>
+
+    <!-- ========== 用户网站（/sites） ========== -->
+    <section class="view" id="view-sites">
+      <div id="sitesRoot"></div>
+    </section>
+
     <!-- ========== 查看代码 / 在线编辑 / 审批部署 ========== -->
     <section class="view" id="view-admin-code">
       <div class="crumb"><a href="/admin" data-link>← 管理后台</a></div>
@@ -574,6 +597,7 @@
       <button class="modal-close" id="authClose" aria-label="关闭">✕</button>
     </div>
     <div class="modal-body auth-body">
+      <img class="auth-logo" src="/mdqp-logo-horizontal.svg" alt="mdqp">
       <div id="authBanner" class="auth-banner hidden"></div>
 
       <a class="btn btn-primary btn-block" id="authCpoauthBtn" href="/api/auth/login">🔑 用 cpoauth 账号登录</a>
@@ -656,16 +680,50 @@
         <button class="settings-tab" id="setTabSecurity" type="button">账号与安全</button>
       </div>
       <div class="settings-pane" id="setPaneGeneral">
+        <div class="profile-edit">
+          <div id="setAvatarPreview" class="avatar-preview"></div>
+          <div class="profile-edit-main">
+            <label class="field-label">昵称（展示名，2–30 字，可含空格 / emoji）</label>
+            <input id="setDisplayName" class="input" maxlength="30" placeholder="你的昵称">
+            <div class="avatar-actions">
+              <input id="setAvatarUrl" class="input input-sm" style="flex:1;min-width:140px" placeholder="粘贴头像图片 URL（http/https）">
+              <button class="btn btn-sm btn-ghost" id="setAvatarUrlBtn" type="button">使用</button>
+              <button class="btn btn-sm btn-ghost" id="setAvatarEmojiBtn" type="button">😀 选预设</button>
+              <button class="btn btn-sm btn-ghost" id="setAvatarClear" type="button">清除</button>
+            </div>
+            <div id="setEmojiRow" class="emoji-row hidden"></div>
+          </div>
+        </div>
         <label class="field-label">个性签名（200 字内）</label>
         <textarea id="setSig" class="input" maxlength="200" placeholder="写一句个性签名"></textarea>
         <label class="field-label">个人简介（500 字内，展示在个人主页）</label>
         <textarea id="setBio" class="input" maxlength="500" placeholder="介绍一下你自己"></textarea>
+        <label class="field-label">用户标签（30 字内，显示在昵称后 / 聊天里，如「管理员」「新人」）</label>
+        <input id="setTag" class="input" maxlength="30" placeholder="选填，例如：OI 生 / 管理员">
         <label class="field-label">主题</label>
         <select id="setTheme" class="input">
           <option value="auto">跟随系统</option>
           <option value="light">浅色</option>
           <option value="dark">深色</option>
         </select>
+        <label class="field-label">🎭 伪装模式（上课用，仅本机生效）</label>
+        <label class="switch-row"><input type="checkbox" id="setDisguise"> 开启后，浏览器标签的标题与图标会变成你设定的样子（关掉即恢复真实外观）</label>
+        <label class="field-label">标签页标题</label>
+        <input id="setDisguiseTitle" class="input" maxlength="40" placeholder="例如：Virtual Judge">
+        <label class="field-label">图标</label>
+        <div class="emoji-row" id="setDisguisePresets">
+          <button type="button" class="emoji-pick" data-ic="preset:vj">VJ</button>
+          <button type="button" class="emoji-pick" data-ic="emoji:📁">📁</button>
+          <button type="button" class="emoji-pick" data-ic="emoji:💻">💻</button>
+          <button type="button" class="emoji-pick" data-ic="emoji:📄">📄</button>
+          <button type="button" class="emoji-pick" data-ic="emoji:📚">📚</button>
+          <button type="button" class="emoji-pick" data-ic="emoji:⚙️">⚙️</button>
+        </div>
+        <div class="avatar-actions">
+          <input id="setDisguiseIconUrl" class="input input-sm" style="flex:1;min-width:140px" placeholder="或粘贴图标 URL（.ico/.png/.svg）">
+          <button class="btn btn-sm btn-ghost" id="setDisguiseIconUrlBtn" type="button">使用</button>
+        </div>
+        <p class="muted" style="font-size:12px">预设里点选即生效；也可粘贴任意图片 URL 当图标。</p>
         <button class="btn btn-primary btn-block" id="setSaveGeneral">保存</button>
       </div>
       <div class="settings-pane hidden" id="setPaneSecurity">
