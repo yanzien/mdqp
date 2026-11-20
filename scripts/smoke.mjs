@@ -107,12 +107,20 @@ for (const [path, key] of [['/api/clips', 'clips'], ['/api/tickets', 'tickets']]
 
 // ---------- 3b. 必须鉴权的接口：要 401/403，不能 404 ----------
 section('3b. 必须鉴权的接口（要 401/403；404 = 路由没注册）');
-for (const path of ['/api/chat/unread', '/api/admin/users', '/api/admin/quota', '/api/me/clips']) {
+for (const path of ['/api/chat/unread', '/api/admin/users', '/api/admin/quota', '/api/me/clips', '/api/me/export']) {
   const r = await req(path);
   if (r.status === 401 || r.status === 403) ok(path, `status=${r.status}`);
   else if (r.status === 404) bad(path, 'status=404 — 路由可能被 SPA 回退吞掉');
   else if (r.status === 500) bad(path, 'status=500 — 后端抛错');
   else bad(path, `status=${r.status}（预期 401/403，可能是权限放行了）`);
+}
+// v4.34: 版本历史接口对不存在的 clip 应返回 JSON 404（若路由没注册，会被 SPA 回退成 HTML 200）
+{
+  const r = await req('/api/clips/__smoke_nonexistent__/versions');
+  let isJson = false;
+  try { JSON.parse(r.text); isJson = true; } catch {}
+  if (r.status === 404 && isJson) ok('/api/clips/:id/versions', 'status=404 JSON — 路由已注册');
+  else bad('/api/clips/:id/versions', `status=${r.status} ${r.text.slice(0, 60)}（路由可能被吞）`);
 }
 
 // ---------- 4. 静态产物 ----------
@@ -136,6 +144,11 @@ if (app.status === 200) {
     if (liveVersion === jsVersion) ok('前后端版本一致', `v${liveVersion}`);
     else bad('前后端版本一致', `worker=v${liveVersion} / app.js=v${jsVersion}`);
   }
+  // v4.34: 权益落地的两个前端入口必须真的打包上线
+  const hasHist = app.text.includes('openHistoryModal') && app.text.includes('histBtn');
+  const hasExport = app.text.includes('meExportBtn') && app.text.includes('exportMyData');
+  if (hasHist && hasExport) ok('v4.34 权益入口', '历史版本弹窗 + 导出数据按钮');
+  else bad('v4.34 权益入口', `历史=${hasHist} 导出=${hasExport}`);
 } else bad('app.js', `status=${app.status}`);
 
 for (const [path, label] of [
