@@ -21,13 +21,13 @@
 代码体量（2026-11-20 实测）：`public/app.js` **6994 行**、`src/worker.js` **5222 行**、`public/style.css` 1350 行、`redesign.css` 239 行、`responsive.css` 397 行。
 **已经到了必须拆分的规模**——单文件继续膨胀，改一处误伤另一处的概率会快速上升。
 
-### 已发现但本表尚未收录的缺口（2026-11-20 核验）
+### 2026-11-20 核验发现的缺口（当晚全部处置完毕）
 
-| 缺口 | 证据 | 处理建议 |
+| 缺口 | 证据 | 处置结果 |
 | --- | --- | --- |
-| **VIP 权益矩阵有 3 项空头** | `TIER_LIMITS` 里有 `revisions` / `export_data` / `badge`，但：前端功能体无版本历史入口、无导出调用，后端无 `/api/me/export`、无 `clip_versions` 表；`badge` 命中的是 CSS class | 要么补实现，要么从权益表撤掉，别继续拿没做的东西当卖点 |
-| GitHub 源码落后一个月 | `yanzien/mdqp` 最后推送 2026-09-25，本地已到 v4.33.0（10-27） | 见 4.4，补 PAT 后一次性同步 |
-| `eu.org` 域名没生效 | `yanzien.eu.org` / `hw.yanzien.eu.org` 均 `Non-existent domain` | 换域名或换供应商，别在它身上继续等 |
+| **VIP 权益空头** | 权益矩阵挂 `revisions` / `export_data` / `badge`，但无版本历史表、无导出接口 | **v4.34.0 已补**：新增 `clip_versions` 表、列表/回滚接口、前端历史弹窗；新增 `/api/me/export` 与我的页导出按钮。`badge` 系核验误判，实际早有 `trustBadge` / `ownerBadge` / VIP ⭐，无需改 |
+| GitHub 源码落后一个月 | `yanzien/mdqp` 最后推送 2026-09-25，本地已到 v4.33.0 | **11-20 已同步 44 个源码文件**（走 Contents API + Windows 凭证管理器里的 PAT）；注意 `mdqp/` 被 `.gitignore` 忽略，不能用 git push |
+| `eu.org` 域名没生效 | `yanzien.eu.org` / `hw.yanzien.eu.org` 均 `Non-existent domain` | **用户拍板彻底废弃**：不再等审批，`strategy-oiwb.md` 的 O2 子域迁移 / 共同域 SSO 一并作废；要做子域请换真实域名 |
 
 ---
 
