@@ -35,9 +35,563 @@ function copy(text, msg) {
 // 更新日志：随代码发布自动同步
 const CHANGELOG_MD = `# 📝 更新日志
 
-mdqp 的主要版本变动记录。当前部署版本 **v4.16.0**。
+mdqp 的主要版本变动记录。当前部署版本 **v4.33.0**。
 
 ---
+
+## v4.33.0 · 2026-10-27（全端适配：手机 / 平板 / 桌面 / 刘海屏 / 横屏）
+
+> 🔗 部署预览：https://f85a72f6.mdqp.pages.dev
+
+有人跟我说「手机上看着有点挤」，我一上手——好家伙，比我以为的更夸张。这版专门做适配，从 320 的小屏到 4K 桌面都过了一遍（真的用无头浏览器在 360 / 390 / 768 / 1024 / 1440 五个尺寸挨个截图比对，不是凭感觉改的）。
+
+**先说个真 bug（不是「看着挤」，是页面真的被撑爆了）**：首页公告条在手机上会把**整页**推出屏幕，左右能拖出三百多像素。原因挺蠢——那一条是 \`display:flex\` 布局，而内容是「📢 + Markdown 正文 + 关闭按钮」直接塞进去的，flex 会把每一段文字、每个内联标签都当成独立的小块，长 URL 一撑，整条就横向冲出去了；顺带把粗体标题压成一行一个字。现在改成正常块级排版、关闭按钮绝对定位，两个毛病一起没了。
+
+**手机上弹窗改成从底部升起**：以前居中弹窗 + 内容长了就顶到屏幕外，✕ 在右上角拇指根本够不着。现在是小屏底部抽屉——圆角只在上面、内容区独立滚动、头脚吸住，「取消 / 确定」拉通占满一行。手小也能单手点。
+
+**编辑器的「← 取消 / 发布」吸顶了**：写长文滚到一半想发布，以前得一路滚回顶部。现在这行粘在顶栏下面跟着走，随时能发。
+
+**其他一票细节**：
+
+- 后台用户表格：手机上首列（头像 + 用户名）吸附在左边，横着滑看后面的列时不会忘了自己在看谁。
+- 手机上输入框字号统一抬到 16px——低于 16px 时 iOS Safari 会在聚焦瞬间强行放大页面，体验非常怪。
+- 触屏设备（\`hover: none\`）关掉了卡片的悬停上浮：手机上「悬停」会粘住不散，看着像选中了。同时把按钮、图标按钮、导航项的点击区域放大到能稳当点中。
+- 刘海屏 / 圆角屏安全区（\`env(safe-area-inset-*)\`）：横屏时内容不再被侧边刘海啃掉一块，聊天输入框也不会被 iPhone 底部那条小白条压住。
+- 加到主屏当 App 用时（PWA 独立窗口），顶栏自动给状态栏让位；\`theme-color\` 也跟着深色/浅色主题实时换，安卓 Chrome 的地址栏颜色和站点不会打架。
+- 横屏手机（高度 < 500px）：Hero 收窄、阅读模式目录隐藏、弹窗几乎占满屏——横着拿主要就是看内容。
+- 大屏（≥1600px）：正文宽度多给一点到 1120px，不再在超宽显示器上留两片大空白。
+- 顺手加了打印样式：打一份剪贴板下来时自动隐藏侧栏、顶栏、按钮和弹窗，只留正文。
+- 还顺手去了个重复标题：更新日志 / 帮助 / 关于这类页面，正文自己带的一级标题跟页头标题一模一样，一屏两个大标题看着很怪。现在渲染完会比对一次，重复就把正文那个删掉。
+
+技术上没动原有任何文件的结构，新加了一个 \`public/responsive.css\`，在 \`style.css\` / \`redesign.css\` 之后加载，只做覆盖。侧栏折叠、悬浮展开、聊天二选一那些状态类一个都没碰——那套逻辑挺脆的，不敢乱来。
+
+## v4.32.3 · 2026-10-26（权限授予「包含关系」：只能授予自己拥有的权限）
+
+> 🔗 部署预览：https://1e82b0d7.mdqp.pages.dev
+
+修了个权限越权漏洞 🔒。之前管理员只要有 \`manage_admins\`，就能给小号塞**任何**权限——哪怕自己根本没有（比如站长没给他的 \`manage_sites\` / \`manage_quota\`）。现在改成严格的「包含关系」：你给别人设的某个权限，**必须你自己也拥有**才会生效；你没的权限会被直接丢弃（接口会回一句「已忽略你无权授予的权限：xxx」）。
+
+- 新增 \`mergeGrantable()\`：把「操作者有权授予的项」按提交值覆盖，而操作者**没有**的权限一律保持目标原有值——既不能越权加，也不会把你此前给他的权限误删掉（之前纯交集的写法会误删，这版修了）。开发者（站长）豁免，可授予任意权限。
+- 两条授予路径都套上：① 升管理员时一次性设权限；② 仅调整层级/权限时（只有显式提交权限才走这套校验，不碰目标原有授权）。
+- 前端权限弹窗同步改了：你无权授予的项直接锁成 🔒 灰显、只展示对方现状，保存时只提交你有权那部分；保存成功还会回显「已忽略你无权授予的权限：xxx」。
+- 蕴含关系照旧生效：你拥有 \`manage_sites\` 就自动蕴含其下属的 \`view/ban/delete_sites\`，照样能正常授予。
+
+---
+
+## v4.32.2 · 2026-10-23（昵称限制 bugfix：站长本人昵称 yanzie 解封）
+
+> 🔗 部署预览：https://913f985b.mdqp.pages.dev
+
+又来一个小补丁 🩹。上版本给「改昵称」加了和注册一样的那些限制（禁零宽、禁敏感词、禁冒充站长 yanzie），结果有个低级 bug——连我自己（站长昵称就叫 yanzie）都被自己的规则卡住，想改名都改不了。这次直接对 uid 1/2 放行 yanzie 子串，其他账号照样拦，防仿冒不误伤自己。顺手把那行正则从「字面不可见字符」改成了 \`\\u\` 转义，顺带不再误伤 emoji 的变体选择符（U+FE00–FE0F），emoji 昵称更稳了。
+
+---
+
+## v4.32.1 · 2026-10-16（后台权限补全 + IP 封禁保护 + 帮助指南重写）
+
+> 🔗 部署预览：https://1ff527a0.mdqp.pages.dev
+
+又更新了，累死我了，今天也按时补了钙。大致内容：
+
+- **后台权限终于补全了 🛠️**：之前每次加后台功能，那不靠谱的 AI 都不会自己想到给管理员补权限，结果像上次的 IP 管理，谁都能直接管、根本限制不了一点……这次一口气补了 4 个开关——IP 治理、站点治理、额度治理、快照配额设置，都归站长手动授予普通管理员。
+- **IP 封禁保护 🛡️**：之前忘了加这个限制，可恶的 xjw 把我 IP 段给封了，害我花半天进数据库把自己薅出来……现在系统禁止把站长（和我自己当前）所在的 IP / 网段拉黑，再有管理权限也封不了。
+- **帮助指南重写 📖**：让 AI 把那份可读性偏弱的老指南升级了一遍，加了目录、理顺了权限分组，也把「默认 300 字」那个早过时的说法改成了真实的按信任分级（L0/L1 1500、L2 5000、VIP / 管理员不限）。不过说实话……我自己怎么看都觉得还是不够强（？）
+
+> 小提示：上面那 4 个新权限默认都是关的，存量管理员不会自动拿到。想让谁接管就去「用户管理 → 修改权限」里勾一下；站长（开发者）自带全部权限。
+
+另外，大家别再抨击站长的土豆浮木器了 ┭┮﹏┭┮
+
+---
+
+## v4.32.0 · 2026-10-15（工单前 4 条：改名 / 头像 / 伪装 / 修 cpoauth 重复建号）
+
+> 🔗 部署预览：即当前版本（下次部署回填）
+
+- **改名（TKF554C210）**：设置 → 通用新增「昵称（展示名）」输入框，\`PATCH /api/me\` 支持 \`display_name\`（2–30 字，剥离不可见字符）。用户名（登录名）不变，仅展示名变化；保存后重签会话 Cookie，发帖名 / 聊天发送名即时生效。
+- **头像（TK41CBBEE7）**：设置 → 通用新增「头像」编辑——**直接粘贴图片 URL 存储**（不占 KV 空间、无上传体积限制），或一键选 emoji 预设（存 \`emoji:\` 前缀，不占空间）。\`avatarHtml()\` 全局支持 emoji 渲染。（后端保留 \`POST /api/me/avatar\` + \`GET /api/avatar/:userId\` 端点备用，但 UI 默认走 URL 存储。）
+- **伪装模式（TK49180CB4）**：设置 → 通用新增开关，**可自定义**——标签页标题任意填、图标可选预设（VJ / 📁 / 💻 / 📄 / 📚 / ⚙️）或粘贴任意图标 URL；纯本机 localStorage，不请求外部、不影响服务端。\`index.html\` 顶部加早期内联脚本，打开即生效避免闪烁。
+- **修 cpoauth 重复建号（TK6D11C175）**：已注册账号再点「绑定 cpoauth」时，因会话失效静默落到普通登录流程 → 因 sub 未绑定而新建账号。现改为：link 模式会话失效直接报错返回（\`/?error=link_expired\`）绝不新建账号；普通登录流程再加一道 \`mdqp_link\` cookie 残留守卫。
+
+---
+
+## v4.31.6 · 2026-10-13（修额度恒为 0 的真根因：中间件注册顺序）
+
+> 🔗 部署预览：即当前版本（下次部署回填）
+
+**根因**：Hono 按**注册顺序**执行处理器。\`app.use('/api/*', …)\` 如果注册在所有 \`app.get/post\` **之后**，路由 handler 会直接返回响应、链条终止，中间件**永远不会执行**——静默失效，不报错。
+
+这导致两个中间件同时沦为死代码：
+
+| 中间件 | 后果 |
+|---|---|
+| 配额计量（v4.31 新增） | \`quotaAddD1\` / \`quotaFlush\` 从未被调用 → **额度恒为 0、进度条不动** |
+| IP / 网段封禁（v4.29 新增） | 被封 IP 访问 \`/api/*\` 不再被拦（仅注册/登录路径仍拦） |
+
+**修复**：两个中间件整体上移到文件顶部（\`cors()\` 之后、第一条路由之前）。顺序经本地 Hono 实测确认：中间件在路由前注册才会执行。
+
+**顺带**：IP 封禁中间件现在每个 API 请求都要读一次 \`ip_bans\`，这正是拖垮 D1 读额度的开销。为其加了**隔离实例内 60s 缓存**，把「每请求一次 SELECT」降为「每实例每分钟一次」。
+
+> 教训：新增全局中间件**必须插在路由之前**；与「新增 API 必须插在 SPA 回退之前」是同一类注册顺序坑。
+
+---
+
+## v4.31.5 · 2026-10-12（修额度计量冻结 bug）
+
+> 🔗 部署预览：即当前版本（下次部署回填）
+
+**🐛 修额度计量「冻住」导致进度条长期为 0**
+- \`quotaFlush\` 落盘后把 \`_quotaState._pending\` 置成 \`null\`，之后 \`quotaAddD1/quotaAddKv\` 的 \`if(_pending)\` 守卫使增量再也写不进 KV、读数也加不回来——表现为额度进度条一直停在 0（或某次首刷后不再增长）。
+- 改为落盘后重置成 \`{d1:0,kv:0}\`；\`quotaAddD1/quotaAddKv\` 去掉 \`if(_pending)\` 守卫、始终累加。现已通过 API 确认 \`SITE_KV\` 绑定正常（\`467c52a690ac46c9a3d9a9dadb2484d0\`），排除「KV 未绑定」的可能。
+
+**附带**：v4.31.4 修复项（仅本轮补记条目）
+- 修 \`GET /api/admin/ip-groups\` 内 \`db\` 未定义导致一点开 IP 治理即抛 \`ReferenceError\` 并触发全局 \`onError\` 返回 degraded（红条误报）；
+- 修用户管理筛选值只存 DOM、重渲染被 \`innerHTML\` 抹除导致「点筛选闪一下又变回默认」；
+- 降级横幅站点恢复后自动消失；IP 空态文案改为按时间窗动态提示。
+
+---
+
+## v4.31.3 · 2026-10-10（修 quota 接口被SPA 回退吞掉 + 降级横幅自动消失 + IP 空态提示）
+
+> 🔗 部署预览：即当前版本（下次部署回填）
+
+**🐛 修 quota 接口完全不生效（严重）**
+- 新增的额度接口被注册在 \`app.all('*')\`（SPA 回退）**之后**。Hono 里 \`app.all('*')\` 会捕获其后注册的所有路由，因此 \`GET /api/admin/quota\` 等四个接口**永远不会被匹配**——访问它们只会拿到首页 HTML，进度条永远出不来。
+- 已把整块移到 SPA 回退**之前**，并写了检查脚本确认全文件没有其他路由被吞。
+- **教训**：新增 API 必须插在 \`// ========== SPA 回退 ==========\` 之前。症状特征是「接口返回 HTML / 200 而非 JSON」。
+
+**🐛 修「站点已恢复但红条还在」**
+- 之前降级横幅一旦出现，只有手动关闭或清缓存才会消失。站点早已恢复正常、旧横幅却还挂着，**会被误判为还在降级**。
+- 现在探测到降级后会启动**每分钟轮询**，接口恢复正常就**自动移除横幅**。
+
+**💡 IP 治理空态提示更准确**
+- 「近 1 天」为空时旧文案是「该时间段内无注册记录」，容易被当成功能坏了。
+- 现在明确说明：IP 记录只在**注册与登录时**采集，若近期没换环境、时间窗内自然是空的，可切到「近 7 天 / 30 天」查看历史。
+
+---
+
+## v4.31.1 · 2026-10-07（额度上限可由站长自定义）
+
+> 🔗 部署预览：即当前版本（下次部署回填）
+
+**⚙️ 额度上限改为可配置（仅站长）**
+- 默认沿用 **Cloudflare 免费版额度**：D1 每日 500 万行、KV 每日 10 万次读取。
+- 站长可在后台「额度」页直接修改这两个上限，**留空即沿用当前值**；也可一键恢复默认值。
+- **权限收紧到只有站长（developer）能改**，普通管理员只能查看进度条、无法修改（后端硬校验，前端隐藏入口）。
+- 如果将来你升级了付费套餐，把上限改成实际额度（付费 D1 默认 5000 万行/天），进度条就会准确反映真实用量。
+- 改完上限会**立即重算刹车状态**：若新的百分比已低于 80%，聊天会自动恢复；若仍超阈值则保持关闭并明确提示。
+
+**上限值的存放**
+- 存KV \`quota_limits\`，长期保留；读不到时自动回落到默认值（不会因为 KV 故障导致上限丢失）。
+
+---
+
+## v4.31.0 · 2026-10-07（配额计量 / 80% 自动刹车 / 后台额度进度条）
+
+> 🔗 部署预览：即当前版本（下次部署回填）
+
+**📊 额度计量（新增后台「额度」tab）**
+- 后台新增**额度进度条**，实时显示 D1 / KV 当日已用与上限百分比。
+- 每日窗口 = **UTC 日期**，即**北京时间 08:00 至次日 08:00**（与你的要求一致）。
+- ⚠️ **重要说明**：Cloudflare **未提供查询 D1/KV 已用配额的 API**，所以这是**自行累计的估算值**——按各接口的经验扫描行数计量（如 \`/api/clips\` 记 60 行、\`/api/admin/users\` 记 120 行）。口径**刻意保守（宁可高估）**，确保不会真的撞到上限才发现。
+
+**🛑 80% 自动刹车**
+- 任一额度达 **80%** 时，系统**自动关闭聊天功能**（聊天轮询是最大消耗源，掐掉立刻止血）。
+- 前端聊天入口自动隐藏；剪贴板与其他功能**不受影响**。
+- **不删任何数据**，管理员可在后台一键「立即恢复聊天」。
+- 自动刹车后 \`/api/site/config\` 会带 \`chat_auto_disabled: true\`，前端据此隐藏入口。
+
+**计量开销控制**
+- 计量写入**绝不能**每请求都落 KV（否则反过来把 KV 也烧光）。
+- 采用**内存计数 + 每 60 秒批量落盘一次**，跨天自动归零，KV 里只保留 3 天数据。
+- 落盘失败静默，不影响主流程。
+
+**🔧 修 IP 治理的一个真缺陷**
+- \`user_ips\` 表原先**只在注册时写入**，而 v4.29 之前注册的账号完全没有 IP 记录——导致 IP 聚合视图对老号**永远为空**，管理员会误以为「没人共用 IP」，实际是数据缺失。
+- 现已在**三条登录路径**都补记 IP：cpoauth 新登录、cpoauth 老号回登录、密码登录。老号下次登录即自动补全历史。
+
+**ℹ️ 关于「剪贴板能用但存不了」**
+- 这**不是 bug**，是 D1 读配额耗尽的必然结果：读接口降级返回空列表，所以「能看到」；但写入必须真的写 D1，注册/保存剪贴板这类操作**注定无法在耗尽时工作**。本版的 80% 刹车就是为了让你在耗尽**之前**就发现并处理。
+
+---
+
+## v4.30.2 · 2026-10-07（修降级横幅遮挡按钮、无法关闭）
+
+> 🔗 部署预览：即当前版本（下次部署回填）
+
+**🐛 降级横幅挡界面**
+- 上一版横幅是 \`position:fixed; top:0; z-index:99999\` 的整宽横幅，**直接盖住顶栏的登录/注册按钮**，用户既点不到按钮也没法把它关掉（截图实测）。
+- 现在改为**挂在 \`.main-col\` 顶部的正常文档流**（该容器是 flex column），随内容排列，**不再覆盖/遮挡任何控件**。
+- 右上角新增 **✕ 关闭按钮**。
+- 关闭后写入会话标记，**本次会话不再反复弹出**（此前 \`probeDegraded\` 每次探测都会因元素被移除而重新插入）。
+
+---
+
+## v4.30.1 · 2026-10-07（降级策略修正：不再一锅端禁用写操作）
+
+> 🔗 部署预览：即当前版本（下次部署回填）
+
+**🐛 修一个被误判的严重问题**
+- 上一版的降级兜底只看 HTTP 方法：\`GET\` → 200 degraded，**其余（含所有 POST/PUT/DELETE）→ 503 一锅端**。
+- 实测后果：**登录、注册、写剪贴板全部不可用**（D1 配额耗尽时 \`POST /api/auth/password/login\` 返回 \`503 service_unavailable\`）。用户感知就是「聊天一崩，全站都坏了」——但真问题不是聊天拖累全站，而是**降级策略把所有写操作无差别拦死**。
+- 注意：此前我只验证过 GET 接口，因此误以为「聊天崩了不影响剪贴板」，这个结论当时是错的。
+
+**✅ 分级降级**
+- **幂等读类写**（标记已读、切换静音等）→ 返回 \`200 + degraded\`，前端体验不被打断。
+- **其余写操作** → 仍拦，但返回明确文案：「站长的数据库读取额度已用尽，暂时无法保存。这不是站点故障，管理员正在处理。」不再让用户误以为是站点崩了。
+- GET/HEAD 的降级响应也补上了 \`message\` 字段。
+
+**🔐 登录走 KV 凭证缓存**
+- 登录要读 \`users\` 表拿密码哈希 —— D1 配额耗尽时这一步失败，直接导致登录不可用。
+- 现在把「用户名 → 密码哈希等少量字段」缓存到 KV（1 小时），**D1 挂掉时登录照常可用**。
+- 只缓存确实是密码账号的结果；用户不存在 / 非密码账号不缓存，避免脏数据。
+
+---
+
+## v4.30.0 · 2026-10-07（聊天轮询迁 KV 缓存 / 降级态显性化）
+
+> 🔗 部署预览：即当前版本（下次部署回填）
+
+**💬 聊天读走 KV 缓存（省 D1 读配额）**
+- \`GET /api/chat/conversations/:id/messages\` 加 KV 缓存，命中即返回、**完全不碰 D1**。
+- 聊天轮询是烧 D1 读配额的最大头（每次轮询一条 \`LEFT JOIN users\` 扫 50 行 × 在线人数 × 每分钟 1.3 次），迁到 KV 后这部分 D1 读**降为 0**。
+- KV 读配额独立且远大于 D1，等于给聊天单独开了一条不受 D1 限制的通道——这也是一种「隔离」：D1 额度耗尽时，聊天**仍然能正常读**。
+- 失效策略：**版本号机制**。KV \`list\` 最终一致、无法精确删 key，所以改为把 \`chatver:{convId}\` 版本号拼进 cache key，任何写操作 \`bump\` 版本后旧缓存 key 自然不再被命中。已覆盖全部 5 处写入点：发消息、撤回、保留上限清理、解散群、后台删群。
+- 翻历史（\`before\`）缓存 600s，轮询（\`tail\`/\`since\`）20s，兼顾新鲜度与命中率。KV 故障时静默回落到 D1，不影响可用性。
+
+**🚨 降级态显性化**
+- 之前降级提示是一行 13px 暗棕小字，**实际等于没有**——站长在降级态下会误以为一切正常，实测发现你正是因此没察觉数据早就是空的。
+- 现改为**顶部红橙渐变横幅**，直接写明「站点数据库读取额度已用尽，正在降级运行」，并提示勿依赖此时新建的内容、建议管理员升级付费 D1。
+- 新增**进站主动探测** \`probeDegraded()\`：进入页面时用 \`no-store\` 请求 \`/api/site/config\`，返回 \`degraded\` 就立即弹横幅。此前只有 \`api()\` 恰好拿到 \`degraded\` 才提示，若首屏命中缓存就察觉不到。
+
+**🔒 封禁判定也走 KV（省全站固定开销）**
+- \`getBanStatus\` 原先在**每个 API 请求**时都 \`SELECT ... FROM users\`（含高频聊天轮询），是全站性的固定读开销。
+- 现加 KV 缓存（60s）：命中即返回，**不再读 D1**。
+- 后台封禁/解封时**主动写入最新封禁状态**，所以封禁即时生效，不受缓存延迟影响。
+- 缓存里的封禁到期也会惰性清理。
+
+**📌 关于「聊天独立库」的说明**
+- 本版采用**缓存层隔离**而非拆数据库：D1 不支持跨库 JOIN，拆库后 7 处 \`LEFT JOIN users\` 都要改成两次查询 + 应用层拼接，复杂度高、引入改名后信息不一致的风险，而收益仅仅是多一份同样会烧光的免费额度。
+- 缓存方案达到了同等甚至更好的隔离效果：D1 挂掉时聊天照常可读。
+
+---
+
+## v4.29.1 · 2026-10-07（用户名敏感词与冒充词拦截）
+
+> 🔗 部署预览：https://43dfdd31.mdqp.pages.dev
+
+**🚫 用户名敏感词拦截**
+- 新增拦截词：\`nazi\`、\`gay\`、\`纳粹\`、\`共产党\`、\`国民党\`、\`拉\`、\`给\`。
+- 比对前会**先剥离零宽/双向字符并转小写**，所以「yanzie + 零宽字符」这类伪装同样会被识别（已用 U+200B/200C/200D/U+FEFF 逐一验证）。
+- 命中时提示具体命中的词，便于用户理解并更换。
+
+**⚠️ 两个刻意为之的设计取舍**
+- **\`la\` 用词边界匹配，不用子串匹配。** 若按子串拦，\`play\` \`land\` \`plan\` \`black\` \`class\` \`island\` \`palace\` \`villa\` \`planet\` \`slate\` \`flavor\` \`clarence\` \`Malay\` \`translate\` \`relative\` \`isolate\` 等**全部无法注册**（实测 27 个常见英文名里 25 个含 "la"）。改为词边界后零误伤，同时 \`la\`、\`_la\`、\`la_\`、\`-la\`、\`xx_la\` 一律拦掉。
+- **\`yanzie\` 系列放行 \`yanzien\` 本体。** \`"yanzien".includes("yanzie")\` 为 \`true\`，若按子串拦会把站长自己的账号也判为非法。现规则拦 \`yanzie\` / \`yanzie1\` / \`yanziex\` / \`yanzienn\`，放行 \`yanzien\`。
+- \`拉\` / \`给\` 按你的要求**严格拦**（任何位置含该字即拒），所以「卡拉」「拉面」「给力」「供给」等昵称也无法注册。
+
+**📍 拦截位置**
+- 仅在**注册时**校验。已确认 \`/api/me\` 的资料修改只开放 \`signature\` / \`bio\` / \`tag\` 三个字段，**不开放改用户名与昵称**，因此不存在"注册后改名绕过"的漏洞。
+
+---
+
+## v4.29.0 · 2026-10-07（用户名字符白名单 / 聊天治理 / IP 治理 / 群管理）
+
+> 🔗 部署预览：即当前版本（下次部署回填）
+
+**📛 用户名字符白名单**
+- 用户名只允许**英文、中文、数字、下划线 \`_\`、连字符 \`-\`**。
+- 「y anzie」这类含空格的、以及 \`.\` \`@\` \`+\` \`#\` 表情符号等一律拒绝。
+- 零宽字符（U+200B/200C/200D/2060/U+FEFF）与双向控制字符（U+202A 等）全部拒绝——**从源头封死"插零宽字符仿冒"这条路**。
+
+**💬 聊天治理（后台新增「聊天管理」tab）**
+- **群聊列表**：群名、群主、成员数、消息数、加入方式、最近活跃，支持搜索与翻页。
+- **私聊单独一页**（内容精简）。
+- **一键删群**：连同全部消息与成员关系一并删除，不可恢复；**全站总群受保护不可删**。
+
+**🛡 IP 治理（后台新增「IP 治理」tab）**
+- **按 IP 聚合账号**：可切换近 1 / 3 / 7 / 30 天，同一 IP 注册的账号放在一起，标出「N 个」便于识别批量小号。
+- **批量处理**：一次性封禁或删除同 IP 的全部账号（删除需二次勾选确认）。
+- **封禁天数支持小数**（0.5 = 12 小时）；留空 = 永久。
+- **支持封禁网段**：填 \`1.2.3.4\` 封单 IP，填 \`1.2.3.0/24\` 封整个网段（IPv4，0–32 位掩码）。
+- **被封 IP / 网段**：无法注册账号，且**访问接口直接拒绝**（附原因与解封时间）。
+- 已封列表可随时**解封**，并有过期记录惰性清理。
+
+**👥 群管理（仿微信）**
+- 聊天页群头像旁新增 **👥 群管理**入口。
+- **群主可设/取消管理员**；管理员可一起审核、管理成员。admin 不能任免 admin（仅群主可以），也不能踢群主/其他管理员。
+- **入群方式二选一**：自由加入 / **需要审核**（进群提交申请，等群主或管理员批准）。
+- **邀请链接**：\`/chat/join/{code}\`，好友点开即可**主动加入**（不再只能被动邀请）；群主可随时重置链接使旧链接失效。
+- 待审核申请在群管理面板里集中通过/拒绝。
+
+**技术要点**
+- IP 段匹配用 32 位无符号整数 + 位掩码实现，边界用例（\`/0\`、\`/32\`、跨段）已单测覆盖。
+- 网段输入会自动归一化（\`1.2.3.4/24\` → \`1.2.3.0/24\`），避免重复记录。
+- 被封 IP 的判断在 D1 故障时**放行**（治理功能不拖垮全站）。
+
+---
+
+## v4.28.0 · 2026-10-07（防滥用加固 / D1 读压力治理 / 测试站）
+
+> 🔗 部署预览：即当前版本（下次部署回填）
+
+**🚦 聊天限流（零 D1 读）**
+- 每人 **3 秒**内不得再发消息；全站总群收到任意一条消息后 **1 秒**内任何人不得再发。
+- 旧实现每发一条消息都要 \`SELECT COUNT(*)\` 扫 \`chat_messages\` 表——这正是刷屏攻击放大 D1 读配额的主因。改为**进程内时间戳**，限流本身不再产生任何 D1 读。
+- 提示语区分两种情况：「发送过快，请 N 秒后再试」（个人冷却）/「群里有人刚发了消息，请稍候」（全员锁）。
+
+**📉 消息轮询降频**
+- 聊天页轮询：后台 **60s** / 前台 **45s**（原 30s / 4s）。
+- 全局未读红点轮询：后台 **60s** / 前台 **45s**（原 30s / 8s）。
+- 回到前台仍**立刻补拉一次**，不牺牲切回窗口时的即时性。
+
+**🛡 注册节流 + 仿冒拦截**
+- 同一 **IP 或设备 1 小时内只能注册一个账号**（KV 时间戳，不占 D1 读）。
+- **3 小时内**若新用户名与近期账号名**相似度 ≥ 60%**（Levenshtein 归一化），直接**拒绝本次注册**并提示相似度百分比，同时 \`console.warn\` 留告警。
+- 相似度计算会**忽略零宽/双向控制字符**，所以「yanzien」插零宽字符伪装成「yanzien」会被判定为 100% 相似并拦截。
+- ⚠️ 与旧设想不同：**不会因为被仿冒就去封那个老号**——老号通常是受害者，封它是罚好人。只拒新号 + 告警。
+- uid 1 / 2 豁免该检查。前端注册请求新增 \`device_id\`（localStorage 持久化 UUID）。
+
+**🧪 新增：mdqptest 测试站**
+- 独立部署到 \`mdqptest.pages.dev\`，**独立 D1 + 独立 KV**，与主站数据完全隔离。
+- 需口令 \`mdqptest123456\` 才能进入；口令以 SHA-256 存于源码，校验通过签发 HMAC 签名令牌（7 天）。
+- 默认 uid=1 为站长账号（yanzien，密码同为 \`mdqptest123456\`）。
+- 功能与主站一致，可正常注册账号。部署步骤见 \`mdqptest/README.md\`。
+
+---
+
+## v4.27.1 · 2026-10-06（D1 读配额耗尽时的优雅降级 + 热读 KV 缓存）
+
+> 🔗 部署预览：即当前版本（下次部署回填）
+
+**🛡 服务韧性（防“全站 500”）**
+- 根因：D1 免费版每日行读上限（5M 行/天）耗尽时，所有 SELECT 接口会 500，整站不可用。本版加入优雅降级：
+  - 读接口遇 D1 故障不再抛 500，而是返回 200 + \`degraded:true\`（空列表 / 默认值 / “已登录但资料受限”），前端顶部出现温和的降级提示条，不再刷屏报错。
+  - 写操作遇故障返回 503（诚实告知“服务暂不可用”），不上报为异常。
+  - 新增全局 \`app.onError\` 兜底，任何未捕获异常都按上述规则降级。
+- **热读迁 KV 缓存（防复发）**：\`/api/site/config\` 与 \`/api/stats\` 改走 KV（\`SITE_KV\`，key 前缀 \`cache:\`，TTL 300s / 60s）缓存，命中即返回、不再打 D1；D1 故障时直接回退默认/零值。大幅降低读压力，配额再满也只是“部分数据为空”而非全挂。
+- \`getSiteConfig\` 自身也加 try/catch，D1 故障时回退默认配置。
+- 前端 \`api()\` 对 \`degraded\` 响应不上报错误，避免刷屏。
+
+**说明**：降级期间真实数据（剪贴板列表、个人资料等）暂不可见，等配额在 midnight UTC（约北京 08:00）自动重置、或升级付费 D1 后立即恢复。
+
+---
+
+## v4.27.0 · 2026-10-06（站点管控 / 功能禁用 / 聊天防刷屏 / 用户治理）
+
+> 🔗 部署预览：6e20dfa2.mdqp.pages.dev
+
+**🛡 站点管控（一键关战）**
+- 新增「🛡 站点管控」面板（管理员「👥 用户管理」页右上角）：可一键切换**维护模式（关战）**，全站非管理员访问时显示后台可编辑的维护页（标题 + 文案，默认「网站维护中」）；管理员仍正常可用并收到顶部横幅提示。
+- 站点级**功能开关**：可单独关闭「聊天 / 托管站点 / 剪贴板」三项功能（全站生效），关闭后对应接口对普通用户返回 503，前端给出明确提示。文案与开关均存 \`site_settings\`，后台随时改。
+
+**🚫 用户级功能权限撤销 / 恢复**
+- \`users\` 表新增 \`disabled_features\` 位掩码列（1=禁聊天 / 2=禁托管站点 / 4=禁剪贴板）；管理员可在用户列表点「限制」勾选单项，立即生效、可恢复。用于精准封禁作恶账号的某一能力，而不必全站封号。
+
+**💬 聊天防刷屏 / 防仿冒**
+- 限流：单用户 5 秒内最多发 3 条（全站总群）/ 8 条（其他会话），超出 429；修复此前总群限制过松被刷屏攻击的漏洞。
+- 零宽字符：聊天消息发送时自动剥离零宽/不可见字符；用户昵称或账号含不可见字符时，用户列表与聊天气泡显示「⚠ 不可见字符」警示，便于识别仿冒小号。
+- 聊天界面增强：每条消息显示发送者 **uid（\`#id\`）**，点头像/昵称跳转到 \`/u/{id}\` 用户主页；消息携带并显示用户 **tag** 标签。
+
+**👥 用户列表治理修复**
+- 修复「只能显示 20 人、无翻页、筛选失效」：列表改为服务端分页（每页 50，含总数与上下页），搜索改为服务端防抖检索，仿冒/受限账号可正常定位处理。
+
+**🕘 快照回滚修复**
+- 修复「回滚后网页无法访问」：根因是 KV \`kv.list\` 最终一致，刚建快照即回滚会列空导致清空线上文件。现快照元信息记录精确文件清单 \`filesList\`，回滚/删除按清单（强一致单键读取）精确操作，并跳过空文件，杜绝损坏。
+
+**🏷 用户标签**
+- \`users\` 表新增 \`tag\` 列（≤30 字），用户在「设置」可自填标签，聊天与管理列表展示。
+
+---
+
+## v4.26.0 · 2026-09-30（2.3 站点快照回滚 + 2.4 聊天增强）
+
+**2.3 站点版本与回滚**
+- 🕘 **快照 / 回滚**：每次「发布」自动留存一份快照（KV 独立存放，不占主容量）；编辑器侧栏新增「🕘 历史版本」面板，可手动「保存当前为快照」、查看列表、一键**回滚**（精确还原该版本全部文件）、删除旧快照。
+- 🎚 **快照配额**：普通用户 3 份、VIP 5 份（按 VIP 状态自动派生）；\`users\` 表新增 \`snapshot_quota\` 列，管理员可在「👥 用户管理 → 🕘 批量快照配额」对 **VIP / 普通 / 全部** 批量改配额，也可对单人改（传 NULL 即恢复按 VIP 派生）。超出上限自动丢弃最旧的自动快照（保留手动快照）。
+
+**2.4 聊天能力补齐**
+- 📎 **图片 / 文件消息**：聊天支持发送附件（≤5MB，KV 存储，图片内联预览、文件可下载）。
+- ↩ **撤回**：自己发的消息 2 分钟内可撤回。
+- ↩ **引用回复**：任意消息可「引用」后回复，气泡上方显示被引摘要，点摘要跳转到原消息。
+- ＠ **提及**：可搜索并 @ 某人，被 @ 的人气泡高亮，并收到站内通知。
+- 📌 **群公告 / 🖼 群头像**：群主可编辑群公告（顶部横幅）与设置群头像。
+
+> 🔗 部署预览：7e99069f.mdqp.pages.dev
+
+## v4.25.0 · 2026-09-30（批量处理待处理 bug 工单）
+
+- 🐞 **#26 / #35 从用户主页（\`/u/xxx\`）发起私聊崩溃**：\`openChatConv\` 直接 \`getElementById('chatMain')\`，而个人主页等未挂载聊天视图的页面该节点为 \`null\`，一点「私信」就整页报错。修复：调用前先 \`await renderChat()\` 确保 \`#chatMain\` 已建出，仍缺失则安全退出，不再抛错中断。
+- 🐞 **#21 代码查看器对无编辑权用户崩溃**：\`renderCodeViewer\` 里 \`codeEditBtn / codeCancelBtn / codePreviewBtn / codeSaveBtn\` 的 \`.onclick\` 未做空判，非 \`edit_code\` 权限用户访问 \`view_code\` 内容时 \`$(...)\` 为 \`null\` → \`null.onclick\` 抛错中断渲染。统一加 \`if (btn) ...\` 空判。
+- 🐞 **#36 站点统计探测偶发 NetworkError 刷报错弹窗 / 工单**：\`/api/stats\` 是非关键首页探测，机房代理抖动会偶发失败。改为 \`{ silent: true }\` 静默，不再弹错误窗、不再自动建工单。
+- ✅ **经核查已非问题、仅关闭工单**：#11（\`OIWB_TOKEN_KEY\` 临时性 TDZ，当前代码已无此标识符）、#13（\`/api/announcements\` 已包 try/catch）、#25（\`getIdentity\` 恒返回 \`{type:'none'}\` 不空，会话表 \`left\` 字段存在）、#28（聊天轮询早已 \`{ silent: true }\`）——当前代码路径已安全，属历史瞬时 / 误报。
+
+> 🔗 部署预览：da7753cb.mdqp.pages.dev
+
+## v4.24.2 · 2026-09-28（工单列表排序修正 + 工单整理）
+
+- 🔃 **工单列表排序改为「按发布时间、越晚越先」**：原 \`/api/tickets\` 默认按 \`updated_at DESC\`，现改为按 \`created_at DESC\`，即最新发布的工单排在最上面，更契合「先看最近的、尤其是 bug 反馈」的审阅习惯（筛选 bug / 按状态过滤时同样遵循此序）。
+- 📋 **工单整理**：全量梳理线上 34 条工单——其中 \`bug\`（程序缺陷）21 条（待处理 9、处理中 3、已解决 8、已驳回 1）、\`report\` 6、\`suggestion\` 4、\`other\` 2、\`appeal\` 1。导出为 \`TICKETS-2026-09-28.md\` 供站长逐条处理。
+
+> 🔗 部署预览：11440945.mdqp.pages.dev
+
+## v4.24.1 · 2026-09-28（2.1 收尾：拖拽上传+模板，并修复编辑器访问量为 0）
+
+- 🐞 **修复「站点编辑器界面访问量 / 迷你柱始终为 0」**：根因是 \`GET /api/sites/:slug\`（点「编辑」进入时调用的单站点接口）只回 D1 行、没读 KV 里的访问统计，而列表接口 \`/api/sites\` 已带 \`visits\`，导致只有列表页正常、编辑器侧栏永远 0。现已在该接口补齐 \`__stats\` 读取并附 \`visits\`，与列表/管理端口径一致。
+- 📂 **拖拽上传 + 进度条（ROADMAP 2.1 收尾）**：编辑器整片工作区支持拖入文件 / 文件夹（Chrome 走 \`webkitGetAsEntry\` 递归目录），单文件 \`PUT\` 带真实上传进度条（\`XHR upload.onprogress\`），侧栏显示「已完成 N/总数 %」；原「选择文件夹 / 粘贴 HTML」入口保留。
+- 🎨 **内置模板库（ROADMAP 2.1 收尾）**：侧栏新增「🎨 模板」按钮，弹窗提供 5 套入门模板——个人主页 / 作品集（含 css/style.css）/ 小游戏（别踩白块）/ 简历 / Hello World（含内联 JS 点击计数），一键套用即写入站点文件（已存在的会被覆盖，套用前二次确认）。
+
+> 🔗 部署预览：mdqp.pages.dev（v4.24.1 历史预览哈希已不可考，指向线上当前版）
+
+---
+
+## v4.24.0 · 2026-09-28（站点编辑器升级为工作台 + 站点访问统计）
+
+- 🛠 **站点编辑器升级为「文件树 + 行号编辑器 + 本地沙箱预览」工作台**（ROADMAP 2.1）。左侧文件树按文件夹层级缩进、文件夹在前；右侧代码编辑器带行号侧栏（随滚动同步），支持保存、重命名、删除、新建文件；HTML 文件可一键「👁 预览」——通过接口把同站 css/js/图片内联成 \`srcdoc\`，在 \`sandbox\` iframe 里离线渲染，无需发布也能看效果。原「弹窗编辑 + 扁平列表」交互整体替换。新增后端 \`POST /api/sites/:slug/rename\`（移动 / 重命名单个文件）。
+- 📊 **站点访问统计上线**（ROADMAP 2.2）。qsites 托管 worker 在访问 \`published\` 主页时通过 \`ctx.waitUntil\` 异步累加访问量到 KV（\`sites/{slug}/__stats\`，含当日 \`total\` 与近 7 天 \`days\` 分布，不阻塞响应）；\`GET /api/sites\` 与 \`GET /api/admin/sites\` 回带 \`visits\`，用户端站点卡片与管理后台站点表均显示「👁 N 次 + 近 7 天迷你柱」。
+
+> 🔗 部署预览：https://4740a651.mdqp.pages.dev
+
+---
+
+## v4.23.0 · 2026-09-29（整站 UI 大改 + logo 重绘为靛蓝「文档+#+窗口」）
+
+- 🎨 **整站配色统一换成明亮靛蓝 \`#4F46E5\`**（hover \`#4338C9\` / soft \`#EEF0FF\` / 渐变 \`#4F46E5→#6366F1\`），替换原 shadcn 蓝紫 \`#4361ee\` 与 v4.22 临时用的深紫 \`#5439A3\`，全站主色、按钮、链接、焦点环、徽章、未读红点角标底图一并更新。
+- 🧭 **导航外壳重构**：品牌（图标 + mdqp 字标）保留在侧栏顶部，顶栏改为「中部搜索胶囊（⌘K 唤起命令面板）+ 右侧通知铃铛与头像」，内容区改为浅灰画布 + 更宽松留白；侧栏折叠行为（默认 250px 带标签 → 折叠成 ~64px 图标栏 → 悬停临时展开）沿用原逻辑。改动隔离在新增的 \`redesign.css\`（在 \`style.css\` 之后加载，靠层叠覆盖），不碰原有 87KB 组件样式，便于回滚。
+- 🖼 **logo 重绘**：图形改为「文档 + \`#\` 字符 + 浏览器窗口（三点）」——去掉 v4.22 的斜箭头，浏览器窗口缩到文档右上角**开口处嵌合**（文档右上角不闭合并略小于窗口，二者间留缝隙、不重合），主色靛蓝。\`mdqp-icon.svg\` / \`mdqp-logo-horizontal.svg\` / \`mdqp-icon-mono.svg\` / \`favicon.svg\` 及全套 PNG 全部按新构图重渲；\`setFaviconBadge()\` 红点底图同步改为靛蓝 + 白文档 \`#\`。
+- 🔣 **导航 14 项 emoji 全部换成内联线性 SVG 图标**（home / new / me / chat / globe / lock / star / 等），图标栏折叠态 hover 显示气泡 tooltip（读 \`data-tip\`），选中态 \`.active\` 高亮保留。
+- ⚙️ 保留 \`app.js\` 依赖的全部 DOM id/class（#sidebar、#navOverlay、#menuToggle、#cmdkTrigger、#notifBell、#notifBadge、#navAuth、.nav-item[data-nav] 等）不动，行为与移动端抽屉逻辑不变。
+
+> 🔗 部署预览：https://2366bf13.mdqp.pages.dev
+
+---
+
+## v4.22.0 · 2026-09-29（正式 logo 落地：favicon / 导航品牌 / 红点角标）
+
+- 🎨 **正经 logo 正式上线，替换掉占位的 📋 emoji**。设计语言：紫底圆角方块（\`#5439A3\`）+ 白色文档与 \`#\` 字符，呼应「Markdown 文档 / 快速粘贴」。交付物包含完整矢量源（此前只有位图 + 字标 SVG，缺图形矢量源，本次补齐）：
+  - \`favicon.svg\` / \`favicon-{16,32,48,180,192,512}.png\`：应用图标形态（紫底方块 + 白文档 #），小尺寸（16–48px）辨识度最优，作标签页图标、PWA 图标、苹果触摸图标；
+  - \`mdqp-icon.svg\`：完整标志母版（文档 + 浏览器窗口三点 + 斜箭头，呼应 qsites「一键把 Markdown 发布成独立网站」），\`fill-rule="evenodd"\` 实现窗口视口与三点的**真挖空**（非白色填充）；
+  - \`mdqp-logo-horizontal.svg\` / \`mdqp-wordmark.svg\`：横版锁定与描边字标，供关于页 / 文档使用；
+  - \`manifest.webmanifest\`：PWA 清单，引用上述多尺寸图标。
+- 🔖 **导航栏品牌位换成新图标**：侧边栏 \`.brand-logo\` 由 emoji 改为 \`<img src="/favicon.svg">\`（30×30 圆角方块）；\`index.html\` 的 \`<link rel="icon">\` 改为 \`/favicon.svg\`（SVG）+ 16/32 PNG 回退 + \`apple-touch-icon\`，并接入 \`manifest.webmanifest\`。
+- 🔴 **未读红点 favicon 同步换底**：\`setFaviconBadge()\` 原来把 📋 画进 favicon 红点角标，现改为以新品牌图标（紫底方块 + 白文档 #）为底图，再叠加红色数字角标——红点提醒与新 logo 视觉一致。
+- 📐 **小尺寸验证结论**：完整标志（文档 + 窗口 + 箭头）在 28px 已糊，应用图标形态（方块 + 文档 #）在 16px 仍清晰，故 favicon 与品牌位统一采用方块图标形态。
+
+> 🔗 部署预览：https://7b654bfe.mdqp.pages.dev
+
+---
+
+## v4.21.1 · 2026-09-27（聊天滚动真正修好：补上断裂的高度链）
+
+- 🐞 **聊天滚动彻底修好（此前两版只禁了页面滚动，消息区仍平铺不滚）**。根因：\`renderChat()\` 把 \`.chat-layout\` 渲染进 \`#chatRoot\`，但 \`#chatRoot\` 是个**默认 \`display:block\`、没有高度约束**的普通 \`<div>\`。于是它下面的 \`.chat-layout { flex:1 }\` 找不到「有界的父级」，\`flex:1\` 完全失效，整条高度链从 \`#chatRoot\` 往下塌成「内容高度」——消息区 \`.chat-msgs\` 永远等于全部消息的总高、不滚动，长会话直接平铺到底。修法：给 \`body.chat-page #chatRoot\` 加上 \`flex:1; min-height:0; display:flex; flex-direction:column\`，让高度链 \`.main-col → main → #view-chat → #chat-root → .chat-layout → .chat-main → .chat-msgs\` 每一环都有界，最终 \`.chat-msgs\` 独占剩余高度并 \`overflow-y:auto\` 滚动。顺带：登录态 / 空状态（\`.chat-login\` / \`.chat-empty\`）原本因为父级不是 flex 而没居中，现在也正确居中了。
+
+> 🔗 部署预览：https://bf702ed5.mdqp.pages.dev
+
+## v4.21.0 · 2026-09-28（权限再细化 + 站点申诉 + 编辑空白 / 容量显示修复 + 通知与红点 + 下架生效）
+
+- 🔑 **管理员权限再细化（23 项）**。此前「任何管理员都能封禁 / 删除任何网站」，站点治理完全没有权限门槛。现在网站治理拆成**三档递进**权限：\`view_sites\`（只看列表）、\`ban_sites\`（+ 封禁 / 解封，**蕴含** view）、\`delete_sites\`（+ 删除，**蕴含**前两者）；勾高阶权限时低阶会自动勾上。剪贴板管理也从单一 \`manage_clips\` 拆成 **公开 / 私有 × 查看 / 编辑 / 删除** 六项（\`view_public_clips\` … \`delete_private_clips\`）：**私有剪贴板是最高敏感数据**，没被显式授予 \`*_private_clips\` 的管理员，在管理后台连列表里都看不到私有板。老管理员现有的 \`manage_clips\` 会自动展开为六项全开，不降级。服务端每个站点 / 剪贴板端点都做了二次校验，前端按钮按真实权限渲染，无权限的后台 tab 直接不显示。
+- 📮 **封禁后可一键申诉**。封禁页（qsites 403）不再是「自己去工单中心找入口」——现在直接给「📮 一键申诉」按钮，点击跳到 mdqp 工单写入页并**自动预填申诉分类与站点**；「🌐 我的网站」列表与站点编辑器里的封禁横幅也各有一个「📮 一键申诉」。工单系统新增独立分类 **\`appeal\`（封禁申诉）**：申诉必须登录、必须指向自己的站点 / 片段，内容会自动带上站点地址、当前状态与封禁原因，同一对象未处理申诉只保留一条。管理员在工单详情可看到「✅ 申诉成立：解除封禁站点」，一键解封并通知站长。
+- 🐞 **修复站点文件「点编辑始终空白」**。\`GET /api/sites/:slug/file/*\` 里 \`kv.get(key, {type:'arrayBuffer'})\` 在本运行时**直接返回 ArrayBuffer**（不是 \`{value}\` 包装对象），代码却按 \`obj.value\` 解包 → 恒为 \`undefined\` → 内容永远空，前端于是提示「文件内容为空，可直接输入新内容后保存」。改为兼容两种形态取值，并在 \`size\` 上直接返回真实字节数。
+- 📏 **修复容量「几乎始终 0.0KB」**。三处硬编码 \`/1024\` 换算（站点卡片、容量行、文件列表）对几十字节的小文件会四舍五入成 \`0.0KB\` / \`0.00MB\`。新增 \`fmtBytes()\` 自适应 B / KB / MB：100 字节现在显示 \`100B\`，十几 KB 显示 \`12.3KB\`，超过 1MB 才用 MB。
+- 🔔 **浏览器通知不再只在聊天页发、也不再互相顶掉**。原先通知逻辑只挂在聊天页轮询里，用户一到别的页面就完全收不到；且同一会话复用同一个通知 \`tag\`，后到的消息会**静默顶掉**前一条（表现就是「通知没了」）。现在判定逻辑提到**全局轮询**，\`GET /api/chat/unread\` 顺带返回各会话最新一条消息，任何页面都能弹；\`tag\` 带上消息 id 保证每条独立；前台轮询从 15s 缩到 8s；通知权限改为**首次点击 / 按键时**就申请（浏览器要求用户手势），比进聊天页才申请早得多。
+- 🔴 **网站图标（favicon）上也有红点**。有未读时动态把数字画到标签页图标上（紫底圆角方块 + 白色文档 # + 红色数字角标），用户切到别的标签页或别的网站也能一眼看到；未读清零后自动还原原图标。
+- 📜 **聊天滚动（第一轮）**。此前聊天页「文档滚动条 + 消息区滚动条」两条并存——\`main\` 有 \`flex:1\`、页脚还占位，\`#view-chat\` 又用 \`calc(100vh - 56px)\` 硬算高度，滚轮落进哪条全靠运气。本版先锁死整条高度链、隐藏页脚、禁止文档滚动，并给气泡内的标题 / 代码块 / 图片 / 表格做限高限宽。**但漏了 \`#chatRoot\` 这一环（见 v4.21.1），导致消息区仍是平铺不滚**，v4.21.1 才是真正修好。
+- 🚫 **下架的网站不再可访问**。qsites 托管 worker 此前只拦截 \`suspended\`，\`draft\`（站长主动下架）照常回源。现在**只有 \`published\` 才放行**，\`draft\` 返回「该网站暂不可访问」。
+- ⚠ **用户站右下角悬浮小举报按钮**。在 qsites 域名下打开任意网站，右下角会出现一个小小的「⚠ 举报」胶囊（点 ✕ 可关掉，关过之后不再出现），一键带着站点标识跳到 mdqp 举报表单。按钮刻意做小且可关闭，不影响正常浏览。
+- 🕒 **工单处理时间不再早 8 小时**。工单详情页的「处理于」直接 \`slice(0,16)\` 渲染 UTC 原始串，比实际早 8 小时；现已统一走 \`fmtDateTime()\` 按 UTC+8 渲染。顺带修掉「封禁至」「VIP 至」两处同类残留。
+- 🎨 规划更新：\`docs/ROADMAP.md\` 新增「设计一个正经的 logo」条目（当前 favicon 只是 emoji 占位）。
+- 🐞 **修复「点悬浮举报却跳成了申诉」**：工单写入页的下拉里压根没有 \`内容举报\` 这个选项，只有申诉，于是 \`cat=report\` 的预填值赋不上去、掉回默认项。现在申诉与举报按链接里的 \`cat\` **互斥渲染**各自的选项（举报还多一个「举报原因」下拉），提交时也按分类带上 \`site_slug\` / \`clip_id\` 与原因。
+
+> 🔗 部署预览：https://eda46519.mdqp.pages.dev
+
+---
+
+## v4.20.0 · 2026-09-27（站点治理落实 + 聊天轮询降频与后台红点 + P0 清理）
+
+- 🛡 **站点封禁真正落地**。此前只有后端 \`suspend\` 接口、前端没有任何入口，等于没有落实。现在管理后台新增「🌐 站点」tab：可搜索（slug / 标题 / 站长）、按状态筛选，列出全站站点与站长、文件数、容量、更新时间，**待处理举报数直接以红色角标显示在状态列**；管理员可一键**封禁（需填原因）**、**解封**、**删除**。封禁后：用户访问该站立即 403，站长在编辑器看到红色封禁横幅（含原因）且上传 / 生成首页 / 发布按钮全部禁用，后端也会二次拦截（\`suspended\` 直接 403），并会给站长推送站内通知说明原因与申诉途径。
+- ⚠ **站点举报落地**。「🌐 我的网站」页新增「⚠ 举报站点」，填写网址标识（**也支持直接粘贴 \`https://qsites.pages.dev/xxx\` 链接，自动提取标识**）+ 举报原因 + 补充说明即可提交。举报进入统一工单系统（\`category=report\`，新增 \`related_site_slug\` 关联列），同一用户对同一站点的未处理举报自动去重。工单详情页会显示关联站点及其当前状态，管理员可在工单内直接**封禁 / 解封 / 删除该站点**，不必再回管理后台找。
+- 💬 **聊天轮询降频（P0-1.5）**：页面切到后台（不可见）时轮询间隔自动拉长到 **30 秒**，前台保持 4 秒；切回前台立刻补拉一次，不用等下一轮。
+- 🔴 **后台新消息也会闪红点**：新增轻量接口 \`GET /api/chat/unread\`，全局轮询未读总数（后台 30s / 前台 15s），导航栏「💬 聊天」图标上会出现**带数字且闪烁的红点**，不在聊天页也能看到；聊天页内则直接用会话列表的未读求和刷新，不额外发请求。
+- ⚡ **聊天会话列表消掉 N+1 查询（P0-1.2）**：原先每个会话串行发起 4–5 次数据库往返（最后一条消息、未读数、对方信息、成员数、留存上限），会话一多就是几十次。现改为 5 条批量查询（\`WHERE conv_id IN (...)\`）+ 内存拼装，未读数仍按真实 \`COUNT(*)\` 统计（不退回 id 差值那个错算法）。
+- 🧹 **删掉 \`sites.hits\` 死列（P0-1.4）**：建表时就有的字段，代码里只 \`SELECT\` 从不 \`UPDATE\`，访问统计等于没做还误导后来人，已删除并同步移除查询引用。
+
+> 🔗 部署预览：https://127f3b9a.mdqp.pages.dev/sites
+
+---
+
+## v4.19.2 · 2026-09-27（时间改 UTC+8 + 聊天滚动 + 未读数修正 + 配额累加修正 + qsites 主页）
+
+- 🕐 **全站时间统一按 UTC+8（北京时间）显示**。数据库里存的始终是 UTC 字符串，但前端有多处直接把原始串 \`slice\` 出来渲染（聊天消息时间、工单「创建于」、公告时间、个人页「加入于」、管理后台注册时间），导致显示比实际早 8 小时。现已统一为 \`parseDbTime / fmtDateTime / fmtDate / fmtShortDateTime\` 四个工具函数：先按 UTC 解析、再按 UTC+8 渲染，结果与浏览器本机时区无关。聊天气泡下的时间顺带改成短格式（今年只显示 \`09-27 10:12\`，不显示年份）。
+- 💬 **修复聊天消息区不滚动**。根因不在 CSS 本身，而是 \`main\` 有 \`padding: 26px 22px 60px\`，聊天视图又是 \`height: calc(100vh - 56px)\`，两者相加超出一屏 → 页面出现滚动条，用户滚的是整个页面而不是消息区。现在聊天页自动给 \`body\` 加 \`chat-page\` 类，把 \`main\` 内边距归零、主栏不再撑满 100vh，消息区独占剩余高度；同时给 \`.chat-msgs\` 加了 \`overscroll-behavior: contain\`，滚到底不会带着整个页面一起动。
+- 🔢 **修复未读数虚高（对方发 4 条却显示 7）**。旧实现用「最后一条消息 id − last_read_id」当未读数，但 \`chat_messages.id\` 是全局自增、跨会话共享 id 空间的，同一会话内 id 并不连续，被其它会话占用的 id 也被算进去了。改为按真实消息数 \`COUNT(*)\`（限定 \`conv_id\`、且排除自己发的）。
+- ✎ **修复「点编辑显示空白」**。编辑弹窗原本先 \`await\` 接口、拿到内容后才渲染保存按钮，一旦读取慢或失败，弹窗就只剩一个空白输入框，既没按钮也没提示。改为 UI 同步渲染完（含加载态 + 保存/取消按钮）再异步填内容，全程 \`try/catch\`；即使读取失败也能直接粘贴新内容保存覆盖。
+- 📦 **修复站点容量统计重复累加**。批量上传时旧逻辑是 \`当前大小 + 本次大小\`、\`当前文件数 + 本次文件数\`，把「覆盖同名文件」当成了「新增文件」——反复编辑保存同一个 \`index.html\` 会让容量和文件数不断虚高，几次就顶满配额、再也保存不了。现在按差额计算（同名文件只算差值，不新增计数），单文件覆盖写（PUT）与批量上传（POST）口径一致。
+- 🌐 **qsites 主页重做**。原来是三行纯文字说明，现在是完整落地页：品牌 Hero、三步上线教程、适用场景、配额对照表、安全隔离说明（独立源 + CSP）、常见问题，移动端自适应；404 页也换成了带返回入口的友好页面，且依然不区分「站点不存在」和「文件不存在」，避免被用来探测。
+
+> 🔗 部署预览：https://6c7178dd.mdqp.pages.dev/sites
+
+---
+
+## v4.19.1 · 2026-09-26（修删除失效 + 文件在线编辑）
+
+> 🔗 部署预览：https://8cf6468a.mdqp.pages.dev/sites
+
+- 🐞 **修复删除站点 / 删除文件全部失效**：文件删除路由用 \`c.req.param('*')\` 取通配路径，但本版本 Hono 通配符捕获失效，导致 \`path\` 为空、\`bad_path\` 被拒——所有删除都返回「删除失败」。改为从 \`c.req.url\` 的 pathname 切片取值，删除恢复正常。
+- ✨ **新增文件在线编辑**：文本类文件（html / htm / css / js / mjs / json / txt / md / svg / xml / csv 等）列表新增「✎ 编辑」，弹窗内直接改内容并 \`PUT\` 覆盖写回 KV；此前「粘贴 HTML 快速生成的 index.html」现在可随时改，不必删了重建。
+- 🐞 **修复 qsites 托管 worker 回源空 body**：\`kv.get(key, { type:'arrayBuffer', metadata:true })\` 组合在本运行时下 \`value\` 丢失，用户站打开是空白页。改为值、metadata 分两次读，内容正确回源。
+
+---
+
+## v4.19.0 · 2026-09-26（🌐 网站托管 qsites 上线）
+
+> 🔗 部署预览：https://377f447e.mdqp.pages.dev/sites
+
+- 🌐 **新增「🌐 网站」模块**：用户可在 mdqp 内创建并托管静态网站，部署到**独立 origin \`qsites.pages.dev\`**，与主站不同源——同源策略天然隔离用户站 JS，无法读主站 cookie / 调主站接口。
+- 🗄️ **存储用 KV 命名空间**（账号已开通、无需绑卡）：\`sites/{slug}/{file}\` 存文件，\`sites/{slug}/__status\` 存状态（draft / published / suspended）。代价为最终一致（部署后数十秒生效）+ 单值 ≤25MB。
+- 📊 **配额**：普通 3 站 / 每站 5MB / 单文件 1MB / 200 文件；VIP 10 站 / 20MB / 5MB / 500 文件。slug 含保留字校验。
+- 🔧 **后端**：建站 / 列站 / 批量上传（base64）/ 列文件 / 删文件 / 删站 / 发布 / 下架 / 管理员封禁·解封。
+- 🖥️ **前端**：整文件夹上传（\`webkitdirectory\`）、粘贴 HTML 快速生成首页、文件列表、发布 / 下架 / 删除。
+- 🛡️ **安全**：qsites 托管页 CSP 仅 \`'self'\`、\`x-frame-options DENY\`、封禁站点直接 403 且不暴露文件是否存在。
+
+---
+
+## v4.18.1 · 2026-09-26（聊天修复：轮询不再刷工单 / 聊天框固定高度滚动）
+
+> 🔗 部署预览：https://37e4afb0.mdqp.pages.dev/chat
+
+- 🐞 **修复聊天轮询把瞬时断网刷成 bug 工单**：\`/chat\` 每 4 秒轮询会话列表与「新消息 since」接口，原本未做静默处理——任何一次瞬时网络失败（断网 / 部署切换 / 后台标签被节流）都会被自动上报机制当成 bug 生成工单（参考 TK2C0ADAED）。现已对轮询请求加 \`silent:true\` 并包 try/catch，瞬时失败仅静默重试，不再自动建工单；用户主动操作（打开会话、发消息）的失败仍正常提示。
+- 📏 **修复聊天框高度随消息变长**：消息区 \`.chat-msgs\` 在嵌套 flex 下缺 \`min-height:0\`，导致内容一多就把整个区域（连同输入框）往下撑、页面滚动而非消息区滚动。现已给 \`.chat-msgs\` 与 \`.chat-main\` 加 \`min-height:0; overflow:hidden\`，消息区固定占满剩余高度、消息多了内部滚动、少了下方留白，符合「少则留白、多则滚动」的预期。
+
+---
+
+## v4.18.0 · 2026-09-25（聊天增强：总群保护 / 免打扰 / 字数硬限 / UID 搜索 / 桌面通知）
+
+> 🔗 部署预览：https://5a1731e7.mdqp.pages.dev/chat
+
+- 🛡️ **全站总群保护**：「mdqp 总群」不再提供退出 / 解散入口（前端隐藏按钮，后端 \`leave\` / \`dissolve\` 对 \`is_global=1\` 直接拒绝），避免误删全站公共空间。
+- 🔕 **群聊消息免打扰**：群会话顶栏新增 🔔 开关；开启后该会话不再触发浏览器通知，会话列表未读改为静音小圆点（仍保留未读计数）。
+- ✂️ **单条消息字数硬上限 150 等效字符**：输入框实时提示用量；超过 150 直接禁止发送，并弹窗引导「去新建剪贴板」（带内容预填）或「复制内容」，下方「＋ 新建」按钮亦可一键跳 \`/new\`。
+- 🔎 **按 UID 找人**：单聊搜索与建群 / 拉人搜索现在支持直接输入纯数字用户 ID（精确命中置顶），与用户名 / 昵称模糊匹配并存。
+- 🔔 **新消息桌面通知**：打开 /chat 时若未授予通知权限会主动申请（铃铛按钮可手动开关）；收到他人新消息（非自己发、非免打扰、非正在看）会弹出浏览器通知，点击聚焦并跳到该会话。
+- 🐞 **修复对方消息气泡被拉伸成「一长条」**：根因为 \`.chat-msgs\` 列布局下 \`.chat-msg\` 默认 \`align-items: stretch\` 把气泡拉满 74% 宽度；改为 \`align-items: flex-start\` 让气泡按内容自适应，自己发的消息（原就 \`flex-end\`）不受影响。
+- 🗄️ 配套迁移 \`migrate_v4.18_mute.sql\`：为 \`chat_members\` 增加 \`muted\` 列。
+
+## v4.17.1 · 2026-09-25（聊天系统修复：登录态 500 + 弹窗不显示）
+
+> 🔗 部署预览：https://6ef21369.mdqp.pages.dev/chat
+
+- 🐞 **修复登录态打开 /chat 报 500**：\`chatRetentionLimit\` 群主分支的 VIP 判定 SQL 引用了未定义的表别名 \`u.vip_until\`（\`FROM users\` 未起别名），导致每条群会话（含全站总群）查询抛 \`no such column: u.vip_until\`，\`GET /api/chat/conversations\` 直接 500。改为无别名 \`vip_until\`。
+- 🐞 **修复点「＋私聊 / ＋群聊」弹窗不显示**：聊天弹窗 \`chatModalOpen\` 只移除了 \`hidden\` 类却忘了加 \`show\`，而 \`.modal-overlay\` 默认 \`display:none\`、仅 \`.modal-overlay.show\` 才显式 \`display:flex\`，结果弹窗在 DOM 里打开却不可见，表现为「点击无反应」。现已与全站弹窗保持一致：\`remove('hidden') + add('show')\`，关闭时 \`remove('show') + add('hidden')\`。
+- ✅ 两个 bug 均修复后，登录用户打开 /chat 可正常加载会话列表，发起单聊 / 建群 / 搜索 / 拉人均可用。
+
+## v4.17.0 · 2026-09-24（聊天系统 💬：单聊 / 群聊 / 全站总群）
+
+> 🔗 部署预览：https://mdqp.pages.dev/chat
+
+- ✨ **全新聊天系统**：参考洛谷私信、微信与 webchat-frontend 设计，电脑端左侧为「搜索栏 + 近期会话列表」，右侧为对话区，移动端自动切换为单栏。
+- 💬 **单聊**：左侧搜索栏模糊搜索用户名 / 用户 ID，点结果即发起私聊；对话顶栏显示对方昵称（点击跳其主页），消息气泡支持 Markdown 渲染；单条消息超过 **100 等效字符**时给出超限提示，并建议「复制到剪贴板后发送链接」。
+- 👥 **群聊**：所有用户注册即自动加入「mdqp 总群」；支持新建群聊；群聊右上角 **＋** 按钮，默认列出与该用户聊过的用户、支持同单聊逻辑搜索、多选勾选后一键拉入且对方收通知；普通成员可退出，群主可解散（总群不可退出 / 解散）。
+- 💾 **消息存储**：单聊与群聊默认在本地缓存最近 **50 条**，向上翻页加载更早消息；群主为 VIP 或单聊任一方为 VIP 时上限提升至 **100 条**（服务端按上限自动清理最旧记录）。
+- 🔄 **实时性**：前端 4 秒轮询拉取新消息 + 未读计数；会话列表显示未读红点与最后一条消息预览。
+- 🚪 **入口**：站内 \`/chat\` 路由；\`chat.mdqp.pages.dev\` 通过 Cloudflare Pages 自定义域名（CNAME 指向 mdqp.pages.dev）落地，二者同源同部署。底部「＋ 新建」按钮一键跳 \`/new\`。
 
 ## v4.16.0 · 2026-09-24（阅读模式 📖：全屏纯净阅读 + 目录）
 
@@ -573,6 +1127,8 @@ function guestId() {
 async function api(path, opts = {}) {
   const headers = Object.assign({ 'X-Guest-Id': guestId() }, opts.headers || {});
   if (opts.body) headers['Content-Type'] = 'application/json';
+  // v4.28：测试站（mdqptest）密码门令牌——存在才带，主站无此键，零影响
+  try { const tk = localStorage.getItem('mdqptest_gate_tk'); if (tk) headers['X-Gate-Token'] = tk; } catch {}
   let res;
   try {
     res = await fetch(path, Object.assign({ credentials: 'same-origin' }, opts, { headers }));
@@ -583,11 +1139,62 @@ async function api(path, opts = {}) {
     return { ok: false, status: 0, data: null };
   }
   let data = null; try { data = await res.json(); } catch { /* 非 JSON */ }
-  // v4.5.2：服务端 5xx 也上报（4xx 属业务预期，不打扰用户）
-  if (res.status >= 500) {
+  // v4.5.2：服务端 5xx 也上报（4xx 属业务预期，不打扰用户）；v4.27.1：degraded（D1 配额耗尽等）属预期降级，不上报避免刷屏
+  if (res.status >= 500 && !(data && data.degraded)) {
     reportError({ kind: 'api', message: '接口 ' + res.status + ' 错误：' + (opts.method || 'GET') + ' ' + path, extra: (data && (data.error || data.message)) || '' });
   }
+  if (data && data.degraded) showDegradedBanner();
   return { ok: res.ok, status: res.status, data };
+}
+
+// v4.27.1：服务降级提示条（D1 读配额耗尽等导致数据暂不可用时，温和告知而非报错刷屏）
+function showDegradedBanner(reason) {
+  try {
+    if (document.getElementById('degradedBanner')) return;
+    // v4.30.2：用户手动关闭后，本会话不再反复弹出（否则每次探测都会重新插入）
+    try { if (sessionStorage.getItem('mdqp_degraded_dismissed') === '1') return; } catch {}
+    const b = document.createElement('div');
+    b.id = 'degradedBanner';
+    // v4.30.2：加关闭按钮 + 不再用 fixed 覆盖顶部。
+    // 旧实现是 fixed;top:0;z-index:99999 的整宽横幅，直接盖住登录/注册按钮且无法关闭，
+    // 用户既点不到按钮也没法让它消失。
+    // 改为追加到页面顶部的正常文档流（sticky），随内容排列、不遮挡任何控件。
+    b.style.cssText = 'position:relative;z-index:80;background:linear-gradient(90deg,#dc2626,#ea580c);color:#fff;padding:8px 12px 8px 14px;font-size:13px;font-weight:600;line-height:1.5;box-shadow:0 2px 8px rgba(0,0,0,.22);display:flex;align-items:center;gap:10px';
+    b.innerHTML = '<span style="flex:1">🚨 站点数据库读取额度已用尽，正在降级运行——部分数据暂时读不到，请勿依赖此时新建的内容。</span>';
+    const btn = document.createElement('button');
+    btn.textContent = '✕';
+    btn.title = '关闭提示（本站仍在降级运行）';
+    btn.setAttribute('aria-label', '关闭提示');
+    btn.style.cssText = 'flex:none;width:26px;height:26px;border:1px solid rgba(255,255,255,.55);background:rgba(255,255,255,.15);color:#fff;border-radius:6px;font-size:14px;line-height:1;cursor:pointer;font-weight:700';
+    btn.onclick = (e) => { e.stopPropagation(); try { sessionStorage.setItem('mdqp_degraded_dismissed', '1'); } catch {} b.remove(); };
+    b.appendChild(btn);
+    // 挂到 .main-col 顶部（它是 flex column），随文档流排列 → 不会覆盖/遮挡任何控件。
+    // 早于旧的 body-firstChild 方案：插到 body 前面会与 fixed 侧边栏布局打架。
+    const host = document.querySelector('.main-col') || document.body;
+    if (host.firstChild) host.insertBefore(b, host.firstChild);
+    else host.appendChild(b);
+    try { sessionStorage.setItem('mdqp_degraded_hint', '1'); } catch {}
+    if (reason) { try { console.warn('[degraded]', reason); } catch {} }
+  } catch {}
+}
+// v4.30：进入页面时主动探测一次降级状态
+// 之前只在 api() 拿到 degraded 时才提示，若页面首屏请求恰好命中缓存就察觉不到，
+// 导致站长在降级态下「以为一切正常」。这里进站主动探一次。
+// v4.31.2：命中后启动每分钟轮询，一旦恢复就**自动移除横幅**——
+// 否则站点早已恢复、旧的横幅还挂着，会被误认为「还在降级」。
+async function probeDegraded() {
+  try {
+    const check = async () => {
+      const r = await fetch('/api/site/config?_probe=' + Date.now(), { cache: 'no-store' });
+      const d = await r.json().catch(() => null);
+      const bad = !!(d && d.degraded);
+      const bar = document.getElementById('degradedBanner');
+      if (!bad && bar) { bar.remove(); clearInterval(window.__degTimer); window.__degTimer = null; }
+      return bad;
+    };
+    const bad = await check();
+    if (bad && !window.__degTimer) window.__degTimer = setInterval(check, 60_000);
+  } catch {}
 }
 
 /** 全局数学块占位符计数器（避免嵌套调用冲突） */
@@ -743,10 +1350,46 @@ function initReadingMode() {
   });
 }
 
+// v4.19.2：数据库里所有时间都是 UTC 字符串（SQLite datetime('now') 与 JS toISOString 一致）。
+// 前端统一按 UTC 解析、再按 UTC+8（中国标准时间）渲染，结果与浏览器本机时区无关。
+const TZ_OFFSET_MS = 8 * 3600 * 1000;
+function parseDbTime(s) {
+  if (!s) return null;
+  const str = String(s).trim();
+  if (!str) return null;
+  const hasTZ = /[Zz]$/.test(str) || /[+-]\d{2}:?\d{2}$/.test(str);
+  const t = Date.parse((str.includes('T') ? str : str.replace(' ', 'T')) + (hasTZ ? '' : 'Z'));
+  return isNaN(t) ? null : t;
+}
+function fmtDateTime(s) {
+  const t = parseDbTime(s); if (t == null) return '';
+  const d = new Date(t + TZ_OFFSET_MS);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
+}
+function fmtDate(s) { const f = fmtDateTime(s); return f ? f.slice(0, 10) : ''; }
+function fmtClock(s) { const f = fmtDateTime(s); return f ? f.slice(11) : ''; }
+// 聊天气泡下的短格式：今年省掉年份（MM-DD HH:mm），跨年才显示完整
+function fmtShortDateTime(s) {
+  const f = fmtDateTime(s); if (!f) return '';
+  const y = String(new Date(Date.now() + TZ_OFFSET_MS).getUTCFullYear());
+  return f.startsWith(y + '-') ? f.slice(5) : f;
+}
+
+/** 自适应文件大小：B (<1KB) / KB (<1MB) / MB，避免小文件被四舍五入成 0.0KB */
+function fmtBytes(n) {
+  const b = Number(n) || 0;
+  if (b < 1024) return b + 'B';
+  if (b < 1024 * 1024) return (b / 1024).toFixed(b < 10240 ? 1 : 0) + 'KB';
+  return (b / 1024 / 1024).toFixed(2) + 'MB';
+}
+
 function timeAgo(s) {
-  if (!s) return ''; const t = new Date(s.replace(' ', 'T') + (s.includes('Z') ? '' : 'Z')).getTime(); const d = Date.now() - t;
+  if (!s) return '';
+  const t = parseDbTime(s); if (t == null) return '';
+  const d = Date.now() - t;
   if (d < 6e4) return '刚刚'; if (d < 36e5) return Math.floor(d / 6e4) + ' 分钟前'; if (d < 864e5) return Math.floor(d / 36e5) + ' 小时前'; if (d < 2592e6) return Math.floor(d / 864e5) + ' 天前';
-  return new Date(t).toLocaleDateString('zh-CN');
+  return fmtDate(s);
 }
 function expiryText(s) {
   if (!s) return ''; const t = new Date(s.replace(' ', 'T') + 'Z').getTime(); const left = t - Date.now();
@@ -767,6 +1410,9 @@ function applyTheme(mode) {
   if (mode === 'auto') dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
   document.documentElement.dataset.theme = dark ? 'dark' : 'light';
   const tb = $('#themeBtn'); if (tb) tb.textContent = dark ? '☀️' : '🌙';
+  // v4.33：同步移动端浏览器 UI / PWA 状态栏配色（安卓 Chrome、iOS 主屏应用都认这个）
+  const tc = document.getElementById('themeColorMeta');
+  if (tc) tc.setAttribute('content', dark ? '#0f1115' : '#f4f5f8');
 }
 function initTheme() {
   const saved = localStorage.getItem('mdqp_theme') || 'auto';
@@ -783,21 +1429,875 @@ function initTheme() {
   }
 }
 
+// ==================== 用户网站（v4.19，托管于独立 origin qsites.pages.dev） ====================
+const SITES_HOST = 'https://qsites.pages.dev';
+const RESERVED_SLUGS_JS = new Set(['api','admin','chat','s','u','www','assets','about','help','vip','invite','tickets','me','new','edit','c','error','404','legacy','sites','qsite','qsites','code','home','feedback']);
+function guessTypeJs(p) {
+  const m = (p.split('.').pop() || '').toLowerCase();
+  const map = { html:'text/html',htm:'text/html',css:'text/css',js:'application/javascript',json:'application/json',txt:'text/plain',md:'text/markdown',svg:'image/svg+xml',png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',gif:'image/gif',webp:'image/webp',ico:'image/x-icon',pdf:'application/pdf',xml:'application/xml' };
+  return map[m] || 'application/octet-stream';
+}
+function statusBadge(st) {
+  if (st === 'published') return '<span class="badge badge-vip">已发布</span>';
+  if (st === 'suspended') return '<span class="badge badge-role badge-dev">已封禁</span>';
+  return '<span class="badge">草稿</span>';
+}
+
+// v4.24：近 7 天访问迷你柱状（按 UTC+8 计日，与托管计数口径一致）
+function visitsMiniBar(days) {
+  days = days || {};
+  const arr = [];
+  let max = 1;
+  const base = new Date(Date.now() + 8 * 3600 * 1000);
+  for (let i = 6; i >= 0; i--) {
+    const d = new Date(base.getTime() - i * 86400000);
+    const key = d.toISOString().slice(0, 10);
+    const v = days[key] || 0;
+    arr.push(v); if (v > max) max = v;
+  }
+  const bars = arr.map((v) => {
+    const h = Math.max(2, Math.round((v / max) * 24));
+    return `<span style="display:inline-block;width:5px;margin:0 1px;height:${h}px;background:var(--primary);border-radius:2px;vertical-align:bottom" title="${v} 次"></span>`;
+  });
+  return `<span class="visits-bar">${bars.join('')}</span>`;
+}
+function visitsLine(s) {
+  const v = s.visits || { total: 0, days: {} };
+  return `<span class="site-visits">👁 ${v.total} 次 ${visitsMiniBar(v.days)}</span>`;
+}
+
+async function renderSites() {
+  showView('sites');
+  const root = document.getElementById('sitesRoot');
+  if (!state.me || state.me.type !== 'user') {
+    root.innerHTML = '<div class="sites-login"><div class="chat-empty-illo">🔒</div><p>部署网站需要登录后使用</p><button class="btn btn-primary" id="sitesLogin">🔑 登录</button></div>';
+    const b = document.getElementById('sitesLogin'); if (b) b.onclick = () => openAuthModal('login');
+    return;
+  }
+  root.innerHTML = `
+    <div class="crumb"><a href="/" data-link>← 首页</a></div>
+    <div class="sites-head">
+      <h2>🌐 我的网站</h2>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-sm btn-ghost" id="reportSiteBtn">⚠ 举报站点</button>
+        <a class="btn btn-sm btn-ghost" href="${SITES_HOST}" target="_blank" rel="noopener">访问托管域名 ↗</a>
+      </div>
+    </div>
+    <div class="sites-create card">
+      <h3>＋ 新建网站</h3>
+      <div class="sites-form">
+        <input id="siteSlug" class="input" placeholder="网址标识（2–31 位，如 my-blog），访问 ${SITES_HOST}/my-blog" maxlength="31" autocomplete="off">
+        <input id="siteTitle" class="input" placeholder="标题（可选）" maxlength="120" autocomplete="off">
+        <button class="btn btn-primary" id="siteCreateBtn">创建</button>
+      </div>
+      <p class="muted" id="siteSlugHint"></p>
+    </div>
+    <div id="sitesList" class="sites-list"><div class="skeleton-row"></div></div>`;
+  const slugInput = document.getElementById('siteSlug');
+  slugInput.addEventListener('input', () => {
+    const v = slugInput.value.trim().toLowerCase();
+    const hint = document.getElementById('siteSlugHint');
+    if (!v) { hint.textContent = ''; return; }
+    if (!/^[a-z0-9][a-z0-9-]{1,30}$/.test(v)) hint.textContent = '⚠ 格式：2–31 位小写字母 / 数字 / 连字符';
+    else if (RESERVED_SLUGS_JS.has(v)) hint.textContent = '⚠ 该标识为保留字，不可用';
+    else hint.textContent = '✓ 将发布于 ' + SITES_HOST + '/' + v;
+  });
+  document.getElementById('siteCreateBtn').onclick = async () => {
+    const slug = slugInput.value.trim().toLowerCase();
+    const title = document.getElementById('siteTitle').value.trim();
+    if (!/^[a-z0-9][a-z0-9-]{1,30}$/.test(slug)) { toast('网址标识格式不正确', 'err'); return; }
+    const { ok, data } = await api('/api/sites', { method: 'POST', body: JSON.stringify({ slug, title }) });
+    if (!ok) { toast(data?.message || data?.error || '创建失败', 'err'); return; }
+    toast('已创建，去上传文件');
+    go('/sites/' + slug);
+  };
+  const rpt = document.getElementById('reportSiteBtn');
+  if (rpt) rpt.onclick = () => reportSite();
+  await loadMySites();
+}
+
+// v4.20：举报他人站点（走统一工单系统，category=report + related_site_slug）
+function reportSite(presetSlug) {
+  if (!state.me || state.me.type !== 'user') { toast('请先登录后再举报', 'err'); return openAuthModal('login'); }
+  const reasons = ['含违法违规内容', '钓鱼 / 诈骗', '色情低俗', '侵犯版权', '恶意广告', '其它'];
+  const m = openModal('⚠ 举报站点', `
+    <p class="muted" style="margin:0 0 8px">举报会进入工单中心，由管理员处理（可下架 / 封禁该站点）。</p>
+    <input class="input" id="rptSlug" placeholder="网址标识或站点链接，如 my-blog 或 ${SITES_HOST}/my-blog" style="width:100%;box-sizing:border-box;margin-bottom:8px" value="${esc(presetSlug || '')}">
+    <select class="input" id="rptReason" style="width:100%;box-sizing:border-box;margin-bottom:8px">
+      ${reasons.map((r) => `<option value="${esc(r)}">${esc(r)}</option>`).join('')}
+    </select>
+    <textarea id="rptDetail" class="input" placeholder="补充说明（可选，1000 字内）" style="width:100%;box-sizing:border-box;min-height:90px"></textarea>`);
+  m.foot.innerHTML = `<button class="btn btn-sm" id="rptCancel">取消</button><button class="btn btn-sm btn-danger" id="rptOk">提交举报</button>`;
+  m.foot.querySelector('#rptCancel').onclick = closeModal;
+  m.foot.querySelector('#rptOk').onclick = async () => {
+    let slug = (m.body.querySelector('#rptSlug').value || '').trim();
+    // 允许直接粘贴完整链接
+    const mm = slug.match(/qsites\.pages\.dev\/([a-z0-9][a-z0-9-]{1,30})/i);
+    if (mm) slug = mm[1];
+    slug = slug.replace(/^\/+|\/+$/g, '').toLowerCase();
+    if (!/^[a-z0-9][a-z0-9-]{1,30}$/.test(slug)) return toast('请填写有效的网址标识或站点链接', 'err');
+    const r = await api('/api/tickets', {
+      method: 'POST',
+      body: JSON.stringify({ category: 'report', site_slug: slug, reason: m.body.querySelector('#rptReason').value, detail: m.body.querySelector('#rptDetail').value })
+    });
+    if (!r.ok) return toast(r.data?.message || '举报失败', 'err');
+    closeModal();
+    if (r.data?.already) toast('你已举报过该站点，管理员会尽快处理');
+    else toast('举报已提交（工单 ' + (r.data?.code || '') + '）');
+  };
+}
+
+async function loadMySites() {
+  const el = document.getElementById('sitesList'); if (!el) return;
+  const { data } = await api('/api/sites');
+  const sites = (data && data.sites) || [];
+  if (!sites.length) { el.innerHTML = '<div class="muted" style="padding:12px 0">还没有网站。创建一个，把你的静态站点一键发布到 ' + SITES_HOST + '/{slug}。</div>'; return; }
+  el.innerHTML = sites.map((s) => `
+    <div class="site-card card">
+      <div class="site-card-main">
+        <div class="site-card-title">${esc(s.title || s.slug)}</div>
+        <div class="site-card-slug"><code>${esc(s.slug)}</code> · ${statusBadge(s.status)} · ${fmtBytes(s.size_bytes)} · ${s.file_count||0} 文件</div>
+        <div class="site-card-visits">${visitsLine(s)}</div>
+        ${s.status === 'suspended' ? `<div class="site-suspended" style="margin-top:6px;padding:8px 10px;border-radius:8px;background:#fee2e2;color:#b91c1c;font-size:13px">⛔ 该站点已被管理员封禁${s.suspend_reason ? '：' + esc(s.suspend_reason) : ''}。认为属于误判可以一键申诉。</div>` : ''}
+      </div>
+      <div class="site-card-actions">
+        ${s.status === 'suspended' ? `<button class="btn btn-sm btn-primary" data-appeal="${esc(s.slug)}">📮 一键申诉</button>` : ''}
+        <a class="btn btn-sm" href="${SITES_HOST}/${esc(s.slug)}" target="_blank" rel="noopener">🔗 访问</a>
+        <button class="btn btn-sm" data-edit="${esc(s.slug)}">编辑</button>
+        <button class="btn btn-sm btn-danger" data-del="${esc(s.slug)}">🗑</button>
+      </div>
+    </div>`).join('');
+  el.querySelectorAll('[data-edit]').forEach((b) => b.onclick = () => go('/sites/' + b.getAttribute('data-edit')));
+  // v4.21：站点被封禁 → 一键跳到工单写入页，已预填申诉分类与站点
+  el.querySelectorAll('[data-appeal]').forEach((b) => b.onclick = () => {
+    const slug = b.getAttribute('data-appeal');
+    pendingBug = { category: 'appeal', site_slug: slug };
+    go('/tickets/new');
+  });
+  el.querySelectorAll('[data-del]').forEach((b) => b.onclick = async () => {
+    const slug = b.getAttribute('data-del');
+    if (!confirm('确定删除网站 ' + slug + '？文件将一并清除，不可恢复。')) return;
+    const { ok, data } = await api('/api/sites/' + slug, { method: 'DELETE' });
+    if (!ok) { toast(data?.message || '删除失败', 'err'); return; }
+    toast('已删除'); loadMySites();
+  });
+}
+
+// v4.24：站点编辑器升级为「文件树 + 行号编辑器 + 本地沙箱预览」工作台
+async function renderSiteEditor(slug) {
+  showView('sites');
+  const root = document.getElementById('sitesRoot');
+  if (!state.me || state.me.type !== 'user') {
+    root.innerHTML = '<div class="sites-login"><p>请先登录</p><button class="btn btn-primary" id="seLogin">🔑 登录</button></div>';
+    const b = document.getElementById('seLogin'); if (b) b.onclick = () => openAuthModal('login');
+    return;
+  }
+  state._se = { slug, path: null, dirty: false };
+  root.innerHTML = `
+    <div class="crumb"><a href="/sites" data-link>← 我的网站</a></div>
+    <div class="se-layout card">
+      <aside class="se-side">
+        <div class="se-side-head">
+          <div class="se-side-title">🌐 ${esc(slug)}</div>
+          <button class="btn btn-xs btn-primary" id="seNewBtn">＋ 新建</button>
+        </div>
+        <a class="se-side-link" href="${SITES_HOST}/${esc(slug)}" target="_blank" rel="noopener">${SITES_HOST.replace(/^https?:\/\//, '')}/${esc(slug)} ↗</a>
+        <div class="se-side-tools">
+          <label class="btn btn-xs"><input type="file" id="siteFolder" webkitdirectory directory multiple hidden>📁 文件夹</label>
+          <button class="btn btn-xs" id="siteUploadBtn">⬆ 上传</button>
+          <button class="btn btn-xs" id="sePasteBtn">📝 粘贴HTML</button>
+          <button class="btn btn-xs" id="seTplBtn">🎨 模板</button>
+          <button class="btn btn-xs" id="seSnapBtn">🕘 历史版本</button>
+        </div>
+        <div class="se-progress hidden" id="seProgress">
+          <div class="se-progress-bar" id="seProgressBar"></div>
+          <span class="se-progress-text muted" id="seProgressText"></span>
+        </div>
+        <div class="se-side-meta" id="seMeta"></div>
+        <div class="se-tree" id="seTree"><div class="skeleton-row"></div></div>
+        <div class="se-side-foot">
+          <button class="btn btn-sm btn-primary" id="sePublish">🚀 发布</button>
+          <button class="btn btn-sm" id="seUnpublish">下架</button>
+          <button class="btn btn-sm btn-danger" id="seDelete">🗑 删站</button>
+        </div>
+      </aside>
+      <section class="se-main">
+        <div class="se-toolbar">
+          <span id="sePath" class="se-path muted">未选择文件</span>
+          <span class="se-tools">
+            <button class="btn btn-xs" id="sePreviewBtn" disabled>👁 预览</button>
+            <button class="btn btn-xs" id="seRenameBtn" disabled>✎ 重命名</button>
+            <button class="btn btn-xs btn-danger" id="seDelBtn" disabled>🗑</button>
+            <button class="btn btn-xs btn-primary" id="seSaveBtn" disabled>💾 保存</button>
+          </span>
+        </div>
+        <div class="se-editor" id="seEditor">
+          <pre class="se-gutter" id="seGutter" aria-hidden="true"></pre>
+          <textarea id="seArea" spellcheck="false" placeholder="从左侧选择文件开始编辑…"></textarea>
+        </div>
+        <div class="se-preview hidden" id="sePreviewWrap">
+          <div class="se-preview-bar"><span>本地预览</span><span class="muted" id="sePreviewNote"></span><button class="btn btn-xs" id="sePreviewClose">✕</button></div>
+          <iframe id="sePreview" class="se-preview-frame" sandbox="allow-scripts allow-same-origin allow-forms allow-modals"></iframe>
+        </div>
+      </section>
+      <div class="se-drop hidden" id="seDrop"><div class="se-drop-inner">📂 拖拽文件 / 文件夹到此处上传</div></div>
+    </div>`;
+
+  const folder = document.getElementById('siteFolder');
+  folder.addEventListener('change', () => {
+    if (folder.files.length) toast('已选 ' + folder.files.length + ' 个文件');
+  });
+  document.getElementById('siteUploadBtn').onclick = async () => {
+    if (!folder.files.length) { toast('先选择文件夹', 'err'); return; }
+    await uploadSiteFiles(slug, folder.files);
+  };
+  document.getElementById('sePasteBtn').onclick = async () => {
+    const html = prompt('粘贴一段 HTML（将保存为 index.html）：');
+    if (!html || !html.trim()) return;
+    const b64 = btoa(unescape(encodeURIComponent(html)));
+    await uploadSiteFiles(slug, [{ _html: true, path: 'index.html', content: b64, contentType: 'text/html' }]);
+  };
+  document.getElementById('seNewBtn').onclick = () => newSiteFile(slug);
+  document.getElementById('seTplBtn').onclick = () => openTemplatePicker(slug);
+  document.getElementById('seSnapBtn').onclick = () => openSnapshotPanel(slug);
+  document.getElementById('sePublish').onclick = async () => {
+    const { ok, data } = await api('/api/sites/' + slug + '/publish', { method: 'POST' });
+    if (!ok) { toast(data?.message || '发布失败', 'err'); return; }
+    toast('已发布'); loadSiteMeta(slug);
+  };
+  document.getElementById('seUnpublish').onclick = async () => {
+    const { ok } = await api('/api/sites/' + slug + '/unpublish', { method: 'POST' });
+    if (!ok) { toast('下架失败', 'err'); return; }
+    toast('已下架'); loadSiteMeta(slug);
+  };
+  document.getElementById('seDelete').onclick = async () => {
+    if (!confirm('确定删除网站 ' + slug + '？')) return;
+    const { ok, data } = await api('/api/sites/' + slug, { method: 'DELETE' });
+    if (!ok) { toast(data?.message || '删除失败', 'err'); return; }
+    toast('已删除'); go('/sites');
+  };
+  document.getElementById('seSaveBtn').onclick = () => saveCurrentFile(slug);
+  document.getElementById('seRenameBtn').onclick = () => renameCurrentFile(slug);
+  document.getElementById('seDelBtn').onclick = () => deleteCurrentFile(slug);
+  document.getElementById('sePreviewBtn').onclick = () => togglePreview(slug);
+  document.getElementById('sePreviewClose').onclick = () => document.getElementById('sePreviewWrap').classList.add('hidden');
+  setupSiteDropZone(slug);
+  const area = document.getElementById('seArea');
+  area.addEventListener('input', () => {
+    state._se.dirty = true;
+    document.getElementById('seSaveBtn').disabled = false;
+    updateGutter(area);
+  });
+  area.addEventListener('scroll', () => { document.getElementById('seGutter').scrollTop = area.scrollTop; });
+
+  await loadSiteMeta(slug);
+  await loadSiteTree(slug);
+}
+
+function updateGutter(area) {
+  const lines = area.value.split('\n').length || 1;
+  let s = '';
+  for (let i = 1; i <= lines; i++) s += i + '\n';
+  document.getElementById('seGutter').textContent = s;
+}
+
+async function loadSiteMeta(slug) {
+  const meta = await api('/api/sites/' + slug);
+  if (!meta.ok || !meta.data.site) return;
+  const s = meta.data.site;
+  const box = document.getElementById('seMeta');
+  if (!box) return;
+  let html = `<div class="muted">${statusBadge(s.status)} · 总大小 ${fmtBytes(s.size_bytes)} · ${s.file_count || 0} 文件 · ${visitsLine(s)}</div>`;
+  if (s.snapshot) {
+    html += `<div class="muted" style="margin-top:4px">🕘 快照 ${s.snapshot.used}/${s.snapshot.limit} · 发布自动留存</div>`;
+  }
+  if (s.status === 'suspended') {
+    html += `<div class="site-suspended" style="margin-top:8px;padding:8px 10px;border-radius:8px;background:#fee2e2;color:#b91c1c;font-size:12px">
+      ⛔ 已被封禁${s.suspend_reason ? '：' + esc(s.suspend_reason) : ''}
+      <button class="btn btn-xs btn-primary" id="seAppealBtn" style="margin-left:6px">📮 申诉</button></div>`;
+  }
+  box.innerHTML = html;
+  const ab = document.getElementById('seAppealBtn');
+  if (ab) ab.onclick = () => { pendingBug = { category: 'appeal', site_slug: slug }; go('/tickets/new'); };
+  const banned = s.status === 'suspended';
+  ['siteFolder', 'siteUploadBtn', 'sePasteBtn', 'seNewBtn', 'sePublish'].forEach((id) => { const b = document.getElementById(id); if (b) b.disabled = banned; });
+}
+
+async function uploadSiteFiles(slug, files) {
+  const arr = [];
+  for (const f of files) {
+    let path, b64, ct;
+    if (f._html) { path = f.path; b64 = f.content; ct = f.contentType; }
+    else {
+      let rel = f.webkitRelativePath || f.name;
+      const parts = rel.split('/');
+      if (parts.length > 1) rel = parts.slice(1).join('/'); // 去掉最外层文件夹名
+      path = rel;
+      const dataUrl = await new Promise((r) => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(f); });
+      b64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+      ct = (dataUrl.match(/^data:([^;]+);/) || [])[1] || f.type || guessTypeJs(path);
+    }
+    if (!path) continue;
+    arr.push({ path, content: b64, contentType: ct });
+  }
+  if (!arr.length) { toast('没有可上传的文件', 'err'); return; }
+  const btn = document.getElementById('siteUploadBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '上传中…'; }
+  const { ok, data } = await api('/api/sites/' + slug + '/files', { method: 'POST', body: JSON.stringify({ files: arr }) });
+  if (btn) { btn.disabled = false; btn.textContent = '⬆ 上传所选文件'; }
+  if (!ok) { toast(data?.message || data?.error || '上传失败', 'err'); return; }
+  toast('上传成功，已' + (data.status === 'published' ? '发布' : '保存'));
+  const folder = document.getElementById('siteFolder'); if (folder) folder.value = '';
+  const info = document.getElementById('siteUploadInfo'); if (info) info.textContent = '';
+  const htmlEl = document.getElementById('siteHtml'); if (htmlEl) htmlEl.value = '';
+  loadSiteTree(slug);
+}
+
+// v4.24：文件树（文件夹在前、按路径层级缩进），点击文件在右侧编辑器打开
+async function loadSiteTree(slug) {
+  const el = document.getElementById('seTree'); if (!el) return;
+  const fr = await api('/api/sites/' + slug + '/files');
+  const files = (fr.data && fr.data.files) || [];
+  if (!files.length) {
+    el.innerHTML = '<div class="muted se-tree-empty">还没有文件。点「＋ 新建」或上传文件夹。</div>';
+    return;
+  }
+  const dirs = new Set();
+  files.forEach((f) => {
+    const parts = f.path.split('/');
+    for (let i = 1; i < parts.length; i++) dirs.add(parts.slice(0, i).join('/'));
+  });
+  const all = [];
+  dirs.forEach((d) => all.push({ path: d, dir: true, depth: d.split('/').length - 1 }));
+  files.forEach((f) => all.push({ path: f.path, dir: false, depth: f.path.split('/').length - 1, size: f.size }));
+  all.sort((a, b) => {
+    if (a.depth !== b.depth) return a.depth - b.depth;
+    if (a.dir !== b.dir) return a.dir ? -1 : 1;
+    return a.path.localeCompare(b.path);
+  });
+  el.innerHTML = all.map((n) => {
+    const name = n.path.split('/').pop();
+    const isOpen = state._se && state._se.path === n.path;
+    return `<div class="se-node ${n.dir ? 'se-dir' : 'se-file'}${isOpen ? ' active' : ''}" data-path="${esc(n.path)}" style="padding-left:${8 + n.depth * 14}px">
+      <span class="se-ico">${n.dir ? '📁' : fileEmoji(n.path)}</span>
+      <span class="se-name">${esc(name)}</span>
+      ${n.dir ? '' : `<span class="muted se-size">${fmtBytes(n.size)}</span>`}
+    </div>`;
+  }).join('');
+  el.querySelectorAll('.se-file').forEach((node) => {
+    node.onclick = () => openInEditor(slug, node.getAttribute('data-path'));
+  });
+}
+
+function fileEmoji(p) {
+  const ext = (p.split('.').pop() || '').toLowerCase();
+  const m = { html: '🌐', htm: '🌐', css: '🎨', js: '📜', mjs: '📜', json: '🔧', md: '📝', svg: '🖼', png: '🖼', jpg: '🖼', jpeg: '🖼', gif: '🖼', ico: '🖼', txt: '📄', xml: '📄', csv: '📊', yml: '⚙', yaml: '⚙', toml: '⚙' };
+  return m[ext] || '📄';
+}
+
+function isTextFile(path) {
+  const ext = (path.split('.').pop() || '').toLowerCase();
+  return ['html', 'htm', 'css', 'js', 'mjs', 'json', 'txt', 'md', 'markdown', 'svg', 'xml', 'csv', 'yml', 'yaml', 'toml', 'jsx', 'ts', 'tsx'].includes(ext);
+}
+
+function b64ToText(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  try { return new TextDecoder('utf-8').decode(bytes); } catch { return bin; }
+}
+function textToB64(text) {
+  const bytes = new TextEncoder().encode(text);
+  let bin = '';
+  const CH = 0x8000;
+  for (let i = 0; i < bytes.length; i += CH) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+  return btoa(bin);
+}
+
+// v4.19.2：整段重写。旧实现先 await 接口再渲染按钮，一旦读取慢或失败，
+// 弹窗就只剩一个空白 textarea、没有按钮也没有提示 —— 表现就是「点编辑显示空白」。
+// 现在：UI 同步渲染完（含保存/取消按钮 + 加载态），再异步填内容，全程 try/catch。
+// v4.24：右侧内联编辑器（替代旧弹窗）—— 行号 + 保存 + 本地沙箱预览
+async function openInEditor(slug, path) {
+  state._se.path = path;
+  state._se.dirty = false;
+  const area = document.getElementById('seArea');
+  const pathEl = document.getElementById('sePath');
+  if (!isTextFile(path)) {
+    area.value = ''; area.disabled = true; area.placeholder = '该文件为二进制，无法在编辑器内编辑；可下载查看或用「🗑」删除后重新上传。';
+    pathEl.textContent = path + '（二进制）';
+    updateGutter(area);
+    document.getElementById('seSaveBtn').disabled = true;
+    document.getElementById('seDelBtn').disabled = false;
+    document.getElementById('seRenameBtn').disabled = false;
+    document.getElementById('sePreviewBtn').disabled = true;
+    document.getElementById('sePreviewWrap').classList.add('hidden');
+    highlightNode(path);
+    return;
+  }
+  pathEl.textContent = path;
+  document.getElementById('seSaveBtn').disabled = true;
+  document.getElementById('seDelBtn').disabled = false;
+  document.getElementById('seRenameBtn').disabled = false;
+  document.getElementById('sePreviewBtn').disabled = !/\.html?$/i.test(path);
+  area.disabled = false;
+  const enc = path.split('/').map(encodeURIComponent).join('/');
+  const { ok, data } = await api('/api/sites/' + slug + '/file/' + enc);
+  if (!ok || !data) {
+    area.value = ''; area.placeholder = '读取失败，可直接粘贴内容后保存覆盖。';
+    updateGutter(area);
+    highlightNode(path);
+    return;
+  }
+  area.value = b64ToText(data.content || '');
+  updateGutter(area);
+  highlightNode(path);
+}
+
+function highlightNode(path) {
+  document.querySelectorAll('.se-node').forEach((n) => n.classList.toggle('active', n.getAttribute('data-path') === path));
+}
+
+function newSiteFile(slug) {
+  const path = prompt('新文件路径（如 index.html、css/style.css）：');
+  if (!path) return;
+  const p = path.trim().replace(/^\/+|\/+$/g, '');
+  if (!p) return;
+  if (!/^[\w./-]+$/.test(p)) { toast('路径含非法字符', 'err'); return; }
+  state._se.path = p; state._se.dirty = false;
+  const area = document.getElementById('seArea');
+  area.disabled = false; area.value = ''; area.placeholder = '在此输入内容，然后点「💾 保存」';
+  document.getElementById('sePath').textContent = p + '（新文件）';
+  document.getElementById('seSaveBtn').disabled = false;
+  document.getElementById('seDelBtn').disabled = true;
+  document.getElementById('seRenameBtn').disabled = true;
+  document.getElementById('sePreviewBtn').disabled = !/\.html?$/i.test(p);
+  updateGutter(area);
+  area.focus();
+}
+
+async function saveCurrentFile(slug) {
+  const path = state._se.path;
+  if (!path) return;
+  const area = document.getElementById('seArea');
+  if (area.disabled) { toast('该文件不可编辑', 'err'); return; }
+  const btn = document.getElementById('seSaveBtn'); btn.disabled = true; btn.textContent = '保存中…';
+  try {
+    const b64 = textToB64(area.value || '');
+    const res = await api('/api/sites/' + slug + '/files/' + path.split('/').map(encodeURIComponent).join('/'), {
+      method: 'PUT', body: JSON.stringify({ content: b64, contentType: guessTypeJs(path) })
+    });
+    if (!res.ok) { toast(res.data?.message || res.data?.error || '保存失败', 'err'); btn.textContent = '💾 保存'; btn.disabled = false; return; }
+    state._se.dirty = false;
+    toast('已保存，稍等数十秒 CDN 生效');
+    await loadSiteTree(slug);
+    document.getElementById('seSaveBtn').disabled = true;
+  } catch (e) {
+    toast('保存出错：' + ((e && e.message) || e), 'err');
+    btn.textContent = '💾 保存'; btn.disabled = false;
+  }
+}
+
+async function renameCurrentFile(slug) {
+  const path = state._se.path;
+  if (!path) return;
+  const np = prompt('重命名为（含路径）：', path);
+  if (!np) return;
+  const newPath = np.trim().replace(/^\/+|\/+$/g, '');
+  if (!newPath || newPath === path) return;
+  if (!/^[\w./-]+$/.test(newPath)) { toast('路径含非法字符', 'err'); return; }
+  const { ok, data } = await api('/api/sites/' + slug + '/rename', {
+    method: 'POST', body: JSON.stringify({ from: path, to: newPath })
+  });
+  if (!ok) { toast(data?.message || data?.error || '重命名失败', 'err'); return; }
+  toast('已重命名'); state._se.path = newPath; await loadSiteTree(slug);
+}
+
+async function deleteCurrentFile(slug) {
+  const path = state._se.path;
+  if (!path) return;
+  if (!confirm('删除文件 ' + path + '？')) return;
+  const { ok, data } = await api('/api/sites/' + slug + '/files/' + path.split('/').map(encodeURIComponent).join('/'), { method: 'DELETE' });
+  if (!ok) { toast(data?.message || '删除失败', 'err'); return; }
+  toast('已删除'); state._se.path = null;
+  const area = document.getElementById('seArea');
+  area.value = ''; updateGutter(area);
+  document.getElementById('sePath').textContent = '未选择文件';
+  ['seSaveBtn', 'seDelBtn', 'seRenameBtn', 'sePreviewBtn'].forEach((id) => document.getElementById(id).disabled = true);
+  await loadSiteTree(slug);
+}
+
+async function togglePreview(slug) {
+  const path = state._se.path;
+  if (!path || !/\.html?$/i.test(path)) return;
+  const wrap = document.getElementById('sePreviewWrap');
+  const note = document.getElementById('sePreviewNote');
+  if (!wrap.classList.contains('hidden')) { wrap.classList.add('hidden'); return; }
+  wrap.classList.remove('hidden');
+  const enc = path.split('/').map(encodeURIComponent).join('/');
+  const r = await api('/api/sites/' + slug + '/file/' + enc);
+  if (!r.ok || !r.data) { note.textContent = '读取失败'; return; }
+  try {
+    const srcdoc = await buildPreviewDoc(slug, path, b64ToText(r.data.content || ''));
+    document.getElementById('sePreview').srcdoc = srcdoc;
+    note.textContent = '沙箱预览（本地资源已内联）';
+  } catch (e) {
+    note.textContent = '预览生成失败';
+  }
+}
+
+// 把 HTML 里引用的本地 css/js/图片通过接口取出并以 data URL 内联，生成离线可看的 srcdoc
+async function buildPreviewDoc(slug, path, html) {
+  const dir = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+  const resolve = (ref) => {
+    if (/^(https?:)?\/\//i.test(ref) || /^(#|data:|mailto:)/i.test(ref)) return null;
+    const stack = dir ? dir.split('/') : [];
+    ref.split('/').forEach((seg) => {
+      if (seg === '' || seg === '.') return;
+      if (seg === '..') stack.pop();
+      else stack.push(seg);
+    });
+    return stack.join('/');
+  };
+  const re = /(href|src)\s*=\s*["']([^"']+)["']/gi;
+  const refs = [];
+  let m;
+  while ((m = re.exec(html))) { const r = resolve(m[2]); if (r) refs.push(r); }
+  const uniq = [...new Set(refs)].slice(0, 24);
+  const map = {};
+  await Promise.all(uniq.map(async (rp) => {
+    try {
+      const enc = rp.split('/').map(encodeURIComponent).join('/');
+      const fr = await api('/api/sites/' + slug + '/file/' + enc);
+      if (fr.ok && fr.data) map[rp] = { b64: fr.data.content, ct: fr.data.contentType || guessTypeJs(rp) };
+    } catch { /* skip */ }
+  }));
+  const re2 = /(href|src)\s*=\s*["']([^"']+)["']/gi;
+  return html.replace(re2, (full, attr, val) => {
+    const r = resolve(val);
+    if (!r || !map[r]) return full;
+    const { b64, ct } = map[r];
+    if (/^image\//.test(ct)) return `${attr}="data:${ct};base64,${b64}"`;
+    if (/css/.test(ct)) return `${attr}="data:text/css;base64,${b64}"`;
+    if (/javascript|ecmascript/.test(ct)) return `${attr}="data:text/javascript;base64,${b64}"`;
+    return full;
+  });
+}
+
+// v4.24.1：拖拽上传区（支持文件 + 文件夹，单文件 PUT 带真实进度条）
+function setupSiteDropZone(slug) {
+  const layout = document.querySelector('.se-layout');
+  const overlay = document.getElementById('seDrop');
+  if (!layout || !overlay) return;
+  let depth = 0;
+  const show = () => { overlay.classList.remove('hidden'); };
+  const hide = () => { depth = 0; overlay.classList.add('hidden'); };
+  layout.addEventListener('dragenter', (e) => { e.preventDefault(); depth++; if (!document.body.classList.contains('sidebar-collapsed')) show(); });
+  layout.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; });
+  layout.addEventListener('dragleave', (e) => { e.preventDefault(); depth = Math.max(0, depth - 1); if (depth === 0) hide(); });
+  layout.addEventListener('drop', async (e) => {
+    e.preventDefault(); depth = 0; hide();
+    if (!state.me || state.me.type !== 'user') { toast('请先登录', 'err'); return; }
+    const items = await gatherDropFiles(e.dataTransfer);
+    if (!items.length) { toast('没有可上传的文件', 'err'); return; }
+    await uploadFilesWithProgress(slug, items);
+  });
+}
+
+// 收集拖拽内容：优先走 Chrome 的 webkitGetAsEntry 递归目录，否则退回扁平文件
+async function gatherDropFiles(dt) {
+  const out = [];
+  const items = dt.items;
+  if (items && items.length && items[0] && items[0].webkitGetAsEntry) {
+    const entries = [];
+    for (const it of items) { const en = it.webkitGetAsEntry && it.webkitGetAsEntry(); if (en) entries.push(en); }
+    for (const en of entries) await traverseEntry(en, '', out);
+    if (out.length) return out;
+  }
+  for (const f of dt.files) out.push({ file: f, path: f.name });
+  return out;
+}
+function traverseEntry(entry, base, out) {
+  return new Promise((resolve) => {
+    if (!entry) return resolve();
+    if (entry.isFile) {
+      entry.file((file) => { out.push({ file, path: base ? base + '/' + file.name : file.name }); resolve(); }, () => resolve());
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      const all = [];
+      const readBatch = () => reader.readEntries((batch) => {
+        if (!batch.length) {
+          (async () => { for (const c of all) await traverseEntry(c, base ? base + '/' + entry.name : entry.name, out); resolve(); })();
+        } else { all.push(...batch); readBatch(); }
+      }, () => resolve());
+      readBatch();
+    } else resolve();
+  });
+}
+
+// 单文件 XHR PUT（复用 PUT /api/sites/:slug/files/:path），带上传进度回调
+function uploadOneWithProgress(slug, file, path, onProgress) {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => {
+      const dataUrl = fr.result;
+      const b64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+      const ct = (dataUrl.match(/^data:([^;]+);/) || [])[1] || file.type || guessTypeJs(path);
+      const enc = path.split('/').map(encodeURIComponent).join('/');
+      const xhr = new XMLHttpRequest();
+      xhr.open('PUT', '/api/sites/' + slug + '/files/' + enc);
+      xhr.setRequestHeader('Content-Type', 'application/json');
+      xhr.setRequestHeader('X-Guest-Id', guestId());
+      xhr.withCredentials = true;
+      xhr.upload.onprogress = (ev) => { if (ev.lengthComputable && onProgress) onProgress(Math.round(ev.loaded / ev.total * 100)); };
+      xhr.onload = () => {
+        let j = null; try { j = JSON.parse(xhr.responseText || '{}'); } catch {}
+        if (xhr.status >= 200 && xhr.status < 300 && (!j || j.ok !== false)) resolve(j);
+        else reject(new Error((j && (j.message || j.error)) || ('HTTP ' + xhr.status)));
+      };
+      xhr.onerror = () => reject(new Error('网络错误'));
+      xhr.send(JSON.stringify({ content: b64, contentType: ct }));
+    };
+    fr.onerror = () => reject(new Error('读取文件失败'));
+    fr.readAsDataURL(file);
+  });
+}
+
+async function uploadFilesWithProgress(slug, items) {
+  const bar = document.getElementById('seProgress');
+  const fill = document.getElementById('seProgressBar');
+  const txt = document.getElementById('seProgressText');
+  if (!bar) { // 兜底：无进度条 UI 时走旧批量接口
+    await uploadSiteFiles(slug, items.map((it) => it.file));
+    return;
+  }
+  bar.classList.remove('hidden'); fill.style.setProperty('--w', '0%'); txt.textContent = `准备上传 ${items.length} 个文件…`;
+  let done = 0;
+  try {
+    for (const it of items) {
+      txt.textContent = `上传中 (${done + 1}/${items.length}) ${it.path}`;
+      fill.style.setProperty('--w', Math.round(done / items.length * 100) + '%');
+      await uploadOneWithProgress(slug, it.file, it.path, (pct) => {
+        fill.style.setProperty('--w', Math.round((done + pct / 100) / items.length * 100) + '%');
+      });
+      done++;
+    }
+    fill.style.setProperty('--w', '100%'); txt.textContent = `✓ 已完成 ${items.length} 个文件`;
+    toast('上传成功');
+    await loadSiteTree(slug); await loadSiteMeta(slug);
+  } catch (e) {
+    txt.textContent = '✗ ' + ((e && e.message) || e);
+    toast('上传失败：' + ((e && e.message) || e), 'err');
+  } finally {
+    setTimeout(() => bar.classList.add('hidden'), 1600);
+  }
+}
+
+// v4.24.1：入门模板库，一键套用（写入站点文件）
+const SITE_TEMPLATES = [
+  {
+    id: 'home', name: '个人主页', icon: '🏠', desc: '简洁 landing 页，含头像占位与社交链接',
+    files: {
+      'index.html': `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>我的主页</title><style>
+*{box-sizing:border-box;margin:0;padding:0}body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;background:#f5f6ff;color:#1f2330;display:flex;min-height:100vh;align-items:center;justify-content:center}
+.card{background:#fff;border-radius:20px;padding:40px 48px;text-align:center;box-shadow:0 12px 40px rgba(79,70,229,.15);max-width:420px;width:90%}
+.ava{width:88px;height:88px;border-radius:50%;background:#4F46E5;color:#fff;display:flex;align-items:center;justify-content:center;font-size:36px;margin:0 auto 16px}
+h1{font-size:24px;margin-bottom:6px}.sub{color:#6b7280;margin-bottom:20px}
+.links a{display:inline-block;margin:6px;padding:8px 16px;border-radius:999px;background:#eef0ff;color:#4F46E5;text-decoration:none;font-size:14px;transition:.2s}
+.links a:hover{background:#4F46E5;color:#fff}</style></head>
+<body><div class="card"><div class="ava">🙂</div><h1>你的名字</h1><div class="sub">一句话介绍你自己</div><div class="links"><a href="#">GitHub</a><a href="#">博客</a><a href="#">邮箱</a></div></div></body></html>`
+    }
+  },
+  {
+    id: 'portfolio', name: '作品集', icon: '🎨', desc: '卡片网格展示作品，含独立样式文件',
+    files: {
+      'index.html': `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>作品集</title><link rel="stylesheet" href="css/style.css"></head>
+<body><header><h1>我的作品集</h1><p>这里收录我做过的一些项目</p></header><main class="grid">
+<div class="item"><div class="thumb">📱</div><h3>项目一</h3><p>简短描述</p></div>
+<div class="item"><div class="thumb">🎮</div><h3>项目二</h3><p>简短描述</p></div>
+<div class="item"><div class="thumb">📊</div><h3>项目三</h3><p>简短描述</p></div>
+</main></body></html>`,
+      'css/style.css': `*{box-sizing:border-box;margin:0;padding:0}body{font-family:system-ui,sans-serif;background:#fff;color:#1f2330;line-height:1.6}
+header{background:#4F46E5;color:#fff;padding:48px 24px;text-align:center}header h1{font-size:28px}header p{opacity:.85}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:20px;padding:32px;max-width:960px;margin:0 auto}
+.item{border:1px solid #eceefb;border-radius:14px;padding:20px;text-align:center;transition:.2s}.item:hover{box-shadow:0 8px 24px rgba(79,70,229,.15);transform:translateY(-3px)}
+.thumb{width:64px;height:64px;border-radius:16px;background:#eef0ff;display:flex;align-items:center;justify-content:center;font-size:30px;margin:0 auto 12px}`
+    }
+  },
+  {
+    id: 'game', name: '小游戏', icon: '🎮', desc: '「别踩白块」经典点击小游戏',
+    files: {
+      'index.html': `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>别踩白块</title><style>
+*{margin:0;padding:0;box-sizing:border-box}body{font-family:system-ui,sans-serif;background:#1f2330;color:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh}
+#board{width:240px;height:360px;background:#111;display:grid;grid-template-rows:repeat(4,1fr);gap:3px;padding:3px;border-radius:10px;overflow:hidden}
+.row{display:grid;grid-template-columns:repeat(4,1fr);gap:3px}.cell{background:#fff;border-radius:4px}.blk{background:#4F46E5}
+#info{margin-top:16px;font-size:18px}button{margin-top:14px;padding:10px 22px;border:0;border-radius:999px;background:#4F46E5;color:#fff;font-size:15px;cursor:pointer}</style></head>
+<body><div id="board"></div><div id="info">得分：0</div><button id="start">开始</button>
+<script>
+let score=0,running=false,timer;
+const board=document.getElementById('board'),info=document.getElementById('info');
+function rnd(n){return Math.floor(Math.random()*n)}
+function makeRow(){const r=rnd(4);const row=document.createElement('div');row.className='row';
+for(let i=0;i<4;i++){const c=document.createElement('div');c.className='cell'+(i===r?' blk':'');c.onclick=()=>{if(!running)return;if(i===r){score++;info.textContent='得分：'+score;row.remove()}else{end()}};row.appendChild(c)}
+return row}
+function tick(){const rows=board.querySelectorAll('.row');if(rows.length&&rows[0].getBoundingClientRect().top>board.getBoundingClientRect().bottom-20)end();board.appendChild(makeRow());if(board.children.length>5)board.firstChild.remove()}
+function end(){running=false;clearInterval(timer);info.textContent='游戏结束，得分：'+score;document.getElementById('start').textContent='再来一局'}
+document.getElementById('start').onclick=()=>{score=0;board.innerHTML='';info.textContent='得分：0';running=true;for(let i=0;i<5;i++)board.appendChild(makeRow());timer=setInterval(tick,700)}
+</script></body></html>`
+    }
+  },
+  {
+    id: 'resume', name: '简历', icon: '📄', desc: '单页简历，结构清晰可直接改',
+    files: {
+      'index.html': `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>简历</title><style>
+*{box-sizing:border-box;margin:0;padding:0}body{font-family:system-ui,sans-serif;background:#f0f1f6;color:#222;padding:32px}
+.page{background:#fff;max-width:760px;margin:0 auto;border-radius:12px;overflow:hidden;box-shadow:0 8px 30px rgba(0,0,0,.08)}
+.hd{background:#4F46E5;color:#fff;padding:32px}.hd h1{font-size:28px}.hd .meta{opacity:.9;margin-top:8px;font-size:14px}
+.sec{padding:22px 32px;border-bottom:1px solid #eee}.sec h2{color:#4F46E5;font-size:16px;margin-bottom:12px}
+.item{margin-bottom:12px}.item .t{font-weight:600}.item .d{color:#666;font-size:14px}
+ul{margin:6px 0 0 18px;color:#444;font-size:14px}</style></head>
+<body><div class="page"><div class="hd"><h1>姓名</h1><div class="meta">手机 · 邮箱 · 城市 · GitHub</div></div>
+<div class="sec"><h2>教育经历</h2><div class="item"><div class="t">某某大学 · 专业</div><div class="d">2022 — 2026 · 本科</div></div></div>
+<div class="sec"><h2>项目经历</h2><div class="item"><div class="t">项目名称</div><div class="d">一句话说明你做了什么、用什么技术、达成什么结果</div></div></div>
+<div class="sec"><h2>技能</h2><ul><li>编程语言 / 框架</li><li>工具链 / 软技能</li></ul></div></div></body></html>`
+    }
+  },
+  {
+    id: 'helloworld', name: 'Hello World', icon: '👋', desc: '零基础起步页，含内联 JS 交互与点击计数',
+    files: {
+      'index.html': `<!doctype html><html lang="zh-CN"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hello World</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#f4f5f8;display:flex;align-items:center;justify-content:center;min-height:100vh}
+  .card{background:#fff;border-radius:16px;padding:40px;box-shadow:0 12px 40px rgba(79,70,229,.12);text-align:center;max-width:420px;width:90%}
+  h1{color:#4F46E5;font-size:30px;margin-bottom:14px}
+  p{color:#555;margin-bottom:20px}
+  button{background:#4F46E5;color:#fff;border:0;border-radius:10px;padding:10px 20px;font-size:15px;cursor:pointer;transition:.15s}
+  button:hover{background:#4338CA}
+  .count{margin-top:14px;color:#222;font-weight:600}
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Hello World 👋</h1>
+    <p>这是你的第一个页面，点击按钮试试看：</p>
+    <button onclick="add()">点我 +1</button>
+    <div class="count" id="n">已点击 0 次</div>
+  </div>
+<script>
+  let c = 0;
+  function add(){ c++; document.getElementById('n').textContent = '已点击 ' + c + ' 次'; }
+</script>
+</body></html>`
+    }
+  }
+];
+
+function openTemplatePicker(slug) {
+  const cards = SITE_TEMPLATES.map((t) => `
+    <div class="tpl-card" data-tpl="${t.id}">
+      <div class="tpl-icon">${t.icon}</div>
+      <div class="tpl-name">${esc(t.name)}</div>
+      <div class="tpl-desc">${esc(t.desc)}</div>
+      <button class="btn btn-sm btn-primary" data-apply="${t.id}">套用</button>
+    </div>`).join('');
+  const m = openModal('🎨 选择模板', `<p class="muted" style="margin:0 0 12px">套用会写入对应文件（如已存在 index.html 将被覆盖）。</p><div class="tpl-grid">${cards}</div>`);
+  m.body.querySelectorAll('[data-apply]').forEach((b) => b.onclick = async () => {
+    const tpl = SITE_TEMPLATES.find((t) => t.id === b.getAttribute('data-apply'));
+    if (!tpl) return;
+    const paths = Object.keys(tpl.files);
+    if (!confirm('套用「' + tpl.name + '」？将写入 ' + paths.length + ' 个文件（已存在的会被覆盖）')) return;
+    b.disabled = true; b.textContent = '套用中…';
+    try {
+      for (const p of paths) {
+        const b64 = textToB64(tpl.files[p]);
+        const r = await api('/api/sites/' + slug + '/files/' + p.split('/').map(encodeURIComponent).join('/'), {
+          method: 'PUT', body: JSON.stringify({ content: b64, contentType: guessTypeJs(p) })
+        });
+        if (!r.ok) throw new Error(r.data?.message || r.data?.error || 'HTTP ' + r.status);
+      }
+      closeModal(); toast('已套用「' + tpl.name + '」，可点 index.html 预览'); await loadSiteTree(slug); await loadSiteMeta(slug);
+    } catch (e) { b.disabled = false; b.textContent = '套用'; toast('套用失败：' + ((e && e.message) || e), 'err'); }
+  });
+}
+
+// ==================== v4.26 2.3 站点快照面板 ====================
+async function openSnapshotPanel(slug) {
+  const m = openModal('🕘 历史版本（快照）', `<div id="snapBody" class="muted">加载中…</div>
+    <div class="form-row" style="display:flex;gap:8px;margin-top:10px;align-items:center">
+      <button class="btn btn-sm btn-primary" id="snapSave">＋ 保存当前为快照</button>
+      <span class="muted" style="font-size:12px">发布时会自动留存，普通用户 3 份 / VIP 5 份（管理员可调）</span>
+    </div>`);
+  const body = m.body.querySelector('#snapBody');
+  const reload = async () => {
+    const { ok, data } = await api('/api/sites/' + slug + '/snapshots');
+    if (!ok) { body.innerHTML = '加载失败：' + esc(data?.message || data?.error || '未知错误'); return; }
+    const snaps = data.snapshots || [];
+    let h = `<div class="muted" style="margin-bottom:8px">已用 <b>${data.used}</b> / ${data.limit} 份</div>`;
+    if (!snaps.length) h += '<div class="muted">还没有快照，发布或点上方按钮创建。</div>';
+    else h += '<div class="snap-list">' + snaps.map((s) => `
+      <div class="snap-item" data-v="${s.v}">
+        <div class="snap-info">
+          <b>#${s.v}</b> ${s.auto ? '<span class="snap-tag">自动</span>' : ''} ${esc(s.label || '')}
+          <div class="muted" style="font-size:12px">${esc(fmtDateTime(s.created_at))} · ${fmtBytes(s.size)} · ${s.files} 文件</div>
+        </div>
+        <div class="snap-acts">
+          <button class="btn btn-xs btn-primary" data-restore="${s.v}">回滚</button>
+          <button class="btn btn-xs" data-del="${s.v}">删除</button>
+        </div>
+      </div>`).join('') + '</div>';
+    body.innerHTML = h;
+    body.querySelectorAll('[data-restore]').forEach((b) => b.onclick = async () => {
+      if (!confirm('回滚到 #' + b.dataset.restore + '？当前文件将被该快照完全覆盖（原文件不保留）。')) return;
+      b.disabled = true; b.textContent = '回滚中…';
+      const r = await api('/api/sites/' + slug + '/snapshots/' + b.dataset.restore + '/restore', { method: 'POST' });
+      if (r.ok) { toast('已回滚'); closeModal(); await loadSiteTree(slug); await loadSiteMeta(slug); }
+      else { b.disabled = false; b.textContent = '回滚'; toast('回滚失败：' + (r.data?.message || r.data?.error), 'err'); }
+    });
+    body.querySelectorAll('[data-del]').forEach((b) => b.onclick = async () => {
+      if (!confirm('删除快照 #' + b.dataset.del + '？')) return;
+      const r = await api('/api/sites/' + slug + '/snapshots/' + b.dataset.del, { method: 'DELETE' });
+      if (r.ok) { toast('已删除'); reload(); } else toast('删除失败', 'err');
+    });
+  };
+  m.body.querySelector('#snapSave').onclick = async () => {
+    const label = prompt('给这份快照起个名字（可留空）：', '').trim().slice(0, 60);
+    const r = await api('/api/sites/' + slug + '/snapshots', { method: 'POST', body: JSON.stringify({ label }) });
+    if (r.ok) { toast('已保存快照 #' + r.data.snapshot.v); reload(); } else toast('保存失败：' + (r.data?.message || r.data?.error), 'err');
+  };
+  reload();
+}
+
 // ==================== 路由 ====================
 function go(path, replace = false) { if (replace) history.replaceState({}, '', path); else history.pushState({}, '', path); render(); }
-function showView(id) { state._view = id; $$('.view').forEach((v) => v.classList.remove('active')); $('#view-' + id).classList.add('active'); window.scrollTo(0, 0); }
+// v4.19.2：聊天页铺满视口（main 内边距归零），否则 main 的 padding + 100vh 会撑出页面级滚动条，
+// 用户滚的是整个页面而不是消息区，表现为「聊天框不滚动」。
+function showView(id) {
+  state._view = id;
+  $$('.view').forEach((v) => v.classList.remove('active'));
+  $('#view-' + id).classList.add('active');
+  document.body.classList.toggle('chat-page', id === 'chat');
+  window.scrollTo(0, 0);
+}
 function closeNav() { document.body.classList.remove('nav-open'); }
 function updateNav() {
   const p = location.pathname.replace(/\/+$/, '') || '/'; const seg = p.split('/').filter(Boolean);
-  const map = { home: p === '/', new: p === '/new' || (seg[0] === 'edit' && seg[1]), me: p === '/me', admin: seg[0] === 'admin', help: p === '/help', about: p === '/about', changelog: p === '/changelog', tickets: p === '/tickets' || seg[0] === 'tickets', invite: seg[0] === 'invite' };
+  const map = { home: p === '/', new: p === '/new' || (seg[0] === 'edit' && seg[1]), me: p === '/me', admin: seg[0] === 'admin', help: p === '/help', about: p === '/about', changelog: p === '/changelog', tickets: p === '/tickets' || seg[0] === 'tickets', invite: seg[0] === 'invite', chat: seg[0] === 'chat', sites: p === '/sites' || seg[0] === 'sites' };
   $$('.nav-item').forEach((el) => { const key = el.dataset.nav; if (key && map[key]) el.classList.add('active'); else el.classList.remove('active'); });
 }
 
 async function render() {
   closeNav(); updateNav();
+  if (window.__chatTimer) { clearTimeout(window.__chatTimer); clearInterval(window.__chatTimer); window.__chatTimer = null; }
+  window.__chatPollGen = (window.__chatPollGen || 0) + 1; // 让旧的聊天轮询 tick 自然退出
   const p = location.pathname.replace(/\/+$/, '') || '/'; const seg = p.split('/').filter(Boolean);
   try {
     if (p === '/') return renderHome();
+    // v4.29：群邀请链接 /chat/join/:code —— 主动加入群聊
+    if (seg[0] === 'chat' && seg[1] === 'join' && seg[2]) { showView('chat'); handleChatJoinRoute(seg[2]); return; }
     if (p === '/new') return renderEditor(null);
     if (p === '/me') return renderMe();
     if (seg[0] === 'edit' && seg[1]) return renderEditor(seg[1]);
@@ -819,6 +2319,9 @@ async function render() {
     if (seg[0] === '404') return renderClip('404');
     if (seg[0] === 'admin' && seg[1] === 'code') return renderAdminCode();
     if (seg[0] === 'admin') return renderAdmin();
+    if (seg[0] === 'chat') return renderChat();
+    if (p === '/sites') return renderSites();
+    if (seg[0] === 'sites' && seg[1]) return renderSiteEditor(seg[1]);
     if (seg.length === 1) return renderClip(seg[0]);
     // 未知路径 → 展示用户撰写的 404 文稿（而非静态占位）
     return renderClip('404');
@@ -848,7 +2351,7 @@ async function loadMe() {
   // v4.13: 清掉可能存在的封禁横幅（非封禁用户不应显示）
   document.getElementById('banBanner')?.remove();
   if (state.me.type === 'banned') {
-    const until = state.me.banUntil ? '（封禁至 ' + esc(String(state.me.banUntil).slice(0, 10)) + '）' : '（永久封禁）';
+    const until = state.me.banUntil ? '（封禁至 ' + esc(fmtDate(String(state.me.banUntil))) + '）' : '（永久封禁）';
     box.innerHTML = `<span class="guest-chip" style="border-color:rgba(220,38,38,.4);color:#e0524f">🚫 已封禁</span><button class="btn btn-primary" id="loginBtn">🔑 登录</button>`;
     $('#loginBtn').onclick = () => openAuthModal('login');
     showBanBanner(state.me.banReason || '你因违反社区规范已被封禁', until);
@@ -867,9 +2370,69 @@ async function loadMe() {
   // 刷新引导：未绑 cpoauth → 建议绑定；已绑未设密码 → 建议设密码；都符合 → 不弹
   checkRefreshGuide();
   refreshNotifBadge();
+  checkMaintenanceMode();
+  probeDegraded(); // v4.30：进站主动探测降级态，避免站长察觉不到
 }
 
-function avatarHtml(url, name) { if (url) return `<img class="avatar" src="${esc(url)}" alt="">`; const ch = (name || '?').trim().charAt(0).toUpperCase(); return `<span class="avatar avatar-txt">${esc(ch)}</span>`; }
+// v4.27：维护模式（关战）——非管理员看到全屏维护页；管理员仅顶部提示，可进后台关闭
+async function checkMaintenanceMode() {
+  try {
+    const { data } = await api('/api/site/config');
+    if (!data || data.mode !== 'maintenance') { document.getElementById('maintOverlay')?.remove(); return; }
+    const isAdmin = !!(state.me && (state.me.role === 'admin' || state.me.role === 'developer'));
+    if (isAdmin) {
+      let b = document.getElementById('maintBanner');
+      if (!b) { b = document.createElement('div'); b.id = 'maintBanner'; b.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9998;background:#b45309;color:#fff;padding:8px 16px;font-size:14px;text-align:center'; document.body.appendChild(b); }
+      b.innerHTML = '🛡 站点处于维护模式（关战）。非管理员当前看到维护页。<a href="/admin" data-link style="color:#fff;text-decoration:underline">前往后台关闭</a>';
+      return;
+    }
+    let o = document.getElementById('maintOverlay');
+    if (!o) { o = document.createElement('div'); o.id = 'maintOverlay'; o.className = 'maint-overlay'; document.body.appendChild(o); }
+    o.innerHTML = `<div class="maint-card">
+      <div class="maint-badge">⚠ 临时维护</div>
+      <h1 class="maint-title">${esc(data.maintenance_title || '网站维护中')}</h1>
+      <p class="maint-text">${esc(data.maintenance_text || '网站正在维护升级，请稍后再来。')}</p>
+    </div>`;
+  } catch (_) {}
+}
+
+// v4.27：站点管控面板（关战 / 功能禁用 / 维护文案，后台可改）
+async function openSiteControlModal() {
+  const { data } = await api('/api/admin/site-config');
+  const c = data || { mode: 'normal', maintenance_title: '网站维护中', maintenance_text: '', disabled_features: {} };
+  const df = c.disabled_features || {};
+  const body = `<label class="ff-item" style="display:flex;gap:8px;align-items:center;margin-bottom:6px"><input type="checkbox" id="scMaint" ${c.mode==='maintenance'?'checked':''}> <span>🛡 维护模式（关战：非管理员看到维护页）</span></label>
+    <hr style="margin:10px 0">
+    <div style="font-weight:600;margin-bottom:6px">临时关闭部分功能</div>
+    <label class="ff-item" style="display:flex;gap:8px;align-items:center;margin-bottom:4px"><input type="checkbox" id="scChat" ${df.chat?'checked':''}> <span>💬 关闭聊天</span></label>
+    <label class="ff-item" style="display:flex;gap:8px;align-items:center;margin-bottom:4px"><input type="checkbox" id="scSite" ${df.site?'checked':''}> <span>🌐 关闭站点托管</span></label>
+    <label class="ff-item" style="display:flex;gap:8px;align-items:center;margin-bottom:4px"><input type="checkbox" id="scClip" ${df.clipboard?'checked':''}> <span>📋 关闭剪贴板</span></label>
+    <hr style="margin:10px 0">
+    <div class="form-row" style="margin-bottom:8px"><label>维护标题</label><input id="scTitle" class="input" value="${esc(c.maintenance_title||'')}"></div>
+    <div class="form-row" style="margin-bottom:8px"><label>维护说明</label><textarea id="scText" class="input" rows="3">${esc(c.maintenance_text||'')}</textarea></div>`;
+  const m = openModal('🛡 站点管控', body);
+  m.foot.innerHTML = `<button class="btn btn-sm" id="scCancel">取消</button><button class="btn btn-sm btn-primary" id="scSave">保存</button>`;
+  m.foot.querySelector('#scCancel').onclick = closeModal;
+  m.foot.querySelector('#scSave').onclick = async () => {
+    const payload = {
+      mode: document.getElementById('scMaint').checked ? 'maintenance' : 'normal',
+      maintenance_title: document.getElementById('scTitle').value,
+      maintenance_text: document.getElementById('scText').value,
+      disabled_features: { chat: document.getElementById('scChat').checked, site: document.getElementById('scSite').checked, clipboard: document.getElementById('scClip').checked }
+    };
+    const r = await api('/api/admin/site-config', { method: 'POST', body: JSON.stringify(payload) });
+    if (r.ok) { toast('已保存'); closeModal(); checkMaintenanceMode(); } else toast('失败：' + (r.data?.message || r.status), 'err');
+  };
+}
+
+function avatarHtml(url, name) {
+  if (url && typeof url === 'string' && url.startsWith('emoji:')) {
+    return `<span class="avatar avatar-emoji">${esc(url.slice(6))}</span>`;
+  }
+  if (url) return `<img class="avatar" src="${esc(url)}" alt="">`;
+  const ch = (name || '?').trim().charAt(0).toUpperCase();
+  return `<span class="avatar avatar-txt">${esc(ch)}</span>`;
+}
 
 // ==================== 卡片 ====================
 function clipCard(c) {
@@ -899,7 +2462,8 @@ function clipCard(c) {
 let searchTimer = null;
 async function renderHome() {
   showView('home');
-  const { data: stats } = await api('/api/stats');
+  // v4.25（工单 TKA1365D22）：站点统计是非关键探测，偶发网络抖动不应弹报错窗 / 生成工单
+  const { data: stats } = await api('/api/stats', { silent: true });
   // v4.7.5 反馈 #9：机房代理可能返回被截断 / 旧缓存的 index.html，容器缺失时
   // `$('#heroStats').innerHTML` 会抛 null 异常并中断整个首页渲染（列表一片空白）。
   // 这里做空值保护，并提示强制刷新，而不是静默白屏。
@@ -1292,7 +2856,12 @@ const PERM_LABELS = {
   set_clip_limit: '设置剪贴板数量限制',
   manage_feature: '修改用户功能开关',
   manage_vip: '授予 / 撤销 VIP',
-  manage_clips: '管理剪贴板（删除他人板）',
+  view_public_clips: '查看公开剪贴板',
+  edit_public_clips: '编辑公开剪贴板',
+  delete_public_clips: '删除公开剪贴板',
+  view_private_clips: '查看私有剪贴板（高敏感）',
+  edit_private_clips: '编辑私有剪贴板（高敏感）',
+  delete_private_clips: '删除私有剪贴板（高敏感）',
   manage_comments: '管理评论（删除他人评论）',
   manage_pages: '编辑站点页面',
   manage_announcements: '发布公告 / 删除',
@@ -1301,15 +2870,42 @@ const PERM_LABELS = {
   manage_settings: '站点设置',
   view_code: '查看源码（只读）',
   edit_code: '编辑并提交代码',
-  manage_admins: '管理其他管理员（授权 / 调整层级）'
+  manage_admins: '管理其他管理员（授权 / 调整层级）',
+  view_sites: '查看网站列表',
+  ban_sites: '封禁 / 解封网站（含查看）',
+  delete_sites: '删除网站（含封禁 / 查看）',
+  // v4.32.1：治理类细粒度开关
+  manage_ip: 'IP 治理（查看 / 封禁 / 解封 IP）',
+  manage_sites: '站点治理（查看 / 封禁 / 解封 / 删除网站）',
+  manage_quota: '配额治理（修改 D1 / KV 额度上限）',
+  manage_snapshot_quota: '快照配额治理（设置用户快照配额）'
 };
 const FEATURE_LABELS = { custom_slug: '自定义短链', max_views: '阅读次数上限', password: '密码保护', expiry: '定时过期', collaboration: '协作模式', login_required: '登录可见', max_readers: '读者数限制', comments: '评论功能' };
-const ALL_PERMS = ['ban_user', 'delete_user', 'set_clip_limit', 'manage_feature', 'manage_vip', 'manage_clips', 'manage_comments', 'manage_pages', 'manage_announcements', 'manage_tickets', 'manage_invites', 'manage_settings', 'view_code', 'edit_code', 'manage_admins'];
+const ALL_PERMS = ['ban_user', 'delete_user', 'set_clip_limit', 'manage_feature', 'manage_vip',
+  'view_public_clips', 'edit_public_clips', 'delete_public_clips',
+  'view_private_clips', 'edit_private_clips', 'delete_private_clips',
+  'manage_comments', 'manage_pages', 'manage_announcements', 'manage_tickets', 'manage_invites', 'manage_settings',
+  'view_code', 'edit_code', 'manage_admins',
+  'view_sites', 'ban_sites', 'delete_sites',
+  'manage_ip', 'manage_sites', 'manage_quota', 'manage_snapshot_quota'];
+// 权限蕴含（与后端 PERM_IMPLY 一致）：勾高阶自动勾上依赖的低阶
+const PERM_IMPLY = {
+  edit_public_clips: ['view_public_clips'],
+  delete_public_clips: ['edit_public_clips', 'view_public_clips'],
+  edit_private_clips: ['view_private_clips'],
+  delete_private_clips: ['edit_private_clips', 'view_private_clips'],
+  ban_sites: ['view_sites'],
+  delete_sites: ['ban_sites', 'view_sites'],
+  manage_sites: ['view_sites', 'ban_sites', 'delete_sites']
+};
 // 权限分组（用于弹窗分组展示）
 const PERM_GROUPS = [
   { title: '👥 用户管理', perms: ['ban_user', 'delete_user', 'set_clip_limit', 'manage_feature', 'manage_vip', 'manage_admins'] },
-  { title: '📚 内容管理', perms: ['manage_clips', 'manage_comments', 'manage_pages', 'manage_announcements', 'manage_tickets', 'manage_invites', 'manage_settings'] },
-  { title: '💻 代码管理', perms: ['view_code', 'edit_code'] }
+  { title: '📚 剪贴板管理（公开 / 私有 × 查看 / 编辑 / 删除）', perms: ['view_public_clips', 'edit_public_clips', 'delete_public_clips', 'view_private_clips', 'edit_private_clips', 'delete_private_clips'] },
+  { title: '🌐 网站治理（递进：删除 ⊃ 封禁 ⊃ 查看）', perms: ['view_sites', 'ban_sites', 'delete_sites'] },
+  { title: '🛠 站点与内容', perms: ['manage_comments', 'manage_pages', 'manage_announcements', 'manage_tickets', 'manage_invites', 'manage_settings'] },
+  { title: '💻 代码管理', perms: ['view_code', 'edit_code'] },
+  { title: '🛡 治理与额度（站长可逐项授予）', perms: ['manage_ip', 'manage_sites', 'manage_quota', 'manage_snapshot_quota'] }
 ];
 
 // v4.15: 层级与权限辅助（前端仅用于按钮置灰 / 颜色，最终以服务端校验为准）
@@ -1385,10 +2981,15 @@ function openPermsModal(displayName, current) {
       ? `<div class="form-row" style="margin:10px 0 4px"><label>管理员层级（你最高可授予 <b>${maxLvl}</b> 级）：</label>
          <select id="promLevel" class="input input-sm">${lvlOpts.map((l) => `<option value="${l}"${l === curLvl ? ' selected' : ''}>${l} 级${l === maxLvl ? '（最高可授）' : ''}</option>`).join('')}</select></div>`
       : `<p class="muted" style="margin:10px 0 4px">⚠️ 你是最低层级，无法授予或调整管理员身份。</p>`;
-    const groupsHtml = PERM_GROUPS.map((g) => `<div class="perm-group"><div class="perm-group-title">${g.title}</div>${g.perms.map((p) => `<label class="ff-item"><input type="checkbox" data-perm="${p}" ${curPerms[p] ? 'checked' : ''}> <span>${PERM_LABELS[p] || p}</span></label>`).join('')}</div>`).join('');
-    const allChecked = ALL_PERMS.every((p) => curPerms[p]);
-    const body = `<p class="muted" style="margin:0 0 8px">为 <b>${esc(displayName)}</b> 设置管理员权限（可多选）：</p>
-      <label class="ff-item" style="font-weight:600;margin-bottom:6px"><input type="checkbox" id="promAll"${allChecked ? ' checked' : ''}> <span>全选 / 全不选</span></label>
+    // v4.32.3: 操作者只能授予自己拥有的权限；其余权限锁定展示目标当前状态（含 🔒 标记，不可改）
+    const groupsHtml = PERM_GROUPS.map((g) => `<div class="perm-group"><div class="perm-group-title">${g.title}</div>${g.perms.map((p) => {
+      if (myPerm(p)) return `<label class="ff-item"><input type="checkbox" data-perm="${p}" ${curPerms[p] ? 'checked' : ''}> <span>${PERM_LABELS[p] || p}</span></label>`;
+      return `<label class="ff-item" style="opacity:.55;cursor:not-allowed" title="你无权授予此权限，仅展示目标现状"><input type="checkbox" disabled ${curPerms[p] ? 'checked' : ''}> <span>${PERM_LABELS[p] || p} <i style="font-style:normal;font-size:11px;color:var(--muted)">🔒 你无此权限</i></span></label>`;
+    }).join('')}</div>`).join('');
+    const grantable = ALL_PERMS.filter((p) => myPerm(p));
+    const allChecked = grantable.length > 0 && grantable.every((p) => curPerms[p]);
+    const body = `<p class="muted" style="margin:0 0 8px">为 <b>${esc(displayName)}</b> 设置管理员权限（可多选；🔒 项为你无权授予、仅展示现状）：</p>
+      <label class="ff-item" style="font-weight:600;margin-bottom:6px"><input type="checkbox" id="promAll"${allChecked ? ' checked' : ''}> <span>全选 / 全不选（仅限你有权授予的项）</span></label>
       <div class="perm-groups">${groupsHtml}</div>${levelHtml}`;
     const canSave = maxLvl >= 1;
     const m = openModal('管理员权限设置', body);
@@ -1396,6 +2997,17 @@ function openPermsModal(displayName, current) {
     m.foot.querySelector('#promCancel').onclick = () => { closeModal(); resolve(null); };
     const allBox = m.body.querySelector('#promAll');
     if (allBox) allBox.onchange = () => { m.body.querySelectorAll('[data-perm]').forEach((c) => { c.checked = allBox.checked; }); };
+    // v4.21：权限蕴含联动——勾「删除」自动勾「编辑 / 查看」，取消「查看」则自动去掉依赖它的高阶项
+    const permBoxes = Array.from(m.body.querySelectorAll('[data-perm]'));
+    const byName = {};
+    permBoxes.forEach((c) => { byName[c.dataset.perm] = c; });
+    permBoxes.forEach((c) => {
+      c.onchange = () => {
+        const p = c.dataset.perm;
+        if (c.checked) { for (const q of (PERM_IMPLY[p] || [])) if (byName[q]) byName[q].checked = true; }
+        else { for (const q of Object.keys(PERM_IMPLY)) if ((PERM_IMPLY[q] || []).includes(p) && byName[q]) byName[q].checked = false; }
+      };
+    });
     m.foot.querySelector('#promSave').onclick = () => {
       if (!canSave) return;
       const perms = {}; m.body.querySelectorAll('[data-perm]').forEach((c) => { perms[c.dataset.perm] = c.checked; });
@@ -1495,7 +3107,7 @@ async function renderUser(uid) {
       <div class="profile-info">
         <h1 class="profile-name">${esc(u.display_name)} ${roleBadge(u.role, { is_vip: u.is_vip })}${vipBadge} ${trustBadge(u.trust_level || 0)}</h1>
         ${sigHtml}
-        <p class="muted">@${esc(u.username)} · 加入于 ${esc((u.created_at || '').slice(0, 10))}</p>
+        <p class="muted">@${esc(u.username)} · 加入于 ${esc(fmtDate(u.created_at))}</p>
         ${bioHtml}
         ${badgesHtml}
       </div>
@@ -1510,6 +3122,7 @@ async function renderUser(uid) {
     </div>
     ${linkedAccountChips(linked, self)}
     ${linked.length || self ? `<div class="profile-actions">${self ? '<a class="btn btn-sm" href="https://www.cpoauth.com/profile" target="_blank" rel="noopener">🔗 关联账号管理（cpoauth）</a>' : ''}</div>` : ''}
+    ${!self ? `<div class="profile-actions"><button class="btn btn-sm btn-primary" id="userMsgBtn">💬 私信 Ta</button></div>` : ''}
     ${self ? `<div class="profile-wechat"><h4>扫一扫，添加我为好友</h4><img src="/wechat-qr.png" alt="WeChat QR" onerror="this.style.display='none'"></div>` : ''}
     ${self ? `<div class="invite-section"><details><summary>🎁 邀请好友</summary><div id="inviteInfo" class="invite-info">加载中…</div></details></div>` : ''}
       ${adminView && !self && u.role !== 'developer' ? `<div class="admin-user-actions">
@@ -1525,13 +3138,15 @@ async function renderUser(uid) {
   if (self) {
     const userSettingsBtn = $('#userSettingsBtn'); if (userSettingsBtn) userSettingsBtn.onclick = openSettingsModal;
     loadInviteInfo();
+  } else {
+    const mb = $('#userMsgBtn'); if (mb) mb.onclick = () => startSingleChat(u.id);
   }
 
   // 管理员操作
   $$('#profile [data-role-act]').forEach((b) => {
     b.onclick = async () => {
       const role = b.dataset.roleAct;
-      if (role === 'admin') { const res = await openPermsModal(u.display_name); if (!res) return; const r = await api('/api/admin/users/' + b.dataset.uid, { method: 'PATCH', body: JSON.stringify({ role, admin_permissions: res.perms, admin_level: res.level }) }); if (r.ok) { toast('已册封管理员'); renderUser(uid); } else toast('失败：' + (r.data?.message || r.status), 'err'); }
+      if (role === 'admin') { const res = await openPermsModal(u.display_name); if (!res) return; const r = await api('/api/admin/users/' + b.dataset.uid, { method: 'PATCH', body: JSON.stringify({ role, admin_permissions: res.perms, admin_level: res.level }) }); if (r.ok) { toast(r.data?.message || '已册封管理员'); renderUser(uid); } else toast('失败：' + (r.data?.message || r.status), 'err'); }
       else { if (!confirm(role === 'admin' ? '确认册封？' : '确认撤下？')) return; const r = await api('/api/admin/users/' + b.dataset.uid, { method: 'PATCH', body: JSON.stringify({ role }) }); if (r.ok) { toast('已更新'); renderUser(uid); } else toast('失败：' + (r.data?.error || r.status), 'err'); }
     };
   });
@@ -1953,10 +3568,21 @@ async function loadMyClips() {
 }
 
 // ==================== 站点页面 ====================
+// v4.33：站点页正文常自带一级标题（Markdown 习惯），与页头标题重复 → 渲染后去掉，避免一屏两个大标题
+function stripDupTitle(el, title) {
+  if (!el) return;
+  const h1 = el.querySelector('h1');
+  if (!h1) return;
+  const norm = (s) => String(s || '').replace(/\s+/g, '').trim();
+  const a = norm(h1.textContent), b = norm(title);
+  if (a && b && a === b) h1.remove();
+}
+
 async function renderPage(slug) {
   if (slug === 'changelog') {
     showView('page'); $('#pageTitle').textContent = '📝 更新日志'; $('#pageMeta').textContent = 'mdqp 主要版本变动记录 · 随代码发布自动更新';
     const el = $('#pageContent'); el.className = 'markdown-body changelog'; renderMd(el, CHANGELOG_MD);
+    stripDupTitle(el, '📝 更新日志');
     $('#pageTools').innerHTML = `<button class="btn btn-sm" id="readModePageBtn">📖 阅读</button>`;
     $('#readModePageBtn').onclick = () => openReadingMode({ title: '📝 更新日志', meta: $('#pageMeta').textContent, content: CHANGELOG_MD });
     return;
@@ -1966,6 +3592,7 @@ async function renderPage(slug) {
   if (!ok || !data?.page) { $('#pageTitle').textContent = slug === 'help' ? '使用帮助' : '关于'; $('#pageMeta').textContent = ''; $('#pageContent').innerHTML = emptyHTML('clips', '这个页面还不存在', ''); $('#pageTools').innerHTML = ''; return; }
   const p = data.page; $('#pageTitle').textContent = p.title || slug; $('#pageMeta').textContent = p.updated_at ? `更新于 ${esc(timeAgo(p.updated_at))}${p.updated_by ? ' · 由 ' + esc(p.updated_by) + ' 编辑' : ''}` : '';
   renderMd($('#pageContent'), p.content);
+  stripDupTitle($('#pageContent'), p.title || slug);
   $('#pageTools').innerHTML = `<button class="btn btn-sm" id="readModePageBtn">📖 阅读</button>` + (isAdmin() ? `<a class="btn btn-sm" href="/edit-page/${esc(slug)}" data-link>✏️ 编辑此页</a><button class="btn btn-sm" id="pageOutlineBtn">📑 目录</button>` : '');
   $('#readModePageBtn').onclick = () => openReadingMode({ title: p.title || slug, meta: $('#pageMeta').textContent, content: p.content });
   const ob = $('#pageOutlineBtn'); if (ob) setupToc(ob, $('#pageOutline'), $('#pageContent'));
@@ -1982,26 +3609,269 @@ async function renderPageEditor(slug) {
 async function savePage() { const content = $('#edContent').value; if (!content.trim()) return toast('内容不能为空', 'err'); $('#saveBtn').disabled = true; $('#saveBtn').textContent = '保存中…'; try { const r = await api('/api/pages/' + encodeURIComponent(state.editingPage), { method: 'PUT', body: JSON.stringify({ title: $('#edTitle').value.trim(), content }) }); $('#saveBtn').disabled = false; $('#saveBtn').textContent = '💾 保存页面'; if (r.ok) { toast('页面已保存'); go('/' + state.editingPage); } else toast(r.data?.message || '保存失败：' + (r.data?.error || r.status), 'err'); } catch (e) { $('#saveBtn').disabled = false; $('#saveBtn').textContent = '💾 保存页面'; toast('网络错误，请检查连接后重试', 'err'); } }
 
 // ==================== 管理后台（v4.0 扩展 tab） ====================
+// v4.21：tab 按细粒度权限显示——没有对应权限的 tab 直接不出现，避免点进去一片 403
+function adminTabs() {
+  const list = [
+    { id: 'users', label: '👥 用户' },
+    { id: 'clips', label: '📋 全部剪贴板', show: myPerm('view_public_clips') || myPerm('view_private_clips') },
+    { id: 'pages', label: '📄 站点页面', show: myPerm('manage_pages') },
+    { id: 'sites', label: '🌐 站点', show: myPerm('view_sites') },
+    { id: 'quota', label: '📊 额度' },
+    { id: 'chat', label: '💬 聊天管理' },
+    { id: 'ipgov', label: '🛡 IP 治理', show: myPerm('manage_ip') },
+    { id: 'announcements', label: '📢 公告', show: myPerm('manage_announcements') },
+    { id: 'invites', label: '🎁 邀请', show: myPerm('manage_invites') },
+    { id: 'stats', label: '📊 数据看板' },
+    { id: 'settings', label: '⚙️ 设置', show: myPerm('manage_settings') }
+  ];
+  const visible = list.filter((t) => t.show !== false);
+  if (!visible.some((t) => t.id === state.adminTab)) state.adminTab = 'users';
+  return visible;
+}
 async function renderAdmin() {
   showView('admin'); await loadMe(); if (!isAdmin()) { $('#adminBox').innerHTML = emptyHTML('admin', '🚫 无权访问', `<p class="muted" style="margin:0">管理后台仅对站点管理员开放</p><a class="btn btn-primary btn-sm" href="/" data-link>回首页</a>`); return; }
   $('#adminBox').innerHTML = `<h1 class="clip-title">🛡 管理后台</h1><p class="muted">${state.me.role === 'developer' ? '你是本站开发者，拥有一切权限。' : '你是管理员：可管理用户与所有剪贴板、编辑站点页面、发布公告、管理邀请/VIP/评论。'}</p>
-    <div class="admin-tabs">
-      <button class="btn btn-sm ${state.adminTab === 'users' ? 'btn-primary' : ''}" data-tab="users">👥 用户</button>
-      <button class="btn btn-sm ${state.adminTab === 'clips' ? 'btn-primary' : ''}" data-tab="clips">📋 全部剪贴板</button>
-      <button class="btn btn-sm ${state.adminTab === 'pages' ? 'btn-primary' : ''}" data-tab="pages">📄 站点页面</button>
-      <button class="btn btn-sm ${state.adminTab === 'announcements' ? 'btn-primary' : ''}" data-tab="announcements">📢 公告</button>
-      <button class="btn btn-sm ${state.adminTab === 'invites' ? 'btn-primary' : ''}" data-tab="invites">🎁 邀请</button>
-      <button class="btn btn-sm ${state.adminTab === 'stats' ? 'btn-primary' : ''}" data-tab="stats">📊 数据看板</button>
-      <button class="btn btn-sm ${state.adminTab === 'settings' ? 'btn-primary' : ''}" data-tab="settings">⚙️ 设置</button>
-    </div><div id="adminBody"></div>`;
+    <div class="admin-tabs">${adminTabs().map((t) => `<button class="btn btn-sm ${state.adminTab === t.id ? 'btn-primary' : ''}" data-tab="${t.id}">${t.label}</button>`).join('')}</div><div id="adminBody"></div>`;
   $$('#adminBox [data-tab]').forEach((b) => { b.onclick = () => { state.adminTab = b.dataset.tab; renderAdmin(); }; });
   if (state.adminTab === 'users') return loadAdminUsers();
   if (state.adminTab === 'clips') return loadAdminClips();
   if (state.adminTab === 'pages') return loadAdminPages();
+  if (state.adminTab === 'sites') return loadAdminSites();
+  if (state.adminTab === 'quota') return loadAdminQuota();
+  if (state.adminTab === 'chat') return loadAdminChat();
+  if (state.adminTab === 'ipgov') return loadAdminIpGov();
   if (state.adminTab === 'announcements') return loadAdminAnnouncements();
   if (state.adminTab === 'invites') return loadAdminInvites();
   if (state.adminTab === 'stats') return loadAdminStats();
   if (state.adminTab === 'settings') return loadAdminSettings();
+}
+
+// ========== v4.31：额度治理（进度条 + 自动刹车状态）============
+async function loadAdminQuota() {
+  const box = $('#adminBody');
+  box.innerHTML = `<div class="list-head"><h2>📊 额度治理</h2><p class="muted">每日额度按北京时间 08:00 至次日 08:00 统计（UTC 日期）。达到 80% 会自动关闭聊天以保护站点</p></div><p class="muted">加载中…</p>`;
+  const r = await api('/api/admin/quota');
+  if (!r.ok) { box.innerHTML = `<div class="list-head"><h2>📊 额度治理</h2></div><p class="muted">加载失败：${esc(r.data?.message || r.data?.error || '未知错误')}</p>`; return; }
+  const d = r.data;
+  const bar = (label, o, tip) => {
+    const pct = Math.min(100, o.percent);
+    const color = pct >= 90 ? '#dc2626' : pct >= 80 ? '#ea580c' : pct >= 60 ? '#f59e0b' : '#10b981';
+    return `<div style="margin-bottom:18px">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:5px">
+        <strong>${label}</strong>
+        <span class="muted" style="font-size:12px">${o.used.toLocaleString('zh-CN')} / ${o.limit.toLocaleString('zh-CN')}行 · <b style="color:${color}">${o.percent}%</b></span>
+      </div>
+      <div style="height:14px;background:#e5e7eb;border-radius:7px;overflow:hidden">
+        <div style="width:${pct}%;height:100%;background:${color};border-radius:7px;transition:width .3s"></div>
+      </div>
+      <div class="muted" style="font-size:11px;margin-top:3px">${tip}</div>
+    </div>`;
+  };
+  box.innerHTML = `<div class="list-head"><h2>📊 额度治理</h2><p class="muted">每日额度按北京时间 08:00 至次日 08:00 统计（UTC 日期）。达到 80% 会自动关闭聊天以保护站点</p></div>
+    <div style="background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:16px;margin-bottom:14px">
+      ${bar('D1 数据库读取行数', d.d1, 'Cloudflare 免费版每日 500 万行。剪贴板列表 / 聊天 / 后台用户管理是主要消耗方。')}
+      ${bar('KV 读取次数', d.kv, 'Cloudflare 免费版每日 10 万次。v4.30 起聊天消息与封禁判定已走 KV 缓存。')}
+    </div>
+    <div style="background:${d.tripped ? '#fef2f2' : '#f0fdf4'};border:1px solid ${d.tripped ? '#fecaca' : '#bbf7d0'};border-radius:10px;padding:14px;margin-bottom:14px">
+      <strong>${d.tripped ? '⚠️ 自动刹车已触发：聊天功能当前被自动关闭' : '✅ 自动刹车未触发'}</strong>
+      <p class="muted" style="margin:6px 0 10px;font-size:12px">
+        ${d.tripped ? '为避免额度耗尽导致全站降级，系统已在配额达到 80% 时自动关闭聊天（最大消耗源）。剪贴板与其他功能不受影响。' :
+        `当任一额度达到 ${Math.round((d.trip_threshold || 0.8) * 100)}% 时会自动关闭聊天。这里的数字是<b>估算值</b>——Cloudflare 未提供查询已用配额的 API，系统按各接口经验行数自行累计。`}
+      </p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        ${d.tripped ? '<button class="btn btn-sm btn-primary" id="qResetTrip">立即恢复聊天</button>' : ''}
+        <button class="btn btn-sm" id="qRefresh">刷新</button>
+        <button class="btn btn-sm" id="qZero">清零当日计数</button>
+      </div>
+    </div>
+    <p class="muted" style="font-size:12px">统计日：<code>${esc(d.day)}</code>（UTC）　·　上限口径：D1 ${d.limits?.d1?.toLocaleString('zh-CN')} 行 / KV ${d.limits?.kv?.toLocaleString('zh-CN')} 次</p>
+    ${d.can_edit_limits ? `
+    <div style="background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:16px;margin-top:14px">
+      <strong>⚙️ 额度上限设置${d.limits?.is_default ? '（当前使用 Cloudflare 默认值）' : '（已自定义）'}</strong>
+      <p class="muted" style="margin:6px 0 12px;font-size:12px">
+        默认 D1 ${Number(d.defaults?.d1||0).toLocaleString('zh-CN')} 行 / KV ${Number(d.defaults?.kv||0).toLocaleString('zh-CN')} 次。
+        如果你升级了付费套餐，把上限改成实际额度即可，这样进度条才准确。留空则沿用当前值。
+      </p>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end">
+        <div><label class="field-label" style="font-size:12px">D1 每日行数上限</label>
+          <input class="input" id="qD1Limit" type="number" min="1" step="1000" placeholder="${d.limits?.d1||''}" style="width:170px"></div>
+        <div><label class="field-label" style="font-size:12px">KV 每日读取上限</label>
+          <input class="input" id="qKvLimit" type="number" min="1" step="1000" placeholder="${d.limits?.kv||''}" style="width:170px"></div>
+        <button class="btn btn-sm btn-primary" id="qSaveLimits">保存</button>
+        <button class="btn btn-sm" id="qResetLimits">恢复默认值</button>
+      </div>
+    </div>` : '<p class="muted" style="margin-top:14px;font-size:12px">额度上限仅被授权「配额治理（manage_quota）」的管理员可修改。</p>'}`;
+  $('#qRefresh').onclick = () => loadAdminQuota();
+  const rt = $('#qResetTrip');
+  if (rt) rt.onclick = async () => {
+    const res = await api('/api/admin/quota/reset-trip', { method: 'POST' });
+    toast(res.ok ? res.data.message : (res.data?.message || '操作失败'), res.ok ? 'ok' : 'err');
+    loadAdminQuota();
+  };
+  $('#qZero').onclick = async () => {
+    if (!confirm('清零当日计数？这只重置本站的统计显示，不会改变 Cloudflare 的真实配额。')) return;
+    const res = await api('/api/admin/quota/reset-counter', { method: 'POST' });
+    toast(res.ok ? '已清零' : (res.data?.message || '操作失败'), res.ok ? 'ok' : 'err');
+    loadAdminQuota();
+  };
+  const saveBtn = $('#qSaveLimits');
+  if (saveBtn) saveBtn.onclick = async () => {
+    const d1v = ($('#qD1Limit').value || '').trim();
+    const kvv = ($('#qKvLimit').value || '').trim();
+    if (!d1v && !kvv) return toast('请至少填写一个额度值，或点「恢复默认值」', 'err');
+    const payload = {};
+    if (d1v) payload.d1 = Number(d1v);
+    if (kvv) payload.kv = Number(kvv);
+    const res = await api('/api/admin/quota/limits', { method: 'POST', body: JSON.stringify(payload) });
+    if (!res.ok) return toast(res.data?.message || '保存失败', 'err');
+    toast(res.data.tripped ? '已保存（用量已超新上限的 80%，聊天保持关闭）' : '额度上限已保存');
+    loadAdminQuota();
+  };
+  const rlBtn = $('#qResetLimits');
+  if (rlBtn) rlBtn.onclick = async () => {
+    if (!confirm('恢复为 Cloudflare 默认额度（D1 500 万行 / KV 10 万次）？')) return;
+    const res = await api('/api/admin/quota/limits/reset', { method: 'POST' });
+    toast(res.ok ? res.data.message : (res.data?.message || '操作失败'), res.ok ? 'ok' : 'err');
+    loadAdminQuota();
+  };
+}
+
+// ========== v4.29：聊天管理（群列表 + 一键删群）============
+async function loadAdminChat() {
+  const box = $('#adminBody');
+  box.innerHTML = `<div class="list-head"><h2>💬 聊天管理</h2><p class="muted">查看所有群聊与私聊；全站总群受保护不可删除</p></div><p class="muted">加载中…</p>`;
+  const type = state.adminChatType === 'single' ? 'single' : 'group';
+  const r = await api('/api/admin/chat-conversations?type=' + type + '&page=' + (state.adminChatPage || 1));
+  if (!r.ok) { box.innerHTML = `<div class="list-head"><h2>💬 聊天管理</h2></div><p class="muted">加载失败：${esc(r.data?.message || r.data?.error || '未知错误')}</p>`; return; }
+  const list = r.data.conversations || [];
+  box.innerHTML = `<div class="list-head"><h2>💬 聊天管理</h2><p class="muted">查看所有群聊与私聊；全站总群受保护不可删除</p></div>
+    <div class="admin-tabs" style="margin-bottom:12px">
+      <button class="btn btn-sm ${type === 'group' ? 'btn-primary' : ''}" data-ctype="group">👥 群聊（${type === 'group' ? list.length : ''}）</button>
+      <button class="btn btn-sm ${type === 'single' ? 'btn-primary' : ''}" data-ctype="single">💬 私聊</button>
+    </div>
+    <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>${type === 'group' ? '群名' : '会话'}</th><th>群主</th><th>成员</th><th>消息</th><th>加入方式</th><th>最近活跃</th><th>操作</th></tr></thead><tbody>${
+      list.length ? list.map((c) => `<tr>
+        <td>${c.is_global ? '<strong>👑 全站总群</strong>' : esc(c.name || '群聊 #' + c.id)}${c.is_global ? '' : `<div class="muted" style="font-size:11px">#${c.id}</div>`}</td>
+        <td>${c.owner_name ? esc(c.owner_name) : '<span class="muted">—</span>'}</td>
+        <td>${c.member_count}</td>
+        <td>${c.msg_count}</td>
+        <td>${c.join_mode === 'approval' ? '<span class="tag-chip">需审核</span>' : '<span class="muted">开放</span>'}</td>
+        <td class="muted" style="font-size:12px">${c.last_at ? esc(fmtDateTime(c.last_at)) : '—'}</td>
+        <td>${c.is_global ? '<span class="muted">受保护</span>' : `<button class="btn btn-sm btn-danger" data-delconv="${c.id}">删除</button>`}</td>
+      </tr>`).join('') : '<tr><td colspan="7" class="muted">暂无会话</td></tr>'
+    }</tbody></table></div>
+    <div class="pager" style="margin-top:12px">
+      <button class="btn btn-sm" id="acPrev"${(r.data.page || 1) <= 1 ? ' disabled' : ''}>上一页</button>
+      <span class="muted">第 ${r.data.page || 1} / ${r.data.totalPages || 1} 页 · 共 ${r.data.total || 0} 个</span>
+      <button class="btn btn-sm" id="acNext"${(r.data.page || 1) >= (r.data.totalPages || 1) ? ' disabled' : ''}>下一页</button>
+    </div>`;
+  $$('#adminBody [data-ctype]').forEach((b) => b.onclick = () => { state.adminChatType = b.dataset.ctype; state.adminChatPage = 1; loadAdminChat(); });
+  $('#acPrev').onclick = () => { state.adminChatPage = Math.max(1, (state.adminChatPage || 1) - 1); loadAdminChat(); };
+  $('#acNext').onclick = () => { state.adminChatPage = (state.adminChatPage || 1) + 1; loadAdminChat(); };
+  $$('#adminBody [data-delconv]').forEach((b) => b.onclick = async () => {
+    const id = b.dataset.delconv;
+    if (!confirm('确定删除该群？群内全部消息与成员关系将一并删除，且不可恢复。')) return;
+    const res = await api('/api/admin/chat-conversations/' + id, { method: 'DELETE' });
+    if (!res.ok) return toast(res.data?.message || '删除失败', 'err');
+    toast('已删除'); loadAdminChat();
+  });
+}
+
+// ========== v4.29：IP 治理 ==========
+async function loadAdminIpGov() {
+  const box = $('#adminBody');
+  box.innerHTML = `<div class="list-head"><h2>🛡 IP 治理</h2><p class="muted">按 IP 聚合注册账号、批量封禁 / 解封。被封 IP 无法注册且访问接口直接拒绝</p></div><p class="muted">加载中…</p>`;
+  const days = state.adminIpDays || 1;
+  const [g, bans] = await Promise.all([
+    api('/api/admin/ip-groups?days=' + days),
+    api('/api/admin/ip-bans')
+  ]);
+  if (!g.ok) { box.innerHTML = `<div class="list-head"><h2>🛡 IP 治理</h2></div><p class="muted">加载失败：${esc(g.data?.message || g.data?.error || '未知错误')}</p>`; return; }
+  const groups = g.data.groups || [];
+  const banList = bans.data?.bans || [];
+  box.innerHTML = `<div class="list-head"><h2>🛡 IP 治理</h2><p class="muted">按 IP 聚合注册账号、批量封禁 / 解封。被封 IP 无法注册且访问接口直接拒绝</p></div>
+    <div class="sites-create" style="margin-bottom:10px">
+      <select class="input" id="ipDays" style="max-width:140px">
+        <option value="1"${days === 1 ? ' selected' : ''}>近 1 天</option>
+        <option value="3"${days === 3 ? ' selected' : ''}>近 3 天</option>
+        <option value="7"${days === 7 ? ' selected' : ''}>近 7 天</option>
+        <option value="30"${days === 30 ? ' selected' : ''}>近 30 天</option>
+      </select>
+      <input class="input" id="ipTarget" placeholder="封禁目标：1.2.3.4 或 1.2.3.0/24" style="flex:1;min-width:200px">
+      <input class="input" id="ipDaysN" type="number" step="0.5" min="0" placeholder="天数(可小数，留空=永久)" style="max-width:170px">
+      <input class="input" id="ipReason" placeholder="原因（可选）" style="max-width:170px">
+      <button class="btn btn-sm btn-danger" id="ipBanBtn">封禁</button>
+    </div>
+    <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>IP</th><th>同 IP 账号数</th><th>账号</th><th>操作</th></tr></thead><tbody>${
+      groups.length ? groups.map((grp) => `<tr>
+        <td><code>${esc(grp.ip)}</code></td>
+        <td>${grp.users.length > 1 ? `<span class="badge-warn">${grp.users.length} 个</span>` : grp.users.length}</td>
+        <td>${grp.users.map((u) => `<a href="/u/${u.id}" data-link>${esc(u.display_name)}</a>${u.banned ? ' <span class="tag-chip">已封</span>' : ''}`).join('、')}</td>
+        <td style="white-space:nowrap">
+          <button class="btn btn-sm btn-danger" data-ipban="${esc(grp.ip)}">封此 IP</button>
+          ${grp.users.length > 1 ? `<button class="btn btn-sm" data-ipusers="${esc(grp.ip)}">批量处理</button>` : ''}
+        </td></tr>`).join('')
+      // v4.31.2：默认为空时说明原因，避免被误判成「功能坏了」
+      : `<tr><td colspan="4" class="muted">${days <= 1
+          ? '近 1 天内没有 IP 记录。可切换到「近 7 天 / 30 天」查看历史——IP 记录只在<b>注册与登录时</b>采集，若你近期没换环境，时间窗内自然是空的。'
+          : '该时间段内无IP 记录'}</td></tr>`
+    }</tbody></table></div>
+    <h3 style="margin:22px 0 8px">🚫 已封禁的 IP / 网段（${banList.length}）</h3>
+    <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>目标</th><th>类型</th><th>原因</th><th>解封时间</th><th>操作</th></tr></thead><tbody>${
+      banList.length ? banList.map((b) => `<tr>
+        <td><code>${esc(b.value)}</code></td>
+        <td>${b.kind === 'cidr' ? '网段' : '单 IP'}</td>
+        <td class="muted">${esc(b.reason || '—')}</td>
+        <td class="muted" style="font-size:12px">${b.ban_until ? esc(b.ban_until) + ' UTC' : '永久'}</td>
+        <td><button class="btn btn-sm" data-ipunban="${esc(b.kind)}|${esc(b.value)}">解封</button></td>
+      </tr>`).join('') : '<tr><td colspan="5" class="muted">暂无封禁记录</td></tr>'
+    }</tbody></table></div>`;
+  $('#ipDays').onchange = () => { state.adminIpDays = parseInt($('#ipDays').value, 10) || 1; loadAdminIpGov(); };
+  const doBan = async (target) => {
+    const daysN = ($('#ipDaysN').value || '').trim();
+    const reason = ($('#ipReason').value || '').trim();
+    const res = await api('/api/admin/ip-bans', { method: 'POST', body: JSON.stringify({ value: target, days: daysN === '' ? null : Number(daysN), reason }) });
+    if (!res.ok) return toast(res.data?.message || '封禁失败', 'err');
+    toast(res.data.ban_until ? `已封禁至 ${res.data.ban_until} UTC` : '已永久封禁');
+    loadAdminIpGov();
+  };
+  $('#ipBanBtn').onclick = () => { const t = ($('#ipTarget').value || '').trim(); if (!t) return toast('请输入 IP 或网段', 'err'); doBan(t); };
+  $$('#adminBody [data-ipban]').forEach((b) => b.onclick = () => doBan(b.dataset.ipban));
+  $$('#adminBody [data-ipusers]').forEach((b) => b.onclick = async () => {
+    const ip = b.dataset.ipusers;
+    const grp = groups.find((x) => x.ip === ip); if (!grp) return;
+    const m = openModal('批量处理同 IP 账号', `<p class="muted" style="margin:0 0 10px">以下 ${grp.users.length} 个账号来自同一 IP（<code>${esc(ip)}</code>）：</p>
+      <div class="admin-table-wrap" style="max-height:300px;overflow:auto"><table class="admin-table"><thead><tr><th>账号</th><th>状态</th></tr></thead><tbody>
+      ${grp.users.map((u) => `<tr><td>${esc(u.display_name)} <span class="muted">#${u.id}</span></td><td>${u.banned ? '<span class="tag-chip">已封</span>' : '<span class="muted">正常</span>'}</td></tr>`).join('')}
+      </tbody></table></div>
+      <p class="muted" style="margin:12px 0 6px">封禁天数（支持小数，留空 = 永久）：</p>
+      <input class="input" id="bulkDays" type="number" step="0.5" min="0" placeholder="如 0.5 = 12 小时" style="width:100%;box-sizing:border-box">
+      <p class="muted" style="margin:10px 0 6px">封禁原因：</p>
+      <input class="input" id="bulkReason" placeholder="如：批量注册小号" style="width:100%;box-sizing:border-box">
+      <label class="field-label" style="margin-top:12px;display:flex;align-items:center;gap:6px"><input type="checkbox" id="bulkDelete" style="width:auto"> 同时删除这些账号（危险，不可恢复）</label>`);
+    m.foot.innerHTML = `<button class="btn btn-sm" id="bulkCancel">取消</button><button class="btn btn-sm btn-danger" id="bulkBan">批量封禁</button>`;
+    m.foot.querySelector('#bulkCancel').onclick = closeModal;
+    m.foot.querySelector('#bulkBan').onclick = async () => {
+      const d = (m.body.querySelector('#bulkDays').value || '').trim();
+      const rs = (m.body.querySelector('#bulkReason').value || '').trim();
+      const del = m.body.querySelector('#bulkDelete').checked;
+      const targets = [];
+      for (const u of grp.users) {
+        if (del) { const dr = await api('/api/admin/users/' + u.id, { method: 'DELETE' }); if (!dr.ok) { toast('删除 ' + u.display_name + ' 失败：' + (dr.data?.message || ''), 'err'); continue; } }
+        else { const br = await api('/api/admin/users/' + u.id, { method: 'PATCH', body: JSON.stringify({ banned: 1, ban_reason: rs || '同 IP 批量注册', ban_days: d === '' ? null : Number(d) }) }); if (!br.ok) { toast('封禁 ' + u.display_name + ' 失败：' + (br.data?.message || ''), 'err'); continue; } }
+        targets.push(u.display_name);
+      }
+      const ipRes = await api('/api/admin/ip-bans', { method: 'POST', body: JSON.stringify({ value: ip, days: d === '' ? null : Number(d), reason: rs }) });
+      if (!ipRes.ok) toast('IP 封禁失败：' + (ipRes.data?.message || ''), 'err');
+      closeModal(); toast('已处理 ' + targets.length + ' 个账号'); loadAdminIpGov();
+    };
+  });
+  $$('#adminBody [data-ipunban]').forEach((b) => b.onclick = async () => {
+    const [kind, value] = b.dataset.ipunban.split('|');
+    const res = await api('/api/admin/ip-bans/' + kind + '/' + encodeURIComponent(value), { method: 'DELETE' });
+    if (!res.ok) return toast(res.data?.message || '解封失败', 'err');
+    toast('已解封'); loadAdminIpGov();
+  });
 }
 
 // M3 埋点看板：读取 events 聚合数据（仅管理员可见）
@@ -2170,16 +4040,34 @@ function showSourceModal() {
 const ADMIN_FULL_PERMS = ALL_PERMS.reduce((o, p) => (o[p] = true, o), {});
 
 async function loadAdminUsers() {
-  const box = $('#adminBody'); box.innerHTML = '加载中…';
+  const box = $('#adminBody');
+  // v4.31.3：筛选值改从 state 读。之前直接从 DOM 读，但 renderAdminUsers 开头会
+  // box.innerHTML='加载中…' 把旧 DOM（含你刚选的 <select> 值）整个抹掉，
+  // 于是「筛选」点了等于没点——回填时又写回默认值，看起来闪一下就复原。
+  const F = state.adminUserFilter || (state.adminUserFilter = {});
+  const boxWasLoading = box.innerHTML === '加载中…';
+  if (boxWasLoading) box.innerHTML = '加载中…';
+  // 首次进入（无缓存值）才从 DOM 取，之后一律以 state 为准
+  if (F._init === undefined) {
+    F.source = ($('#aufSource')?.value || '').trim();
+    F.activeDays = ($('#aufActive')?.value || '').trim();
+    F.minClips = ($('#aufMinClips')?.value || '').trim();
+    F.banned = ($('#aufBanned')?.value || '').trim();
+    F.sort = ($('#aufSort')?.value || 'id').trim();
+    F.order = ($('#aufOrder')?.value || 'asc').trim();
+    F.q = ($('#adminUserSearch')?.value || '').trim();
+    F._init = true;
+  }
   const f = {
-    source: ($('#aufSource')?.value || '').trim(),
-    activeDays: ($('#aufActive')?.value || '').trim(),
-    minClips: ($('#aufMinClips')?.value || '').trim(),
-    banned: ($('#aufBanned')?.value || '').trim(),
-    sort: ($('#aufSort')?.value || 'id').trim(),
-    order: ($('#aufOrder')?.value || 'asc').trim(),
-    q: ($('#adminUserSearch')?.value || '').trim()
+    source: F.source || '',
+    activeDays: F.activeDays || '',
+    minClips: F.minClips || '',
+    banned: F.banned || '',
+    sort: F.sort || 'id',
+    order: F.order || 'asc',
+    q: F.q || ''
   };
+  state.adminUserPage = Math.max(1, state.adminUserPage || 1);
   const qs = new URLSearchParams();
   if (f.source) qs.set('source', f.source);
   if (f.activeDays) qs.set('activeDays', f.activeDays);
@@ -2188,6 +4076,8 @@ async function loadAdminUsers() {
   if (f.sort) qs.set('sort', f.sort);
   if (f.order) qs.set('order', f.order);
   if (f.q) qs.set('q', f.q);
+  qs.set('page', state.adminUserPage);
+  qs.set('pageSize', 50);
   const { data } = await api('/api/admin/users?' + qs.toString());
   if (!data?.users) return (box.innerHTML = emptyHTML('admin', '加载失败（需要管理员权限）', ''));
   const users = data.users;
@@ -2196,7 +4086,10 @@ async function loadAdminUsers() {
     const lvl = u.role === 'admin' ? Math.max(1, Math.min(5, u.admin_level || 1)) : 0;
     const roleHtml = u.role === 'developer' ? roleBadge('developer') : u.role === 'admin' ? roleBadge('admin', { permLevel: lvl }) : '';
     const vipHtml = u.is_vip ? roleBadge('user', { is_vip: true }) : '';
-    const banHtml = u.banned ? `<span class="badge" style="background:rgba(220,38,38,.15);color:#e0524f;border:1px solid rgba(220,38,38,.4)">🚫 封禁${u.ban_until ? ' 至 ' + esc((u.ban_until || '').slice(0, 10)) : '（永久）'}</span>` : '';
+    const banHtml = u.banned ? `<span class="badge" style="background:rgba(220,38,38,.15);color:#e0524f;border:1px solid rgba(220,38,38,.4)">🚫 封禁${u.ban_until ? ' 至 ' + esc(fmtDate(u.ban_until)) : '（永久）'}</span>` : '';
+    const df = u.disabled_features || 0;
+    const dfNames = []; if (df & 1) dfNames.push('聊天'); if (df & 2) dfNames.push('站点'); if (df & 4) dfNames.push('剪贴板');
+    const dfHtml = dfNames.length ? `<div class="badge" style="background:rgba(220,38,38,.15);color:#e0524f;border:1px solid rgba(220,38,38,.4);margin-top:4px">🚫 已禁：${dfNames.join('/')}</div>` : '';
     const ff = u.feature_flags || {};
     const ffOn = Object.keys(FEATURE_LABELS).filter((k) => ff[k]).map((k) => FEATURE_LABELS[k]);
     const isSelf = String(u.id) === String(state.me?.userId);
@@ -2210,8 +4103,8 @@ async function loadAdminUsers() {
     const dis = (ok, why) => ok ? '' : ' disabled title="' + esc(why) + '"';
     const mute = (ok) => ok ? '' : ' style="opacity:.45;cursor:not-allowed"';
     return `<tr>
-      <td><a href="/u/${u.id}" data-link>${avatarHtml(u.avatar, u.display_name)} <b>${esc(u.display_name)}</b></a><div class="muted" style="font-size:12px">@${esc(u.username)} · #${u.id}</div><div class="muted" style="font-size:12px">📅 ${esc((u.created_at || '').slice(0, 10))}</div></td>
-      <td>${roleHtml} ${vipHtml} ${banHtml}${lvl ? `<div class="muted" style="font-size:11px">层级 ${lvl}/5</div>` : ''}</td>
+      <td><a href="/u/${u.id}" data-link>${avatarHtml(u.avatar, u.display_name)} <b>${esc(u.display_name)}</b></a>${u.invisible_name ? ` <span class="badge-warn" title="昵称或账号含不可见字符（疑似仿冒）">⚠ 不可见字符</span>` : ''}${u.tag ? ` <span class="tag-chip">${esc(u.tag)}</span>` : ''}<div class="muted" style="font-size:12px">@${esc(u.username)} · #${u.id}</div><div class="muted" style="font-size:12px">📅 ${esc(fmtDate(u.created_at))}</div></td>
+      <td>${roleHtml} ${vipHtml} ${banHtml}${dfHtml}${lvl ? `<div class="muted" style="font-size:11px">层级 ${lvl}/5</div>` : ''}</td>
       <td>${u.clip_count}</td>
       <td>${u.invite_count}</td>
       <td class="muted" style="font-size:12px;max-width:170px">${ffOn.length ? ffOn.join('、') : '—'}</td>
@@ -2227,11 +4120,14 @@ async function loadAdminUsers() {
         ${u.banned
           ? `<button class="btn btn-sm" data-unban="${u.id}"${dis(cBan, '无 ban_user 权限或层级不足')}${mute(cBan)}>解封</button>`
           : `<button class="btn btn-sm btn-danger" data-ban="${u.id}"${dis(cBan, '无 ban_user 权限或层级不足')}${mute(cBan)}>封禁</button>`}
+        <button class="btn btn-sm" data-df="${u.id}"${dis(cBan, '需 ban_user 权限或层级不足')}${mute(cBan)}>限制</button>
         <button class="btn btn-sm btn-danger" data-deluser="${u.id}"${dis(cDel, '无 delete_user 权限或层级不足')}${mute(cDel)}>删除</button>
       </td>
     </tr>`;
   }).join('');
-  box.innerHTML = `<div class="list-head"><h2>👥 用户管理（${users.length} 人 · 共 ${data.total}）</h2></div>
+  box.innerHTML = `<div class="list-head"><h2>👥 用户管理（${users.length} 人 · 共 ${data.total}）</h2>
+    <button class="btn btn-sm" id="siteCtrlBtn">🛡 站点管控</button>
+    ${myPerm('manage_snapshot_quota') ? '<button class="btn btn-sm" id="batchSnapBtn">🕘 批量快照配额</button>' : ''}</div>
     <div class="admin-filter-bar" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px">
       <select id="aufSource" class="input input-sm">${srcOpts}</select>
       <input id="aufActive" class="input input-sm" type="number" min="0" placeholder="最近活跃天数" style="width:110px">
@@ -2242,15 +4138,42 @@ async function loadAdminUsers() {
       <button id="aufApply" class="btn btn-sm btn-primary">筛选</button>
       <input id="adminUserSearch" class="input input-sm admin-search" placeholder="🔍 搜索用户名 / @账号 / ID" style="flex:1;min-width:160px">
     </div>
-    <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>用户</th><th>角色 / VIP / 封禁</th><th>剪贴板</th><th>邀请</th><th>功能开关</th><th>来源</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>用户</th><th>角色 / VIP / 封禁</th><th>剪贴板</th><th>邀请</th><th>功能开关</th><th>来源</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <div class="pager">
+      <button class="btn btn-sm" id="aufPrev" ${data.page <= 1 ? 'disabled' : ''}>← 上一页</button>
+      <span class="muted">第 ${data.page} / ${data.totalPages} 页 · 共 ${data.total} 人</span>
+      <button class="btn btn-sm" id="aufNext" ${data.page >= data.totalPages ? 'disabled' : ''}>下一页 →</button>
+    </div>`;
 
   // 回填筛选值
   $('#aufSource').value = f.source; $('#aufActive').value = f.activeDays; $('#aufMinClips').value = f.minClips;
   $('#aufBanned').value = f.banned; $('#aufSort').value = f.sort; $('#aufOrder').value = f.order;
 
-  $('#aufApply').onclick = loadAdminUsers;
+  // 筛选：先把当前控件值写回 state，再重新加载（否则重渲染会丢值）
+  $('#aufApply').onclick = () => {
+    const s = state.adminUserFilter || (state.adminUserFilter = {});
+    s.source = ($('#aufSource')?.value || '').trim();
+    s.activeDays = ($('#aufActive')?.value || '').trim();
+    s.minClips = ($('#aufMinClips')?.value || '').trim();
+    s.banned = ($('#aufBanned')?.value || '').trim();
+    s.sort = ($('#aufSort')?.value || 'id').trim();
+    s.order = ($('#aufOrder')?.value || 'asc').trim();
+    s.q = ($('#adminUserSearch')?.value || '').trim();
+    s._init = true;
+    state.adminUserPage = 1; loadAdminUsers();
+  };
   const search = $('#adminUserSearch');
-  if (search) search.oninput = (e) => { const q = e.target.value.trim().toLowerCase(); box.querySelectorAll('tbody tr').forEach((tr) => { tr.style.display = !q || tr.textContent.toLowerCase().includes(q) ? '' : 'none'; }); };
+  let _st; if (search) search.oninput = () => {
+    clearTimeout(_st);
+    _st = setTimeout(() => {
+      const s = state.adminUserFilter || (state.adminUserFilter = {});
+      s.q = (search.value || '').trim(); s._init = true;
+      state.adminUserPage = 1; loadAdminUsers();
+    }, 350);
+  };
+  const prev = $('#aufPrev'), next = $('#aufNext');
+  if (prev) prev.onclick = () => { state.adminUserPage = Math.max(1, (state.adminUserPage || 1) - 1); loadAdminUsers(); };
+  if (next) next.onclick = () => { state.adminUserPage = (state.adminUserPage || 1) + 1; loadAdminUsers(); };
 
   $$('#adminBody [data-vip]').forEach((b) => b.onclick = () => {
     const u = users.find((x) => String(x.id) === b.dataset.vip);
@@ -2280,7 +4203,7 @@ async function loadAdminUsers() {
     const res = await openPermsModal(u.display_name);
     if (!res) return;
     const r = await api('/api/admin/users/' + b.dataset.role, { method: 'PATCH', body: JSON.stringify({ role: 'admin', admin_permissions: res.perms, admin_level: res.level }) });
-    if (r.ok) { toast('已册封管理员'); loadAdminUsers(); } else toast('失败：' + (r.data?.message || r.status), 'err');
+    if (r.ok) { toast(r.data?.message || '已册封管理员'); loadAdminUsers(); } else toast('失败：' + (r.data?.message || r.status), 'err');
   });
   // v4.15: 直接修改现有管理员权限 / 层级，免撤管再升管
   $$('#adminBody [data-perms]').forEach((b) => b.onclick = async () => {
@@ -2288,7 +4211,7 @@ async function loadAdminUsers() {
     const res = await openPermsModal(u.display_name, { perms: u.admin_permissions || {}, level: u.admin_level || 1 });
     if (!res) return;
     const r = await api('/api/admin/users/' + b.dataset.perms, { method: 'PATCH', body: JSON.stringify({ role: 'admin', admin_permissions: res.perms, admin_level: res.level }) });
-    if (r.ok) { toast('权限已更新'); loadAdminUsers(); } else toast('失败：' + (r.data?.message || r.status), 'err');
+    if (r.ok) { toast(r.data?.message || '权限已更新'); loadAdminUsers(); } else toast('失败：' + (r.data?.message || r.status), 'err');
   });
   $$('#adminBody [data-ban]').forEach((b) => b.onclick = () => {
     const u = users.find((x) => String(x.id) === b.dataset.ban);
@@ -2304,6 +4227,47 @@ async function loadAdminUsers() {
     const r = await api('/api/admin/users/' + b.dataset.deluser, { method: 'DELETE' });
     if (r.ok) { toast('已删除'); loadAdminUsers(); } else toast('失败：' + (r.data?.message || r.status), 'err');
   });
+  $$('#adminBody [data-df]').forEach((b) => b.onclick = () => {
+    const u = users.find((x) => String(x.id) === b.dataset.df);
+    const df = u.disabled_features || 0;
+    const body = `<div class="ff-grid">
+      <label class="ff-item"><input type="checkbox" data-dfk="chat" ${df & 1 ? 'checked' : ''}> <span>🚫 进入聊天</span></label>
+      <label class="ff-item"><input type="checkbox" data-dfk="site" ${df & 2 ? 'checked' : ''}> <span>🚫 托管站点</span></label>
+      <label class="ff-item"><input type="checkbox" data-dfk="clipboard" ${df & 4 ? 'checked' : ''}> <span>🚫 使用剪贴板</span></label>
+    </div><p class="muted" style="margin:8px 0 0;font-size:12px">勾选 = 撤销该功能的进入/使用权限；取消勾选 = 恢复。</p>`;
+    const m = openModal('功能限制 · ' + u.display_name, body);
+    m.foot.innerHTML = `<button class="btn btn-sm" id="dfCancel">取消</button><button class="btn btn-sm btn-primary" id="dfSave">保存</button>`;
+    m.foot.querySelector('#dfCancel').onclick = closeModal;
+    m.foot.querySelector('#dfSave').onclick = async () => {
+      const df2 = {};
+      m.body.querySelectorAll('[data-dfk]').forEach((c) => { df2[c.dataset.dfk] = c.checked; });
+      const r = await api('/api/admin/users/' + b.dataset.df, { method: 'PATCH', body: JSON.stringify({ disabled_features: df2 }) });
+      if (r.ok) { toast('已更新'); closeModal(); loadAdminUsers(); } else toast('失败：' + (r.data?.message || r.status), 'err');
+    };
+  });
+  const scb = $('#siteCtrlBtn');
+  if (scb) scb.onclick = openSiteControlModal;
+  const bsb = $('#batchSnapBtn');
+  if (bsb) bsb.onclick = () => {
+    const m = openModal('🕘 批量设置快照配额', `
+      <p class="muted" style="margin:0 0 8px">普通用户默认 3 份、VIP 5 份；留空 = 恢复按 VIP 派生（NULL）。</p>
+      <div class="form-row" style="margin-bottom:8px">作用范围：
+        <select id="snapScope" class="input input-sm">
+          <option value="vip">仅 VIP</option>
+          <option value="normal">仅普通用户</option>
+          <option value="all">全部用户</option>
+        </select>
+      </div>
+      <div class="form-row">快照份数（0–50，留空=恢复默认）：<input id="snapQuota" class="input input-sm" type="number" min="0" max="50" placeholder="例如 5" style="width:90px"></div>`);
+    m.foot.innerHTML = `<button class="btn btn-sm" id="snapCancel">取消</button><button class="btn btn-sm btn-primary" id="snapSave">保存</button>`;
+    m.foot.querySelector('#snapCancel').onclick = closeModal;
+    m.foot.querySelector('#snapSave').onclick = async () => {
+      const qv = m.body.querySelector('#snapQuota').value.trim();
+      const quota = qv === '' ? null : parseInt(qv, 10);
+      const r = await api('/api/admin/users/snapshot-quota', { method: 'POST', body: JSON.stringify({ scope: m.body.querySelector('#snapScope').value, quota }) });
+      if (r.ok) { toast('已更新 ' + (r.data.affected || 0) + ' 人'); closeModal(); } else toast('失败：' + (r.data?.message || r.status), 'err');
+    };
+  };
 }
 
 /** VIP 设置弹窗（v4.13：时长可设置，0/空=永久） */
@@ -2315,7 +4279,7 @@ function openVipModal(u) {
     <label><input type="radio" name="vipAct" value="unset" ${cur ? '' : 'checked'}> 取消 VIP</label>
   </div>
   <div class="form-row" style="margin-bottom:8px">时长（天，留空=永久）：<input id="vipDur" class="input input-sm" type="number" min="1" placeholder="例如 365（1 年）" style="width:140px"></div>
-  <p class="muted" style="font-size:12px">当前：${cur ? (until ? 'VIP 至 ' + esc(until.slice(0, 10)) : '永久 VIP') : '非 VIP'}</p>`;
+  <p class="muted" style="font-size:12px">当前：${cur ? (until ? 'VIP 至 ' + esc(fmtDate(until)) : '永久 VIP') : '非 VIP'}</p>`;
   const m = openModal('VIP 设置 · ' + (u.display_name || u.username), body);
   m.foot.innerHTML = `<button class="btn btn-sm" id="vipCancel">取消</button><button class="btn btn-sm btn-primary" id="vipSave">保存</button>`;
   m.foot.querySelector('#vipCancel').onclick = closeModal;
@@ -2388,10 +4352,10 @@ async function loadAdminClips() {
     <td>${c.is_public ? '✅' : '🙈'}</td>
     <td>${c.login_required ? '🔒' : '—'}</td>
     <td>${c.max_readers ? c.max_readers : '—'}</td>
-    <td class="admin-actions"><a class="btn btn-sm" href="/c/${esc(c.clip_id)}" data-link>查看</a><button class="btn btn-sm btn-danger" data-delclip="${esc(c.clip_id)}">删除</button></td>
+    <td class="admin-actions"><a class="btn btn-sm" href="/c/${esc(c.clip_id)}" data-link>查看</a>${myPerm(c.is_public ? 'delete_public_clips' : 'delete_private_clips') ? `<button class="btn btn-sm btn-danger" data-delclip="${esc(c.clip_id)}">删除</button>` : ''}</td>
   </tr>`).join('');
   box.innerHTML = `<div class="list-head"><h2>📋 剪贴板管理（${data.clips.length} 条）</h2>
-    <button class="btn btn-sm" id="cleanExpiredBtn" style="margin-right:8px">🧹 清理过期(&gt;3天)</button>
+    ${myPerm('delete_public_clips') || myPerm('delete_private_clips') ? '<button class="btn btn-sm" id="cleanExpiredBtn" style="margin-right:8px">🧹 清理过期(&gt;3天)</button>' : ''}
     <input id="adminClipSearch" class="input input-sm admin-search" placeholder="🔍 搜索标题 / 作者"></div>
     <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>标题</th><th>作者</th><th>公开</th><th>登录可见</th><th>读者上限</th><th>操作</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   const ce = $('#cleanExpiredBtn');
@@ -2419,6 +4383,80 @@ async function loadAdminPages() {
   }</tbody></table></div>`;
 }
 
+// v4.20: 管理后台「站点管理」——查看全站站点、封禁 / 解封 / 删除
+function siteStatusBadge(st) {
+  if (st === 'published') return '<span class="badge badge-role badge-vip">已发布</span>';
+  if (st === 'suspended') return '<span class="badge badge-role badge-dev">已封禁</span>';
+  return '<span class="badge badge-role">草稿</span>';
+}
+async function loadAdminSites() {
+  const box = $('#adminBody'); box.innerHTML = '加载中…';
+  const q = state.adminSiteQ || '';
+  const status = state.adminSiteStatus || '';
+  const { ok, data } = await api('/api/admin/sites' + (q || status ? `?q=${encodeURIComponent(q)}&status=${encodeURIComponent(status)}` : ''));
+  if (!ok || !data?.sites) return (box.innerHTML = emptyHTML('admin', '加载失败（需要 view_sites 权限）', ''));
+  // v4.21：三档权限——查看 / 封禁 / 删除，按钮按实际权限渲染（服务端同样会二次校验）
+  const canBanSites = myPerm('ban_sites');
+  const canDelSites = myPerm('delete_sites');
+  const rows = data.sites.map((s) => `<tr>
+      <td><a href="/sites/${esc(s.slug)}" data-link><code class="card-id">${esc(s.slug)}</code></a>
+          <div class="muted" style="font-size:12px">${esc(s.title || '无标题')}</div></td>
+      <td>${esc(s.owner_display || s.owner_name || ('#' + s.owner_id))}</td>
+      <td>${siteStatusBadge(s.status)}${(s.report_count || 0) > 0 ? ` <span class="badge badge-role" style="background:#fee2e2;color:#b91c1c">⚠ ${s.report_count}</span>` : ''}</td>
+      <td class="muted">${s.file_count || 0} 个 · ${fmtBytes(s.size_bytes)}</td>
+      <td class="muted">${visitsLine(s)}</td>
+      <td class="muted">${esc(fmtDateTime(s.updated_at || s.created_at))}</td>
+      <td>
+        <a class="btn btn-xs" href="${esc(s.url)}" target="_blank" rel="noopener">访问</a>
+        ${canBanSites
+          ? (s.status === 'suspended'
+            ? `<button class="btn btn-xs" data-unsus="${esc(s.slug)}">解封</button>`
+            : `<button class="btn btn-xs btn-danger" data-sus="${esc(s.slug)}">封禁</button>`)
+          : ''}
+        ${canDelSites ? `<button class="btn btn-xs btn-danger" data-adsdel="${esc(s.slug)}">删除</button>` : ''}
+      </td></tr>`).join('');
+  box.innerHTML = `<div class="list-head"><h2>🌐 站点管理</h2><p class="muted">封禁后用户访问该站会看到 403，站长也无法再改动内容</p></div>
+    <div class="sites-create" style="margin-bottom:10px">
+      <input class="input" id="adSiteQ" placeholder="搜索 slug / 标题 / 站长" value="${esc(q)}" style="flex:1;min-width:160px">
+      <select class="input" id="adSiteStatus" style="max-width:140px">
+        <option value="">全部状态</option>
+        <option value="published"${status === 'published' ? ' selected' : ''}>已发布</option>
+        <option value="draft"${status === 'draft' ? ' selected' : ''}>草稿</option>
+        <option value="suspended"${status === 'suspended' ? ' selected' : ''}>已封禁</option>
+      </select>
+      <button class="btn btn-sm btn-primary" id="adSiteSearch">搜索</button>
+    </div>
+    <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>站点</th><th>站长</th><th>状态</th><th>文件</th><th>访问量</th><th>更新</th><th>操作</th></tr></thead><tbody>${
+      rows || '<tr><td colspan="7" class="muted">暂无站点</td></tr>'
+    }</tbody></table></div>`;
+  $('#adSiteSearch').onclick = () => { state.adminSiteQ = $('#adSiteQ').value.trim(); state.adminSiteStatus = $('#adSiteStatus').value; loadAdminSites(); };
+  $('#adSiteQ').onkeydown = (e) => { if (e.key === 'Enter') $('#adSiteSearch').click(); };
+  $$('#adminBody [data-sus]').forEach((b) => b.onclick = () => {
+    const slug = b.dataset.sus;
+    const m = openModal('封禁站点 ' + slug, `<p class="muted" style="margin:0 0 8px">封禁后访问该站会返回 403，且站长无法再改动内容。请填写原因（会展示给站长）：</p>
+      <input class="input" id="susReason" placeholder="如：含违规内容 / 钓鱼 / 侵权" style="width:100%;box-sizing:border-box">`);
+    m.foot.innerHTML = `<button class="btn btn-sm" id="susCancel">取消</button><button class="btn btn-sm btn-danger" id="susOk">确认封禁</button>`;
+    m.foot.querySelector('#susCancel').onclick = closeModal;
+    m.foot.querySelector('#susOk').onclick = async () => {
+      const reason = (m.body.querySelector('#susReason').value || '').trim();
+      const r = await api('/api/sites/' + slug + '/suspend', { method: 'POST', body: JSON.stringify({ reason }) });
+      if (!r.ok) return toast(r.data?.message || '封禁失败', 'err');
+      closeModal(); toast('已封禁'); loadAdminSites();
+    };
+  });
+  $$('#adminBody [data-unsus]').forEach((b) => b.onclick = async () => {
+    const r = await api('/api/sites/' + b.dataset.unsus + '/unsuspend', { method: 'POST' });
+    if (!r.ok) return toast(r.data?.message || '解封失败', 'err');
+    toast('已解封'); loadAdminSites();
+  });
+  $$('#adminBody [data-adsdel]').forEach((b) => b.onclick = async () => {
+    if (!confirm('确定删除站点 ' + b.dataset.adsdel + '？文件会一并清除，不可恢复。')) return;
+    const r = await api('/api/admin/sites/' + b.dataset.adsdel, { method: 'DELETE' });
+    if (!r.ok) return toast(r.data?.message || '删除失败', 'err');
+    toast('已删除'); loadAdminSites();
+  });
+}
+
 // v4.0: 公告管理
 async function loadAdminAnnouncements() {
   const box = $('#adminBody'); box.innerHTML = '加载中…';
@@ -2426,7 +4464,7 @@ async function loadAdminAnnouncements() {
   if (!data?.announcements) return (box.innerHTML = emptyHTML('admin', '加载失败', ''));
   box.innerHTML = `<div class="list-head"><h2>📢 公告管理</h2><button class="btn btn-sm btn-primary" id="addAnnounceBtn">＋ 新增公告</button></div>
     <div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>内容预览</th><th>状态</th><th>时间</th><th>操作</th></tr></thead><tbody>${
-    data.announcements.map((a) => `<tr><td>${esc(a.content.slice(0, 80))}${a.content.length > 80 ? '…' : ''}</td><td>${a.is_active ? '✅ 活跃' : '❌ 停用'}</td><td class="muted">${esc((a.updated_at || a.created_at || '').slice(0, 16))}</td><td><button class="btn btn-sm btn-danger" data-del-announce="${a.id}">删除</button></td></tr>`).join('')
+    data.announcements.map((a) => `<tr><td>${esc(a.content.slice(0, 80))}${a.content.length > 80 ? '…' : ''}</td><td>${a.is_active ? '✅ 活跃' : '❌ 停用'}</td><td class="muted">${esc(fmtDateTime(a.updated_at || a.created_at))}</td><td><button class="btn btn-sm btn-danger" data-del-announce="${a.id}">删除</button></td></tr>`).join('')
   }</tbody></table></div>`;
   $$('#adminBody [data-del-announce]').forEach((b) => { b.onclick = async () => { if (!confirm('删除公告？')) return; const r = await api(`/api/announcements/${b.dataset.delAnnounce}`, { method: 'DELETE' }); if (r.ok) { toast('已删除'); loadAdminAnnouncements(); } else toast(r.data?.message || '删除失败', 'err'); }; });
   $('#addAnnounceBtn').onclick = () => {
@@ -2685,6 +4723,8 @@ const ERR_LOG = [];
 let lastErrShown = { key: '', at: 0 };
 let lastErr = null;      // 最近一次捕获到的错误（命令面板手动上报用）
 let pendingBug = null;   // 待预填到反馈表单的内容
+// v4.21：从 URL（/tickets?new=1&cat=appeal&site=xxx）带进来的工单预填，供「一键申诉 / 一键举报」直达
+const TICKET_CATS_UI = ['bug', 'suggestion', 'report', 'appeal', 'other'];
 
 const ERR_KIND_LABEL = {
   js: '页面脚本错误',
@@ -2874,6 +4914,18 @@ function installErrorReporter() {
 async function renderTickets() {
   showView('tickets');
   const box = $('#ticketBox'); if (!box) return;
+  // v4.21：支持 /tickets?new=1&cat=appeal&site=slug 直达写入页（qsites 封禁页「一键申诉」用）
+  const qs = new URLSearchParams(location.search);
+  if (qs.get('new') === '1') {
+    const c = qs.get('cat') || '';
+    pendingBug = {
+      category: TICKET_CATS_UI.includes(c) ? c : 'other',
+      site_slug: (qs.get('site') || '').trim(),
+      clip_id: (qs.get('clip') || '').trim()
+    };
+    go('/tickets/new');
+    return;
+  }
   box.innerHTML = `
     <div class="tk-head">
       <div>
@@ -2895,6 +4947,7 @@ async function renderTickets() {
         <option value="bug">程序缺陷</option>
         <option value="suggestion">功能建议</option>
         <option value="report">内容举报</option>
+        <option value="appeal">封禁申诉</option>
         <option value="other">其他</option>
       </select>
       ${state.me?.type === 'user' ? '<label class="tk-mine"><input type="checkbox" id="tkMine"> 只看我的</label>' : ''}
@@ -2952,7 +5005,7 @@ async function renderTicketDetail(code) {
     box.innerHTML = `<div class="crumb"><a href="/tickets" data-link>← 工单中心</a></div><div class="empty">${esc(data?.error === 'forbidden' ? '该工单不可见' : '工单不存在')}</div>`;
     return;
   }
-  const t = data.ticket, replies = data.replies || [], clip = data.clip;
+  const t = data.ticket, replies = data.replies || [], clip = data.clip, site = data.site;
   const canReply = data.can_reply, canManage = data.can_manage;
   box.innerHTML = `
     <div class="tk-detail">
@@ -2967,10 +5020,11 @@ async function renderTicketDetail(code) {
           <span class="muted">#${esc(t.code)}</span>
           <span class="muted">创建者：${esc(t.author_name || '匿名')}</span>
           ${t.assignee_name ? `<span class="muted">责任人：${esc(t.assignee_name)}</span>` : ''}
-          <span class="muted">创建于 ${esc((t.created_at || '').slice(0, 16))}</span>
-          ${t.resolved_at ? `<span class="muted">处理于 ${esc((t.resolved_at || '').slice(0, 16))}</span>` : ''}
+          <span class="muted">创建于 ${esc(fmtDateTime(t.created_at))}</span>
+          ${t.resolved_at ? `<span class="muted">处理于 ${esc(fmtDateTime(t.resolved_at))}</span>` : ''}
         </div>
         ${clip ? `<div class="tk-clip">关联内容：<a href="/c/${esc(clip.clip_id)}" data-link>${esc(clip.title || clip.clip_id)}</a> ${clip.exists ? '' : '<span class="muted">（内容已删除）</span>'}</div>` : ''}
+        ${site ? `<div class="tk-clip">关联站点：<a href="${esc(site.url)}" target="_blank" rel="noopener"><code>${esc(site.slug)}</code></a>${site.title ? '（' + esc(site.title) + '）' : ''} · ${siteStatusBadge(site.status)} ${site.exists ? '' : '<span class="muted">（站点已不存在）</span>'}</div>` : ''}
       </div>
       <div class="tk-section"><h3 class="tk-h3">工单描述</h3><div class="tk-desc">${esc(t.content)}</div></div>
       ${t.admin_note ? `<div class="tk-note"><b>处理说明：</b>${esc(t.admin_note)}</div>` : ''}
@@ -3008,7 +5062,14 @@ async function renderTicketDetail(code) {
           </label>
           <button class="btn btn-sm btn-primary" id="tkSaveBtn">保存</button>
         </div>
-        ${clip && clip.exists ? `<button class="btn btn-sm btn-danger" id="tkDelClipBtn">删除关联内容（连带评论/读者/其它举报）</button>` : ''}
+        ${clip && clip.exists && (myPerm('delete_public_clips') || myPerm('delete_private_clips')) ? `<button class="btn btn-sm btn-danger" id="tkDelClipBtn">删除关联内容（连带评论/读者/其它举报）</button>` : ''}
+        ${site && site.exists ? `
+          <div class="tk-admin-row">
+            ${myPerm('ban_sites') ? (site.status === 'suspended'
+              ? `<button class="btn btn-sm" id="tkUnsusSiteBtn">✅ 申诉成立：解除封禁站点 ${esc(site.slug)}</button>`
+              : `<button class="btn btn-sm btn-danger" id="tkSusSiteBtn">封禁站点 ${esc(site.slug)}（立即 403）</button>`) : ''}
+            ${myPerm('delete_sites') ? `<button class="btn btn-sm btn-danger" id="tkDelSiteBtn">删除该站点（含全部文件）</button>` : ''}
+          </div>` : ''}
         <button class="btn btn-sm btn-ghost" id="tkDelBtn">删除工单</button>
       </div>` : ''}
     </div>`;
@@ -3028,6 +5089,20 @@ async function renderTicketDetail(code) {
     const r = await api('/api/tickets/' + encodeURIComponent(code), { method: 'PATCH', body: JSON.stringify({ action: 'delete_clip' }) });
     if (r.ok) { toast('已删除内容', 'ok'); renderTicketDetail(code); } else toast('删除失败', 'err');
   };
+  const ssb = $('#tkSusSiteBtn'); if (ssb) ssb.onclick = async () => {
+    if (!confirm('确认封禁站点 ' + site.slug + '？访问将立即返回 403，站长不能再改动内容。')) return;
+    const r = await api('/api/tickets/' + encodeURIComponent(code), { method: 'PATCH', body: JSON.stringify({ action: 'suspend_site', reason: '工单 ' + code + ' 举报成立' }) });
+    if (r.ok) { toast('已封禁站点', 'ok'); renderTicketDetail(code); } else toast(r.data?.message || '封禁失败', 'err');
+  };
+  const usb = $('#tkUnsusSiteBtn'); if (usb) usb.onclick = async () => {
+    const r = await api('/api/sites/' + encodeURIComponent(site.slug) + '/unsuspend', { method: 'POST' });
+    if (r.ok) { toast('已解封站点', 'ok'); renderTicketDetail(code); } else toast(r.data?.message || '解封失败', 'err');
+  };
+  const dsb = $('#tkDelSiteBtn'); if (dsb) dsb.onclick = async () => {
+    if (!confirm('确认删除站点 ' + site.slug + ' 及其全部文件？不可恢复。')) return;
+    const r = await api('/api/tickets/' + encodeURIComponent(code), { method: 'PATCH', body: JSON.stringify({ action: 'delete_site' }) });
+    if (r.ok) { toast('已删除站点', 'ok'); renderTicketDetail(code); } else toast('删除失败', 'err');
+  };
   const db = $('#tkDelBtn'); if (db) db.onclick = async () => {
     if (!confirm('确认删除这条工单？不可恢复。')) return;
     const r = await api('/api/tickets/' + encodeURIComponent(code), { method: 'DELETE' });
@@ -3039,20 +5114,34 @@ async function renderNewTicket() {
   showView('tickets');
   const box = $('#ticketBox'); if (!box) return;
   const pf = pendingBug || {}; pendingBug = null;
-  const preCat = ['bug', 'suggestion', 'other'].includes(pf.category) ? pf.category : 'bug';
+  // v4.21：从「一键申诉 / 悬浮举报」链接进来时带 site_slug / clip_id，
+  // 此时才额外追加「封禁申诉 / 内容举报」选项 —— 两者互斥，按链接里的 cat 决定，
+  // 且必须真的加进 <select>（否则 cat.value 赋不上值，会掉回默认项，举报就变成了申诉）。
+  const target = pf.site_slug ? { kind: 'site', id: pf.site_slug } : (pf.clip_id ? { kind: 'clip', id: pf.clip_id } : null);
+  const isAppeal = !!target && pf.category === 'appeal';
+  const isReport = !!target && pf.category === 'report';
+  const extraOpt = isAppeal ? '<option value="appeal">封禁申诉</option>' : (isReport ? '<option value="report">内容举报</option>' : '');
+  const allowed = ['bug', 'suggestion', 'other'].concat(extraOpt ? [(isReport ? 'report' : 'appeal')] : []);
+  const preCat = allowed.includes(pf.category) ? pf.category : 'bug';
+  const REASON_OPTS = ['含违法违规内容', '钓鱼 / 诈骗', '色情低俗', '侵犯版权', '恶意广告', '其它'];
   box.innerHTML = `
     <div class="tk-detail">
       <div class="crumb"><a href="/tickets" data-link>← 工单中心</a></div>
       <h1 class="clip-title">🎫 发起工单</h1>
       <p class="muted">描述你遇到的问题、建议或遇到的情况。所有工单公开可见，管理员会逐一处理。支持 Markdown 格式。</p>
+      ${isAppeal ? `<div class="tk-appeal-note">📮 你正在申诉：${target.kind === 'site' ? '站点 <code>' + esc(target.id) + '</code>' : '片段 <code>' + esc(target.id) + '</code>'}。请在下方说明申诉理由，管理员核实后会恢复。</div>` : ''}
+      ${isReport ? `<div class="tk-appeal-note">⚠ 你正在举报：${target.kind === 'site' ? '站点 <code>' + esc(target.id) + '</code>' : '片段 <code>' + esc(target.id) + '</code>'}。请写清楚违规之处，管理员核实后会下架 / 封禁。</div>` : ''}
       <div class="tk-form-row"><label>分类
         <select id="ntCat" class="input-sm">
           <option value="bug">程序缺陷</option>
           <option value="suggestion">功能建议</option>
           <option value="other">其他</option>
+          ${extraOpt}
         </select></label>
         <span class="muted" id="ntCatHint"></span>
       </div>
+      ${isReport ? `<div class="tk-form-row"><label>举报原因
+        <select id="ntReason" class="input-sm">${REASON_OPTS.map((r) => `<option value="${esc(r)}">${esc(r)}</option>`).join('')}</select></label></div>` : ''}
       <div class="tk-form-row"><label>标题（选填）
         <input id="ntTitle" class="input" placeholder="一句话概括" maxlength="100">
       </label></div>
@@ -3084,7 +5173,7 @@ async function renderNewTicket() {
   ta.value = pf.content || '';
   if (preCat === 'bug' && !ta.value.trim()) ta.value = bugReportContent(null);
   cat.value = preCat;
-  const hint = { bug: '🐞 已自动附带环境信息，补充「我当时的操作 / 期望结果」即可', suggestion: '💡 说说你的想法或改进建议', other: '💬 其它问题或咨询' };
+  const hint = { bug: '🐞 已自动附带环境信息，补充「我当时的操作 / 期望结果」即可', suggestion: '💡 说说你的想法或改进建议', other: '💬 其它问题或咨询', appeal: '📮 说明你认为属于误判的理由，管理员核实后会解封站点 / 恢复内容', report: '⚠ 写清楚违规之处，管理员核实后会下架 / 封禁该对象' };
   $('#ntCatHint').textContent = hint[preCat] || '';
   cat.onchange = () => {
     const c = cat.value;
@@ -3097,8 +5186,16 @@ async function renderNewTicket() {
   $('#ntSave').onclick = async () => {
     const category = cat.value, title = $('#ntTitle').value.trim(), content = ta.value.trim();
     if (!content) return toast('请填写详细描述', 'err');
+    const payload = { category, title, content };
+    // 申诉 / 举报都要带上具体对象，服务端据此关联站点 / 片段（管理员才能一键解封 / 下架）
+    if (category === 'appeal' || category === 'report') {
+      if (!target) return toast('缺少' + (category === 'appeal' ? '申诉' : '举报') + '对象，请从原页面的快捷入口进入', 'err');
+      payload.detail = content;
+      if (category === 'report') payload.reason = ($('#ntReason') && $('#ntReason').value) || '其它';
+      if (target.kind === 'site') payload.site_slug = target.id; else payload.clip_id = target.id;
+    }
     const btn = $('#ntSave'); btn.disabled = true; btn.textContent = '提交中…';
-    const r = await api('/api/tickets', { method: 'POST', body: JSON.stringify({ category, title, content }) });
+    const r = await api('/api/tickets', { method: 'POST', body: JSON.stringify(payload) });
     btn.disabled = false; btn.textContent = '提交工单';
     if (r.ok) { toast('工单已提交', 'ok'); go('/tickets/' + r.data.code); }
     else toast(r.data?.message || r.data?.error || '提交失败', 'err');
@@ -3214,17 +5311,19 @@ function renderCodeViewer() {
   const view = $('#codeView');
   if (state.codeEditing) {
     view.innerHTML = `<textarea id="codeEditor" class="code-editor" spellcheck="false">${esc(cur.content)}</textarea><div id="codePreviewBox" class="code-preview hidden"></div>`;
-    $('#codeEditBtn') && ($('#codeEditBtn').onclick = () => { state.codeEditing = true; renderCodeViewer(); });
-    $('#codeCancelBtn').onclick = () => { state.codeEditing = false; renderCodeViewer(); };
-    $('#codePreviewBtn').onclick = () => {
-      const pb = $('#codePreviewBox'); pb.classList.toggle('hidden');
+    const editBtn2 = $('#codeEditBtn'); if (editBtn2) editBtn2.onclick = () => { state.codeEditing = true; renderCodeViewer(); };
+    // v4.25（工单 TK6CA56C02）：这些按钮只在 codeEditing 分支渲染，但 view_code 且无 edit_code
+    // 的用户理论上不会进此分支；为绝对安全，统一做空判，避免 $(...) 为 null 时 .onclick 崩溃。
+    const cancelBtn = $('#codeCancelBtn'); if (cancelBtn) cancelBtn.onclick = () => { state.codeEditing = false; renderCodeViewer(); };
+    const previewBtn = $('#codePreviewBtn'); if (previewBtn) previewBtn.onclick = () => {
+      const pb = $('#codePreviewBox'); if (!pb) return; pb.classList.toggle('hidden');
       if (!pb.classList.contains('hidden')) {
         const txt = $('#codeEditor').value;
         if (cur.path.endsWith('.md')) renderMd(pb, txt);
         else pb.innerHTML = '<pre class="code-pre">' + esc(txt) + '</pre>';
       }
     };
-    $('#codeSaveBtn').onclick = applyOrSubmit;
+    const saveBtn = $('#codeSaveBtn'); if (saveBtn) saveBtn.onclick = applyOrSubmit;
   } else {
     const lang = (cur.path.split('.').pop() || '').toLowerCase();
     const pre = `<pre class="code-pre"><code class="language-${lang}" id="codeCode">${esc(cur.content)}</code></pre>`;
@@ -3537,7 +5636,9 @@ async function submitAuth(e) {
   // 注册时携带 URL 中的邀请码
   const invite = new URLSearchParams(location.search).get('invite_code') || '';
   if (authMode === 'register') {
-    const r = await api('/api/auth/password/register', { method: 'POST', body: JSON.stringify({ username, password, invite_code: invite }) });
+    // v4.28：携带本机设备标识，配合后端「同设备 1h 内仅可注册一个账号」
+    let did = ''; try { did = localStorage.getItem('mdqp_device_id') || ''; if (!did) { did = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(36).slice(2)); localStorage.setItem('mdqp_device_id', did); } } catch { }
+    const r = await api('/api/auth/password/register', { method: 'POST', body: JSON.stringify({ username, password, invite_code: invite, device_id: did }) });
     if (r.ok) { toast('注册成功，已登录'); location.reload(); }
     else if (errBox) { errBox.textContent = r.data?.message || r.data?.error || '注册失败'; errBox.classList.remove('hidden'); }
   } else {
@@ -3691,6 +5792,42 @@ function setupRefreshGuide() {
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !m.classList.contains('hidden')) hideRefreshGuide(); });
 }
 
+// ============ 伪装模式（上课用：把标签页伪装成自定义站点） ============
+// 仅改本机浏览器标签的标题与 favicon，不涉及服务端；localStorage 持久化。
+// 图标描述符：preset:vj | emoji:📁 | url:https://...  标题存 mdqp_disguise_title
+let _disguiseOrig = null;
+function buildDisguiseFavicon(desc) {
+  if (desc && desc.startsWith('url:')) return desc.slice(4);
+  if (desc && desc.startsWith('emoji:')) {
+    const ch = desc.slice(6);
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#eceff1"/><text x="32" y="46" font-size="40" text-anchor="middle">' + ch + '</text></svg>';
+    return 'data:image/svg+xml,' + encodeURIComponent(svg);
+  }
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#1565c0"/><text x="32" y="45" font-family="Arial,sans-serif" font-size="34" font-weight="bold" fill="#ffffff" text-anchor="middle">VJ</text></svg>';
+  return 'data:image/svg+xml,' + encodeURIComponent(svg);
+}
+function applyDisguise(on) {
+  try {
+    if (!_disguiseOrig) {
+      _disguiseOrig = { title: document.title };
+      _disguiseOrig.icons = Array.from(document.querySelectorAll('link[rel*="icon"]')).map((l) => ({ rel: l.rel, href: l.href, sizes: l.sizes ? l.sizes.value : '' }));
+    }
+    localStorage.setItem('mdqp_disguise', on ? '1' : '0');
+    if (on) {
+      const title = localStorage.getItem('mdqp_disguise_title') || 'Virtual Judge';
+      const icon = localStorage.getItem('mdqp_disguise_icon') || 'preset:vj';
+      document.title = title;
+      const fav = (window.__buildDisguiseFavicon ? window.__buildDisguiseFavicon(icon) : buildDisguiseFavicon(icon));
+      document.querySelectorAll('link[rel*="icon"]').forEach((l) => l.remove());
+      const l = document.createElement('link'); l.rel = 'icon'; l.href = fav; document.head.appendChild(l);
+    } else {
+      document.title = _disguiseOrig.title;
+      document.querySelectorAll('link[rel*="icon"]').forEach((l) => l.remove());
+      _disguiseOrig.icons.forEach((o) => { const l = document.createElement('link'); l.rel = o.rel; l.href = o.href; if (o.sizes) l.sizes = o.sizes; document.head.appendChild(l); });
+    }
+  } catch (e) { /* ignore */ }
+}
+
 // ============ 设置弹窗（通用 / 账号与安全） ============
 function openSettingsModal() {
   const me = state.me; if (!me || me.type !== 'user') return;
@@ -3698,7 +5835,29 @@ function openSettingsModal() {
   // 通用
   $('#setSig').value = me.signature || '';
   $('#setBio').value = me.bio || '';
+  if ($('#setTag')) $('#setTag').value = me.tag || '';
   $('#setTheme').value = localStorage.getItem('mdqp_theme') || 'auto';
+  // v4.32: 昵称 + 头像
+  if ($('#setDisplayName')) $('#setDisplayName').value = me.display_name || me.name || '';
+  if ($('#setAvatarPreview')) $('#setAvatarPreview').innerHTML = avatarHtml(me.avatar, me.name);
+  if ($('#setDisguise')) $('#setDisguise').checked = localStorage.getItem('mdqp_disguise') === '1';
+  if ($('#setDisguiseTitle')) $('#setDisguiseTitle').value = localStorage.getItem('mdqp_disguise_title') || 'Virtual Judge';
+  if ($('#setDisguisePresets')) {
+    const cur = localStorage.getItem('mdqp_disguise_icon') || 'preset:vj';
+    $('#setDisguisePresets').querySelectorAll('.emoji-pick').forEach((b) => b.classList.toggle('on', b.dataset.ic === cur));
+  }
+  if ($('#setEmojiRow') && !$('#setEmojiRow').dataset.built) {
+    const PRESETS = ['🙂', '😎', '🐱', '🐶', '🦊', '🚀', '⚡', '🌟', '🔥', '🍉', '🌈', '👻', '🤖', '🐼'];
+    $('#setEmojiRow').innerHTML = PRESETS.map((e) => `<button type="button" class="emoji-pick" data-em="${e}">${e}</button>`).join('');
+    $('#setEmojiRow').dataset.built = '1';
+    $('#setEmojiRow').querySelectorAll('.emoji-pick').forEach((b) => {
+      b.onclick = async () => {
+        const r = await api('/api/me', { method: 'PATCH', body: JSON.stringify({ avatar: 'emoji:' + b.dataset.em }) });
+        if (r.ok) { toast('头像已更新'); if (state.me) state.me.avatar = 'emoji:' + b.dataset.em; await loadMe(); renderMe(); }
+        else toast('设置失败：' + (r.data?.error || r.status), 'err');
+      };
+    });
+  }
   // 账号与安全
   $('#secPwText').textContent = me.has_password ? '已设置' : '未设置（cpoauth 宕机时无法进入）';
   $('#secCpText').textContent = me.cpoauth_bound ? '已绑定' : '未绑定';
@@ -3745,11 +5904,64 @@ function setupSettingsModal() {
   $('#setTabGeneral').onclick = () => showSettingsTab('general');
   $('#setTabSecurity').onclick = () => showSettingsTab('security');
   $('#setSaveGeneral').onclick = async () => {
-    const sig = $('#setSig').value, bio = $('#setBio').value, theme = $('#setTheme').value;
+    const sig = $('#setSig').value, bio = $('#setBio').value, theme = $('#setTheme').value, tag = $('#setTag') ? $('#setTag').value : '';
+    const dn = $('#setDisplayName') ? $('#setDisplayName').value.trim() : '';
     localStorage.setItem('mdqp_theme', theme); applyTheme(theme);
-    const r = await api('/api/me', { method: 'PATCH', body: JSON.stringify({ signature: sig, bio }) });
-    if (r.ok) { toast('已保存'); if (state.me) { state.me.signature = sig; state.me.bio = bio; } renderMe(); }
-    else toast('保存失败：' + (r.data?.error || r.status), 'err');
+    const body = { signature: sig, bio, tag };
+    if (dn) body.display_name = dn;
+    const r = await api('/api/me', { method: 'PATCH', body: JSON.stringify(body) });
+    if (r.ok) {
+      toast('已保存');
+      if (state.me) { state.me.signature = sig; state.me.bio = bio; state.me.tag = tag; if (dn) { state.me.display_name = dn; state.me.name = dn; } }
+      await loadMe(); renderMe();
+    }
+    else toast('保存失败：' + (r.data?.message || r.data?.error || r.status), 'err');
+  };
+  // v4.32: 头像用 URL 存储（不占 KV 空间，规避上传体积限制）
+  const avUrlBtn = $('#setAvatarUrlBtn');
+  if (avUrlBtn) avUrlBtn.onclick = async () => {
+    const url = ($('#setAvatarUrl').value || '').trim();
+    if (!/^https?:\/\//.test(url)) { toast('请输入合法的图片 URL（http/https）', 'err'); return; }
+    const r = await api('/api/me', { method: 'PATCH', body: JSON.stringify({ avatar: url }) });
+    if (r.ok) { toast('头像已更新'); if (state.me) state.me.avatar = url; $('#setAvatarPreview').innerHTML = avatarHtml(url, state.me.name); await loadMe(); renderMe(); }
+    else toast('设置失败：' + (r.data?.error || r.status), 'err');
+  };
+  // v4.32: 清除头像
+  const avClear = $('#setAvatarClear');
+  if (avClear) avClear.onclick = async () => {
+    const r = await api('/api/me', { method: 'PATCH', body: JSON.stringify({ avatar: '' }) });
+    if (r.ok) { toast('已清除头像'); if (state.me) state.me.avatar = ''; $('#setAvatarPreview').innerHTML = avatarHtml('', state.me.name); await loadMe(); renderMe(); }
+    else toast('清除失败：' + (r.data?.error || r.status), 'err');
+  };
+  // v4.32: 预设 emoji 行展开
+  const avEmojiBtn = $('#setAvatarEmojiBtn');
+  if (avEmojiBtn) avEmojiBtn.onclick = () => { const row = $('#setEmojiRow'); if (row) row.classList.toggle('hidden'); };
+  // v4.32: 伪装模式开关
+  const dis = $('#setDisguise');
+  if (dis) dis.onchange = () => { applyDisguise(dis.checked); toast(dis.checked ? '已开启伪装模式' : '已关闭伪装模式'); };
+  // 伪装标题（实时保存 + 生效）
+  const disTitle = $('#setDisguiseTitle');
+  if (disTitle) disTitle.oninput = () => { localStorage.setItem('mdqp_disguise_title', disTitle.value.trim() || 'Virtual Judge'); if (localStorage.getItem('mdqp_disguise') === '1') applyDisguise(true); };
+  // 伪装图标预设点选
+  if ($('#setDisguisePresets')) {
+    $('#setDisguisePresets').querySelectorAll('.emoji-pick').forEach((b) => {
+      b.onclick = () => {
+        localStorage.setItem('mdqp_disguise_icon', b.dataset.ic);
+        $('#setDisguisePresets').querySelectorAll('.emoji-pick').forEach((x) => x.classList.toggle('on', x === b));
+        if (localStorage.getItem('mdqp_disguise') === '1') applyDisguise(true);
+        toast('图标已设为：' + b.dataset.ic);
+      };
+    });
+  }
+  // 伪装图标自定义 URL
+  const disIconUrlBtn = $('#setDisguiseIconUrlBtn');
+  if (disIconUrlBtn) disIconUrlBtn.onclick = () => {
+    const u = ($('#setDisguiseIconUrl').value || '').trim();
+    if (!/^https?:\/\//.test(u)) { toast('请输入合法的图标 URL（http/https）', 'err'); return; }
+    localStorage.setItem('mdqp_disguise_icon', 'url:' + u);
+    if ($('#setDisguisePresets')) $('#setDisguisePresets').querySelectorAll('.emoji-pick').forEach((x) => x.classList.remove('on'));
+    if (localStorage.getItem('mdqp_disguise') === '1') applyDisguise(true);
+    toast('已使用自定义图标 URL');
   };
   $('#secSetPw').onclick = () => { closeSettingsModal(); openSetPwModal(); };
   $('#secSourceEdit').onclick = () => { closeSettingsModal(); showSourceModal(); };
@@ -3859,6 +6071,862 @@ function setupNotifBell() {
   });
 }
 
+// ==================== 聊天系统 (v4.17) ====================
+let chatState = { activeId: null, list: [], byId: {}, msgs: [], limit: 50, loadingOlder: false, seen: {} };
+
+function debounce(fn, ms) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
+
+/** 等效字数统计（与后端 countChars 对齐）：非 ASCII=1，字母/数字/标点=0.5 */
+function eqChars(text) {
+  if (!text) return 0;
+  let s = 0;
+  for (const ch of String(text)) {
+    if (ch.charCodeAt(0) > 127) s += 1;
+    else if (/[a-zA-Z0-9]/.test(ch)) s += 0.5;
+    else s += 0.5;
+  }
+  return Math.ceil(s);
+}
+
+/** v4.18：单条聊天消息等效字数上限（与后端 CHAT_MSG_MAX 对齐），超过直接禁止发送 */
+const CHAT_MAX = 150;
+
+function chatModalOpen(html) {
+  let m = document.getElementById('chatModal');
+  if (!m) { m = document.createElement('div'); m.id = 'chatModal'; m.className = 'modal-overlay hidden'; document.body.appendChild(m); }
+  m.innerHTML = `<div class="modal chat-modal" role="dialog" aria-modal="true"><button class="modal-close chat-modal-close" aria-label="关闭">✕</button><div class="modal-body">${html}</div></div>`;
+  m.classList.remove('hidden'); m.classList.add('show');
+  m.onclick = (e) => { if (e.target === m) chatModalClose(); };
+  const x = m.querySelector('.chat-modal-close'); if (x) x.onclick = chatModalClose;
+  return m;
+}
+function chatModalClose() { const m = document.getElementById('chatModal'); if (m) { m.classList.remove('show'); m.classList.add('hidden'); } }
+
+function getChatCache(id) { try { const s = localStorage.getItem('mdqp_chat_' + id); return s ? JSON.parse(s) : null; } catch (e) { return null; } }
+function saveChatCache() { try { if (chatState.activeId) localStorage.setItem('mdqp_chat_' + chatState.activeId, JSON.stringify(chatState.msgs.slice(-chatState.limit))); } catch (e) {} }
+
+// ---------- v4.18：桌面通知（新消息浏览器通知） ----------
+function chatNotifySupported() { return typeof window !== 'undefined' && 'Notification' in window; }
+
+function updateChatNotifyBtn() {
+  const b = document.getElementById('chatNotifBtn');
+  const hint = document.getElementById('chatNotifHint');
+  if (!b) return;
+  if (!chatNotifySupported()) {
+    b.textContent = '🔕'; b.title = '当前浏览器不支持桌面通知';
+    if (hint) { hint.textContent = '当前浏览器不支持桌面通知，新消息只在页面内提示。'; hint.classList.remove('hidden'); }
+    return;
+  }
+  const p = Notification.permission;
+  b.textContent = p === 'granted' ? '🔔' : '🔕';
+  b.title = p === 'granted' ? '桌面通知已开启' : (p === 'denied' ? '通知被浏览器阻止' : '点击开启桌面通知');
+  if (!hint) return;
+  if (p === 'granted') hint.classList.add('hidden');
+  else if (p === 'denied') { hint.innerHTML = '🔕 通知已被浏览器阻止：点地址栏左侧的 🔒 / ⓘ 图标 → 通知 → 允许。'; hint.classList.remove('hidden'); }
+  else { hint.innerHTML = '🔔 点右侧铃铛开启桌面通知，新消息会弹提醒。'; hint.classList.remove('hidden'); }
+}
+
+/** manual=true 表示用户主动点击（用于给出 toast 反馈） */
+function requestChatNotify(manual) {
+  if (!chatNotifySupported()) { if (manual) toast('当前浏览器不支持桌面通知', 'err'); updateChatNotifyBtn(); return; }
+  const p0 = Notification.permission;
+  if (p0 === 'granted') { if (manual) toast('桌面通知已开启 🔔'); updateChatNotifyBtn(); return; }
+  if (p0 === 'denied') { if (manual) toast('通知已被浏览器阻止，请在浏览器设置中允许', 'err'); updateChatNotifyBtn(); return; }
+  try {
+    const r = Notification.requestPermission((res) => {
+      updateChatNotifyBtn();
+      if (manual) toast(res === 'granted' ? '已开启桌面通知 🔔' : '未开启桌面通知', res === 'granted' ? 'ok' : 'err');
+    });
+    if (r && r.then) r.then((res) => {
+      updateChatNotifyBtn();
+      if (manual) toast(res === 'granted' ? '已开启桌面通知 🔔' : '未开启桌面通知', res === 'granted' ? 'ok' : 'err');
+    });
+  } catch (e) { /* 老浏览器可能同步抛错 */ }
+}
+
+/** 打开聊天页时检查权限：未决定则主动申请（部分浏览器要求用户手势，故同时保留铃铛按钮） */
+function ensureNotifyPermission() {
+  if (!chatNotifySupported()) { updateChatNotifyBtn(); return; }
+  if (Notification.permission === 'default') requestChatNotify(false);
+  updateChatNotifyBtn();
+}
+
+/** 发一条系统级浏览器通知（点击可聚焦窗口并跳到该会话）
+ *  v4.21：tag 带上消息 id —— 以前同会话复用同一 tag，后到的消息会**静默顶掉**前一条，
+ *  表现就是「连发几条只看到最后一条，甚至像通知丢了」。 */
+function pushChatNotice(conv, content, senderName, msgId) {
+  if (!chatNotifySupported() || Notification.permission !== 'granted') return;
+  const title = conv.type === 'single'
+    ? (conv.other ? (conv.other.display_name || conv.other.username) : '新消息')
+    : (conv.name || '群聊');
+  const body = (conv.type === 'group' && senderName ? senderName + '：' : '') + String(content || '').replace(/\s+/g, ' ').slice(0, 80);
+  try {
+    const n = new Notification(title, { body, tag: 'mdqp-chat-' + conv.id + '-' + (msgId || Date.now()) });
+    n.onclick = () => { try { window.focus(); } catch (e) {} go('/chat?c=' + conv.id); try { n.close(); } catch (e) {} };
+  } catch (e) { /* 移动端等环境可能不支持构造，忽略 */ }
+}
+
+/** v4.21：统一的新消息判定——聊天页与全局轮询共用同一份逻辑（此前只有聊天页会通知） */
+function checkChatNotices(list) {
+  if (!state.me || state.me.type !== 'user') return;
+  const meId = state.me.userId;
+  for (const c of (list || [])) {
+    const lastId = c.last_id || (c.last_message && c.last_message.id) || 0;
+    if (!lastId) continue;
+    const prev = chatState.seen[c.id];
+    chatState.seen[c.id] = lastId;
+    if (prev === undefined || lastId <= prev) continue;   // 首次建立基线 / 没有新消息
+    const senderId = c.sender_id !== undefined ? c.sender_id : (c.last_message && c.last_message.sender_id);
+    const content = c.content !== undefined ? c.content : (c.last_message && c.last_message.content);
+    const senderName = c.sender_name || (c.last_message && c.last_message.sender_name) || '';
+    if (senderId != null && String(senderId) === String(meId)) continue;  // 自己发的
+    if (c.muted) continue;                                                // 免打扰
+    if (chatState.activeId === c.id && !document.hidden) continue;        // 正盯着这个会话看
+    pushChatNotice(c, content, senderName, lastId);
+  }
+}
+
+/** 超长消息：弹窗提醒改用剪贴板，并提供一键跳 /new */
+function openChatTooLongModal(text, n) {
+  const m = chatModalOpen(`
+    <h3>✂️ 消息太长啦</h3>
+    <p class="muted" style="margin:6px 0 10px">本条约 <b>${n}</b> 等效字符，超过单条上限 <b>${CHAT_MAX}</b>。聊天不支持这么长的内容 —— 把它存成剪贴板，再把链接发出去即可。</p>
+    <div class="chat-long-actions">
+      <button class="btn btn-primary" id="ctNew">＋ 去新建剪贴板</button>
+      <button class="btn" id="ctCopy">📋 复制内容</button>
+      <button class="btn btn-ghost" id="ctCancel">取消</button>
+    </div>`);
+  m.querySelector('#ctNew').onclick = () => {
+    // 复用 /new 编辑器的草稿键与格式，跳过去后会出现「恢复草稿」提示
+    try { localStorage.setItem('mdqp_draft_new', JSON.stringify({ title: '', content: text, at: Date.now() })); } catch (e) {}
+    chatModalClose(); go('/new');
+  };
+  m.querySelector('#ctCopy').onclick = async () => {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(text);
+      else { const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); }
+      toast('已复制到剪贴板，去 /new 粘贴即可');
+    } catch (e) { toast('复制失败，请手动复制', 'err'); }
+  };
+  m.querySelector('#ctCancel').onclick = chatModalClose;
+}
+
+async function renderChat() {
+  showView('chat');
+  if (window.__chatTimer) { clearInterval(window.__chatTimer); window.__chatTimer = null; }
+  if (!state.me || state.me.type !== 'user') {
+    document.getElementById('chatRoot').innerHTML = '<div class="chat-login"><div class="chat-empty-illo">🔒</div><p>聊天功能需要登录后使用</p><button class="btn btn-primary" id="chatLogin">🔑 登录</button></div>';
+    const b = document.getElementById('chatLogin'); if (b) b.onclick = () => openAuthModal('login');
+    return;
+  }
+  const sp = new URLSearchParams(location.search);
+  const openId = sp.get('c') ? parseInt(sp.get('c'), 10) : null;
+  document.getElementById('chatRoot').innerHTML = `
+    <div class="chat-layout" id="chatLayout">
+      <aside class="chat-sidebar">
+        <div class="chat-sidebar-head">
+          <div class="chat-search"><input id="chatSearch" class="input input-sm" placeholder="🔍 搜索会话 / 用户名 / UID"></div>
+          <button class="icon-btn" id="chatNotifBtn" title="桌面通知">🔔</button>
+          <button class="btn btn-sm btn-primary" id="chatNewSingle" title="发起私聊">＋私聊</button>
+          <button class="btn btn-sm" id="chatNewGroup" title="新建群聊">＋群聊</button>
+        </div>
+        <div class="chat-notif-hint hidden" id="chatNotifHint"></div>
+        <div class="chat-list" id="chatList"></div>
+      </aside>
+      <section class="chat-main" id="chatMain">
+        <div class="chat-empty"><div class="chat-empty-illo">💬</div><p>选择一个会话开始聊天，或点「＋私聊 / ＋群聊」发起新对话</p></div>
+      </section>
+    </div>`;
+  $('#chatNewSingle').onclick = openChatSearchModal;
+  $('#chatNewGroup').onclick = openCreateGroupModal;
+  $('#chatSearch').addEventListener('input', () => renderChatList());
+  $('#chatNotifBtn').onclick = () => requestChatNotify(true);
+  ensureNotifyPermission();
+  chatState.activeId = null; chatState.list = []; chatState.byId = {}; chatState.msgs = []; chatState.limit = 50;
+  await loadChatConversations();
+  if (openId) await openChatConv(openId);
+  else if (chatState.list.length) await openChatConv(chatState.list[0].id);
+  startChatPoll();
+}
+
+async function loadChatConversations(opts = {}) {
+  const { data } = await api('/api/chat/conversations', opts.silent ? { silent: true } : undefined);
+  chatState.list = (data && data.conversations) || [];
+  chatState.byId = {}; chatState.list.forEach((c) => { chatState.byId[c.id] = c; });
+  renderChatList();
+}
+
+function renderChatList() {
+  const el = document.getElementById('chatList'); if (!el) return;
+  const q = (document.getElementById('chatSearch') ? document.getElementById('chatSearch').value : '').trim().toLowerCase();
+  let list = chatState.list;
+  if (q) list = list.filter((c) => {
+    const t = c.type === 'single' ? (c.other ? (c.other.display_name || c.other.username) : '私聊') : (c.name || '群聊');
+    return t.toLowerCase().includes(q);
+  });
+  if (!list.length) { el.innerHTML = '<div class="chat-list-empty muted">还没有会话，点「＋私聊 / ＋群聊」开始</div>'; return; }
+  el.innerHTML = list.map((c) => {
+    const active = c.id === chatState.activeId ? ' active' : '';
+    const title = c.type === 'single' ? (c.other ? (c.other.display_name || c.other.username) : '私聊') : (c.name || '群聊');
+    const avatar = c.type === 'single' && c.other ? avatarHtml(c.other.avatar, c.other.display_name || c.other.username) : '<span class="avatar avatar-txt">👥</span>';
+    // v4.18：群聊最后一条消息带发送者前缀，方便一眼看出是谁说的
+    const who = (c.type === 'group' && c.last_message && c.last_message.sender_name) ? c.last_message.sender_name + '：' : '';
+    const raw = c.last_message ? who + String(c.last_message.content).replace(/\s+/g, ' ') : '暂无消息';
+    const last = raw.length > 28 ? raw.slice(0, 28) + '…' : raw;
+    // 免打扰会话：未读不冒红点，改为静默小圆点
+    const muted = !!c.muted;
+    const unread = c.unread > 0
+      ? (muted ? '<span class="chat-unread-dot" title="有新消息（免打扰）"></span>' : `<span class="chat-unread">${c.unread > 99 ? '99+' : c.unread}</span>`)
+      : '';
+    const tag = c.is_global ? '<span class="chat-tag">总群</span>' : (c.type === 'group' ? '<span class="chat-tag chat-tag-group">群</span>' : '');
+    const muteIco = muted ? '<span class="chat-mute-ico" title="免打扰">🔕</span>' : '';
+    return `<button class="chat-item${active}" data-id="${c.id}">${avatar}<div class="chat-item-body"><div class="chat-item-top"><span class="chat-item-name">${esc(title)}</span>${tag}${muteIco}${unread}</div><div class="chat-item-last muted">${esc(last)}</div></div></button>`;
+  }).join('');
+  el.querySelectorAll('.chat-item').forEach((b) => b.onclick = () => openChatConv(parseInt(b.dataset.id, 10)));
+}
+
+async function openChatConv(id) {
+  const conv = chatState.byId[id];
+  chatState.activeId = id;
+  if (conv) chatState.limit = conv.limit || 50;
+  chatState.msgs = [];
+  let main = document.getElementById('chatMain');
+  // v4.25（工单 TK2C0ADAED / TK8AEA3950）：入口可能来自非聊天页（如个人主页「私聊」、
+  // 群聊卡片），此时聊天视图尚未挂载、#chatMain 不存在，直接 null.innerHTML 会崩溃。
+  // 先渲染聊天框架（renderChat 同步建出 #chatMain 后异步拉会话），再打开目标会话。
+  if (!main) { await renderChat(); main = document.getElementById('chatMain'); }
+  if (!main) return; // 极端异常下安全退出，不再抛错中断
+  main.innerHTML = renderChatMainSkeleton(conv);
+  document.getElementById('chatLayout').classList.add('chat-conv-open');
+  bindChatMain(conv);
+  const cache = getChatCache(id);
+  if (cache && cache.length) { chatState.msgs = cache; renderChatMessages(); scrollChatBottom(); }
+  await loadChatMessages(id, null);
+  await api('/api/chat/conversations/' + id + '/read', { method: 'POST', body: '{}' });
+  await loadChatConversations();
+}
+
+function renderChatMainSkeleton(conv) {
+  const title = conv ? (conv.type === 'single' ? (conv.other ? (conv.other.display_name || conv.other.username) : '私聊') : (conv.name || '群聊')) : '会话';
+  const subtitle = conv ? (conv.type === 'single'
+    ? (conv.other ? '@' + esc(conv.other.username) + ' · UID ' + conv.other.id : '')
+    : (conv.is_global ? '全站总群 · ' : '群聊 · ') + (conv.member_count || 0) + ' 人' + (conv.is_global ? ' · 不可退出 / 解散' : '')) : '';
+  const avatar = conv && conv.type === 'single' && conv.other ? avatarHtml(conv.other.avatar, conv.other.display_name || conv.other.username) : (conv && conv.type === 'group' ? '<span class="avatar avatar-txt">👥</span>' : '');
+  const profileLink = (conv && conv.type === 'single' && conv.other) ? `<a class="chat-title-name" href="/u/${conv.other.id}" data-link>${esc(title)}</a>` : `<span class="chat-title-name">${esc(title)}</span>`;
+  const isGroup = conv && conv.type === 'group';
+  const addBtn = (isGroup && !conv.is_global) ? '<button class="icon-btn" id="chatAddBtn" title="拉人进群">＋</button>' : '';
+  // v4.18：群聊免打扰开关
+  const muteBtn = isGroup ? `<button class="icon-btn chat-mute-btn${conv.muted ? ' on' : ''}" id="chatMuteBtn" title="${conv.muted ? '取消免打扰' : '消息免打扰'}">${conv.muted ? '🔕' : '🔔'}</button>` : '';
+  // v4.18：全站总群不允许退出/解散，因此不渲染任何退出入口
+  const ownerActions = (isGroup && !conv.is_global)
+    ? (conv.my_role === 'owner' ? '<button class="btn btn-sm btn-danger" id="chatDissolve">解散</button>' : '<button class="btn btn-sm" id="chatLeave">退出</button>')
+    : '';
+  const globalTag = (isGroup && conv.is_global) ? '<span class="chat-tag">总群</span>' : '';
+  // 群头像：优先 conv.avatar，否则默认 👥
+  const groupAvatar = (isGroup && conv.avatar)
+    ? '<img class="avatar" src="' + esc(conv.avatar) + '" alt="">'
+    : (isGroup ? '<span class="avatar avatar-txt">👥</span>' : '');
+  const headAvatar = (conv && conv.type === 'single' && conv.other) ? avatar : groupAvatar;
+  // 群公告（群主可编辑）
+  const isOwner = isGroup && !conv.is_global && conv.my_role === 'owner';
+  const announceBtn = isOwner ? '<button class="icon-btn" id="chatAnnounceBtn" title="编辑群公告">📌</button><button class="icon-btn" id="chatAvatarBtn" title="设置群头像">🖼</button>' : '';
+  // v4.29：群管理入口（群成员都能打开——查成员/邀请链接；管理员可审核与设管理员）
+  const groupManageBtn = isGroup ? '<button class="icon-btn" id="chatManageBtn" title="群管理">👥</button>' : '';
+  const announceBar = (conv && conv.announcement)
+    ? `<div class="chat-announce" id="chatAnnounce">📌 ${esc(conv.announcement)}</div>`
+    : '';
+  return `
+    <div class="chat-head">
+      <button class="icon-btn chat-back" id="chatBack" title="返回">←</button>
+      ${headAvatar}
+      <div class="chat-head-info">
+        <div class="chat-head-top">${profileLink} ${globalTag} ${addBtn} ${muteBtn} ${announceBtn} ${groupManageBtn} ${ownerActions}</div>
+        <div class="chat-head-sub muted">${subtitle}</div>
+      </div>
+      <a class="btn btn-sm btn-primary chat-new" href="/new" data-link title="新建剪贴板">＋ 新建</a>
+    </div>
+    ${announceBar}
+    <div class="chat-msgs" id="chatMsgs"></div>
+    <div class="chat-composer">
+      <div class="chat-reply hidden" id="chatReplyBar"></div>
+      <div class="chat-attach-preview hidden" id="chatAttachPreview"></div>
+      <div class="chat-warn hidden" id="chatWarn"></div>
+      <div class="chat-composer-row">
+        <button class="icon-btn" id="chatAttachBtn" title="发送图片 / 文件">📎</button>
+        <button class="icon-btn" id="chatMentionBtn" title="提及某人">＠</button>
+        <input type="file" id="chatFile" hidden>
+        <textarea id="chatInput" class="chat-input" placeholder="输入消息，支持 Markdown（Enter 发送 · Shift+Enter 换行 · 单条 ≤${CHAT_MAX} 等效字符）" rows="1"></textarea>
+        <button class="btn btn-primary" id="chatSend">发送</button>
+      </div>
+    </div>`;
+}
+
+function bindChatMain(conv) {
+  // 重置本会话的待发送状态
+  chatState.pendingAttach = null;
+  chatState.pendingMentions = [];
+  chatState.replyTo = 0;
+  const input = document.getElementById('chatInput');
+  const send = document.getElementById('chatSend');
+  const warn = document.getElementById('chatWarn');
+  const onInput = () => {
+    autoGrow(input);
+    const n = eqChars(input.value);
+    if (n > CHAT_MAX) { warn.classList.remove('hidden'); warn.classList.add('warn-over'); warn.textContent = '⚠️ 本条约 ' + n + ' 等效字符，超过 ' + CHAT_MAX + ' 上限，发送会被拦截（请改用剪贴板链接）。'; }
+    else { warn.classList.remove('hidden'); warn.classList.remove('warn-over'); warn.textContent = (n > CHAT_MAX * 0.8 ? '已输入约 ' + n + ' / ' + CHAT_MAX + ' 等效字符' : ''); if (!warn.textContent) warn.classList.add('hidden'); }
+  };
+  input.addEventListener('input', onInput);
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); doSendChat(); } });
+  send.onclick = doSendChat;
+  const back = document.getElementById('chatBack'); if (back) back.onclick = () => { document.getElementById('chatLayout').classList.remove('chat-conv-open'); chatState.activeId = null; renderChatMainEmpty(); };
+  const add = document.getElementById('chatAddBtn'); if (add) add.onclick = () => openAddMembersModal(conv.id);
+  const leave = document.getElementById('chatLeave'); if (leave) leave.onclick = () => doLeaveChat(conv.id);
+  const diss = document.getElementById('chatDissolve'); if (diss) diss.onclick = () => doDissolveChat(conv.id);
+  const mute = document.getElementById('chatMuteBtn'); if (mute) mute.onclick = () => doToggleMute(conv.id);
+  const aBtn = document.getElementById('chatAnnounceBtn'); if (aBtn) aBtn.onclick = () => openAnnounceModal(conv);
+  const avBtn = document.getElementById('chatAvatarBtn'); if (avBtn) avBtn.onclick = () => openGroupAvatarModal(conv);
+  const gmBtn = document.getElementById('chatManageBtn'); if (gmBtn) gmBtn.onclick = () => openGroupManageModal(conv);
+  // 附件上传
+  const fileIn = document.getElementById('chatFile');
+  const attachBtn = document.getElementById('chatAttachBtn');
+  if (attachBtn && fileIn) attachBtn.onclick = () => fileIn.click();
+  if (fileIn) fileIn.onchange = async () => {
+    if (!fileIn.files.length) return;
+    const f = fileIn.files[0];
+    await uploadChatAttachment(conv.id, f);
+    fileIn.value = '';
+  };
+  const mentionBtn = document.getElementById('chatMentionBtn');
+  if (mentionBtn) mentionBtn.onclick = () => openChatMentionPicker(conv);
+  const msgs = document.getElementById('chatMsgs');
+  msgs.addEventListener('scroll', () => { if (msgs.scrollTop < 40 && !chatState.loadingOlder && chatState.msgs.length) loadOlderMessages(conv.id); });
+}
+
+async function doSendChat() {
+  const input = document.getElementById('chatInput'); if (!input) return;
+  const text = input.value.replace(/\r\n/g, '\n').trim();
+  const attach = chatState.pendingAttach;
+  if (!text && !attach) return;
+  // v4.18：纯文字超过 150 等效字符直接不允许发送，弹窗引导改用剪贴板
+  const n = eqChars(text);
+  if (text && n > CHAT_MAX) { openChatTooLongModal(text, n); return; }
+  const body = {
+    content: text,
+    attach_type: attach ? attach.type : '',
+    attach_id: attach ? attach.id : '',
+    reply_to: chatState.replyTo || 0,
+    mentions: chatState.pendingMentions || []
+  };
+  input.value = ''; const w = document.getElementById('chatWarn'); if (w) { w.classList.add('hidden'); w.classList.remove('warn-over'); } autoGrow(input);
+  clearChatReply();
+  chatState.pendingAttach = null; renderChatAttachPreview();
+  chatState.pendingMentions = [];
+  const send = document.getElementById('chatSend'); if (send) send.disabled = true;
+  const { ok, data } = await api('/api/chat/conversations/' + chatState.activeId + '/messages', { method: 'POST', body: JSON.stringify(body) });
+  if (send) send.disabled = false;
+  if (ok && data && data.message) { appendChatMessage(data.message); saveChatCache(); }
+  else if (data && data.error === 'too_long') { openChatTooLongModal(text, (data && data.eq) || n); }
+  else toast('发送失败', 'err');
+}
+
+async function uploadChatAttachment(convId, file) {
+  const max = 5 * 1024 * 1024;
+  if (file.size > max) { toast('附件超过 5MB 上限', 'err'); return; }
+  const dataUrl = await new Promise((r) => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(file); });
+  const b64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+  const { ok, data } = await api('/api/chat/upload', { method: 'POST', body: JSON.stringify({ conv_id: convId, name: file.name, type: file.type || 'application/octet-stream', data: b64 }) });
+  if (!ok) { toast('上传失败：' + (data?.message || data?.error || '未知'), 'err'); return; }
+  chatState.pendingAttach = { id: data.id, type: file.type && file.type.startsWith('image/') ? 'image' : 'file', name: file.name };
+  renderChatAttachPreview();
+  toast('已附加：' + file.name);
+}
+
+function renderChatAttachPreview() {
+  const el = document.getElementById('chatAttachPreview');
+  if (!el) return;
+  const a = chatState.pendingAttach;
+  if (!a) { el.classList.add('hidden'); el.innerHTML = ''; return; }
+  el.classList.remove('hidden');
+  el.innerHTML = `<span class="attach-chip">📎 ${esc(a.name)} <button class="x" id="chatAttachX" title="移除">✕</button></span>`;
+  const x = document.getElementById('chatAttachX'); if (x) x.onclick = () => { chatState.pendingAttach = null; renderChatAttachPreview(); };
+}
+
+function setChatReply(m) {
+  chatState.replyTo = m.id;
+  const bar = document.getElementById('chatReplyBar');
+  if (!bar) return;
+  bar.classList.remove('hidden');
+  bar.innerHTML = `<span class="muted">↩ 回复 ${esc(m.sender?.display_name || m.sender?.username || '消息')}：${esc((m.content || (m.attach_type ? '[附件]' : ''))).slice(0, 40)}${(m.content || '').length > 40 ? '…' : ''}</span><button class="x" id="chatReplyX">✕</button>`;
+  const x = document.getElementById('chatReplyX'); if (x) x.onclick = clearChatReply;
+}
+function clearChatReply() { chatState.replyTo = 0; const bar = document.getElementById('chatReplyBar'); if (bar) { bar.classList.add('hidden'); bar.innerHTML = ''; } }
+
+function openChatMentionPicker(conv) {
+  const m = openModal('＠ 提及某人', `<input id="mentionSearch" class="input input-sm" placeholder="搜索用户名 / 昵称" style="width:100%;margin-bottom:8px">
+    <div id="mentionList" class="muted">输入关键词搜索…</div>`);
+  const list = m.body.querySelector('#mentionList');
+  const doSearch = async (q) => {
+    if (!q) { list.innerHTML = '输入关键词搜索…'; return; }
+    const { data } = await api('/api/search/users?q=' + encodeURIComponent(q));
+    const users = (data && data.users) || [];
+    if (!users.length) { list.innerHTML = '无结果'; return; }
+    list.innerHTML = users.map((u) => `<div class="mention-item" data-uid="${u.id}" data-name="${esc(u.display_name || u.username)}" style="padding:6px 8px;border-radius:8px;cursor:pointer">${avatarHtml(u.avatar, u.display_name || u.username)} <b>${esc(u.display_name || u.username)}</b> <span class="muted">@${esc(u.username)}</span></div>`).join('');
+    list.querySelectorAll('[data-uid]').forEach((it) => it.onclick = () => {
+      const input = document.getElementById('chatInput');
+      if (input) { input.value += '@' + it.dataset.name + ' '; autoGrow(input); }
+      chatState.pendingMentions = chatState.pendingMentions || [];
+      if (!chatState.pendingMentions.includes(parseInt(it.dataset.uid, 10))) chatState.pendingMentions.push(parseInt(it.dataset.uid, 10));
+      closeModal(); toast('已添加提及 @' + it.dataset.name);
+    });
+  };
+  m.body.querySelector('#mentionSearch').addEventListener('input', (e) => doSearch(e.target.value.trim()));
+}
+
+function openAnnounceModal(conv) {
+  const cur = conv.announcement || '';
+  const m = openModal('📌 群公告 · ' + (conv.name || '群聊'), `<textarea id="annInput" class="input" rows="4" placeholder="写点什么告诉大家…" style="width:100%">${esc(cur)}</textarea>`);
+  m.foot.innerHTML = `<button class="btn btn-sm" id="annCancel">取消</button><button class="btn btn-sm btn-primary" id="annSave">保存</button>`;
+  m.foot.querySelector('#annCancel').onclick = closeModal;
+  m.foot.querySelector('#annSave').onclick = async () => {
+    const r = await api('/api/chat/groups/' + conv.id + '/announcement', { method: 'POST', body: JSON.stringify({ announcement: m.body.querySelector('#annInput').value }) });
+    if (!r.ok) { toast('保存失败', 'err'); return; }
+    if (conv) conv.announcement = m.body.querySelector('#annInput').value;
+    const bar = document.getElementById('chatAnnounce'); if (bar) bar.outerHTML = '';
+    toast('群公告已更新'); closeModal();
+    // 重新渲染公告条
+    const head = document.querySelector('.chat-head');
+    if (head && conv.announcement) {
+      const ex = document.getElementById('chatAnnounce');
+      if (!ex) { const d = document.createElement('div'); d.className = 'chat-announce'; d.id = 'chatAnnounce'; d.textContent = '📌 ' + conv.announcement; head.insertAdjacentElement('afterend', d); }
+    }
+  };
+}
+
+function openGroupAvatarModal(conv) {
+  const cur = conv.avatar || '';
+  const m = openModal('🖼 群头像 · ' + (conv.name || '群聊'), `<p class="muted">粘贴图片 URL（建议正方形）：</p><input id="avInput" class="input input-sm" style="width:100%" placeholder="https://…" value="${esc(cur)}">`);
+  m.foot.innerHTML = `<button class="btn btn-sm" id="avCancel">取消</button><button class="btn btn-sm btn-primary" id="avSave">保存</button>`;
+  m.foot.querySelector('#avCancel').onclick = closeModal;
+  m.foot.querySelector('#avSave').onclick = async () => {
+    const url = m.body.querySelector('#avInput').value.trim();
+    const r = await api('/api/chat/groups/' + conv.id + '/avatar', { method: 'POST', body: JSON.stringify({ avatar: url }) });
+    if (!r.ok) { toast('保存失败', 'err'); return; }
+    if (conv) conv.avatar = url;
+    toast('群头像已更新'); closeModal();
+    const av = document.querySelector('.chat-head .avatar'); if (av && url) av.outerHTML = '<img class="avatar" src="' + esc(url) + '" alt="">';
+  };
+}
+
+/** v4.18：切换某会话的免打扰 */
+async function doToggleMute(id) {
+  const conv = chatState.byId[id]; if (!conv) return;
+  const next = !conv.muted;
+  const { ok, data } = await api('/api/chat/conversations/' + id + '/mute', { method: 'POST', body: JSON.stringify({ muted: next }) });
+  if (!ok) { toast('设置失败', 'err'); return; }
+  conv.muted = data && data.muted !== undefined ? !!data.muted : next;
+  const btn = document.getElementById('chatMuteBtn');
+  if (btn) { btn.textContent = conv.muted ? '🔕' : '🔔'; btn.title = conv.muted ? '取消免打扰' : '消息免打扰'; btn.classList.toggle('on', conv.muted); }
+  renderChatList();
+  toast(conv.muted ? '已开启免打扰 🔕' : '已取消免打扰 🔔');
+}
+
+function appendChatMessage(m) {
+  const msgs = document.getElementById('chatMsgs');
+  const atBottom = msgs && (msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight < 80);
+  chatState.msgs.push(m);
+  if (chatState.msgs.length > chatState.limit) chatState.msgs = chatState.msgs.slice(-chatState.limit);
+  renderChatMessages();
+  if (atBottom) scrollChatBottom();
+}
+
+function renderChatMessages(opts) {
+  const msgs = document.getElementById('chatMsgs'); if (!msgs) return;
+  const prevTop = msgs.scrollTop, prevH = msgs.scrollHeight;
+  const meId = state.me && state.me.userId;
+  const conv = chatState.byId[chatState.activeId];
+  const isGroup = conv && conv.type === 'group';
+  if (!chatState.msgs.length) { msgs.innerHTML = '<div class="chat-nomsg muted">还没有消息，开始聊天吧</div>'; return; }
+  msgs.innerHTML = chatState.msgs.map((m) => {
+    const mine = meId && m.sender_id === meId;
+    const sender = (!mine && isGroup && m.sender) ? `<div class="chat-sender"><a href="/u/${m.sender_id}" data-link>${avatarHtml(m.sender.avatar, m.sender.display_name || m.sender.username)}</a> <a href="/u/${m.sender_id}" data-link><b>${esc(m.sender.display_name || m.sender.username)}</b></a>${m.sender.invisible ? ' <span class="badge-warn" title="昵称含不可见字符（疑似仿冒）">⚠</span>' : ''}${m.sender.tag ? ` <span class="tag-chip">${esc(m.sender.tag)}</span>` : ''}<span class="muted" style="font-size:11px"> · #${m.sender_id}</span></div>` : '';
+    // 引用回复：在气泡上方显示被引用消息摘要
+    let quote = '';
+    if (m.reply_to) {
+      const q = chatState.msgs.find((x) => x.id === m.reply_to);
+      if (q) {
+        const qt = q.content || (q.attach_type ? (q.attach_type === 'image' ? '[图片]' : '[文件]') : '');
+        quote = `<div class="chat-quote" data-jump="${q.id}">${esc((q.sender ? (q.sender.display_name || q.sender.username) : '') + '：' + qt).slice(0, 80)}</div>`;
+      }
+    }
+    // 撤回
+    if (m.recalled) {
+      return `<div class="chat-msg ${mine ? 'mine' : ''}"><div class="chat-bubble recalled">${mine ? '你' : '对方'}撤回了一条消息</div></div>`;
+    }
+    // 附件
+    let attach = '';
+    if (m.attach_type === 'image') attach = `<a href="/api/chat/files/${esc(m.attach_id)}" target="_blank" rel="noopener"><img class="chat-att-img" src="/api/chat/files/${esc(m.attach_id)}" alt="图片"></a>`;
+    else if (m.attach_type === 'file') attach = `<a class="chat-att-file" href="/api/chat/files/${esc(m.attach_id)}" target="_blank" rel="noopener" download>📎 下载附件</a>`;
+    const mentionMe = isGroup && Array.isArray(m.mentions) && meId && m.mentions.map(String).includes(String(meId));
+    // 2 分钟内自己的消息可撤回；任意消息可引用
+    let recall = '';
+    if (mine) {
+      const ts = new Date(String(m.created_at).replace(' ', 'T') + 'Z').getTime();
+      if (Date.now() - ts < 2 * 60 * 1000) recall = ` <span class="chat-recall" data-recall="${m.id}">↩ 撤回</span>`;
+    }
+    const reply = ` <span class="chat-reply" data-reply="${m.id}">↩ 引用</span>`;
+    return `<div class="chat-msg ${mine ? 'mine' : ''} ${mentionMe ? 'mention-me' : ''}" data-mid="${m.id}">
+      ${sender}${quote}
+      <div class="chat-bubble" data-md="${esc(m.content)}"></div>${attach}
+      <div class="chat-time muted">#${m.sender_id} · ${esc(fmtShortDateTime(m.created_at))}${reply}${recall}</div>
+    </div>`;
+  }).join('');
+  msgs.querySelectorAll('.chat-bubble').forEach((b) => renderMd(b, b.dataset.md || ''));
+  msgs.querySelectorAll('[data-recall]').forEach((b) => b.onclick = async () => {
+    if (!confirm('撤回这条消息？')) return;
+    const r = await api('/api/chat/conversations/' + chatState.activeId + '/messages/' + b.dataset.recall + '/recall', { method: 'POST' });
+    if (r.ok) { const mm = chatState.msgs.find((x) => String(x.id) === String(b.dataset.recall)); if (mm) mm.recalled = true; renderChatMessages(); }
+    else toast('撤回失败：' + (r.data?.message || r.data?.error), 'err');
+  });
+  msgs.querySelectorAll('[data-jump]').forEach((b) => b.onclick = () => {
+    const el = msgs.querySelector('[data-mid="' + b.dataset.jump + '"]'); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  });
+  msgs.querySelectorAll('[data-reply]').forEach((b) => b.onclick = () => {
+    const mm = chatState.msgs.find((x) => String(x.id) === String(b.dataset.reply)); if (mm) setChatReply(mm);
+  });
+  if (opts && opts.preserve) msgs.scrollTop = prevTop + (msgs.scrollHeight - prevH);
+}
+
+async function loadChatMessages(id, before) {
+  let url = '/api/chat/conversations/' + id + '/messages';
+  if (before) url += '?before=' + before;
+  const { data } = await api(url);
+  const arr = (data && data.messages) || [];
+  if (!before) chatState.msgs = arr;
+  else chatState.msgs = arr.concat(chatState.msgs);
+  if (chatState.msgs.length > chatState.limit) chatState.msgs = chatState.msgs.slice(-chatState.limit);
+  renderChatMessages({ preserve: !!before });
+  if (!before) scrollChatBottom();
+  saveChatCache();
+}
+
+async function loadOlderMessages(id) {
+  if (!chatState.msgs.length) return;
+  chatState.loadingOlder = true;
+  await loadChatMessages(id, chatState.msgs[0].id);
+  chatState.loadingOlder = false;
+}
+
+function scrollChatBottom() { const msgs = document.getElementById('chatMsgs'); if (msgs) msgs.scrollTop = msgs.scrollHeight; }
+function renderChatMainEmpty() { const m = document.getElementById('chatMain'); if (m) m.innerHTML = '<div class="chat-empty"><div class="chat-empty-illo">💬</div><p>选择一个会话开始聊天，或点「＋私聊 / ＋群聊」发起新对话</p></div>'; }
+function autoGrow(t) { t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, 160) + 'px'; }
+
+function startChatPoll() {
+  if (window.__chatTimer) { clearTimeout(window.__chatTimer); clearInterval(window.__chatTimer); window.__chatTimer = null; }
+  // 世代标记：render() 离开聊天页时递增，旧 tick 据此自然停止，不再续期
+  const gen = (window.__chatPollGen = (window.__chatPollGen || 0) + 1);
+  // v4.20 P0-1.5：间隔自适应——页面在后台（不可见）时拉长到 30s，前台保持 4s。
+  // 用递归 setTimeout 而非固定 setInterval，才能每次按当前可见状态决定下一次间隔。
+  const tick = async () => {
+    try {
+      // v4.18.1：轮询为后台保活，瞬时断网/部署切换属正常，静默重试，不刷 bug 工单
+      await loadChatConversations({ silent: true });
+      // v4.20：聊天页内直接用会话列表的未读求和刷新角标，不必再打一次接口
+      setChatBadge(chatState.list.reduce((a, c) => a + (c.unread || 0), 0));
+      // v4.21：聊天页内的通知判定也走统一函数
+      checkChatNotices(chatState.list);
+      if (chatState.activeId && document.getElementById('chatMsgs')) {
+        const lastId = chatState.msgs.length ? chatState.msgs[chatState.msgs.length - 1].id : 0;
+        const { data } = await api('/api/chat/conversations/' + chatState.activeId + '/messages?since=' + lastId, { silent: true });
+        const arr = (data && data.messages) || [];
+        if (arr.length) {
+          const msgsEl = document.getElementById('chatMsgs');
+          const atBottom = msgsEl && (msgsEl.scrollHeight - msgsEl.scrollTop - msgsEl.clientHeight < 80);
+          arr.forEach((m) => chatState.msgs.push(m));
+          if (chatState.msgs.length > chatState.limit) chatState.msgs = chatState.msgs.slice(-chatState.limit);
+          renderChatMessages();
+          if (atBottom) scrollChatBottom();
+          saveChatCache();
+          api('/api/chat/conversations/' + chatState.activeId + '/read', { method: 'POST', body: JSON.stringify({ messageId: arr[arr.length - 1].id }), silent: true });
+        }
+      }
+    } catch (e) { /* 轮询异常静默，下次重试 */ }
+    if (window.__chatPollGen !== gen) return; // 已离开聊天页，停止续期
+    // v4.28：轮询降频，后台 60s / 前台 45s（原 30s/4s）——大幅降低 D1 读压力
+    window.__chatTimer = setTimeout(tick, document.hidden ? 60000 : 45000);
+  };
+  tick();
+}
+
+// ========== v4.20：全局未读角标（所有页面都跑，后台新消息也能看到红点） ==========
+function setChatBadge(n) {
+  const items = $$('.nav-item[data-nav="chat"]');
+  items.forEach((el) => {
+    let dot = el.querySelector('.nav-dot');
+    if (n > 0) {
+      if (!dot) { dot = document.createElement('span'); dot.className = 'nav-dot'; el.appendChild(dot); }
+      dot.textContent = n > 99 ? '99+' : String(n);
+    } else if (dot) { dot.remove(); }
+  });
+  setFaviconBadge(n);   // v4.21：网站图标上也要有红点，用户在别的网站时也能看到
+}
+
+// v4.23：把未读数画到 favicon 上（用户切到别的标签页 / 别的网站时，标签页图标会显示红点数字）
+// 底图用品牌图标（靛蓝圆角方块 + 白色文档与 #，与 /favicon.svg 同源），再叠红点数字角标。
+let __favLink = null, __favOrigHref = null;
+function setFaviconBadge(n) {
+  try {
+    if (!__favLink) {
+      __favLink = document.querySelector('link[rel="icon"]') || document.querySelector('link[rel="shortcut icon"]');
+      if (__favLink) __favOrigHref = __favLink.href;
+    }
+    if (!__favLink) return;
+    if (!n) { if (__favOrigHref) __favLink.href = __favOrigHref; return; }
+    const label = n > 9 ? '9+' : String(n);
+    // 靛蓝方块 + 白色「文档 + # + 浏览器窗口」，与 /favicon.svg 同款；再叠红点数字角标
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">'
+      + '<rect width="64" height="64" rx="14" fill="#4F46E5"/>'
+      // 文档（右上角开口，浏览器嵌在开口处）
+      + '<path d="M14 24 H36 V54 H14 Z" fill="none" stroke="#ffffff" stroke-width="3" stroke-linejoin="round"/>'
+      // # 与内容线
+      + '<path d="M20 36 H30" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round"/>'
+      + '<path d="M20 42 H30" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round"/>'
+      + '<path d="M22.5 31 V47" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round"/>'
+      + '<path d="M27.5 31 V47" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round"/>'
+      // 浏览器窗口（白色实心，嵌在文档右上角）
+      + '<rect x="34" y="12" width="18" height="14" rx="3" fill="#ffffff"/>'
+      + '<circle cx="39" cy="16" r="1.3" fill="#4F46E5"/><circle cx="44" cy="16" r="1.3" fill="#4F46E5"/><circle cx="49" cy="16" r="1.3" fill="#4F46E5"/>'
+      + '<rect x="37" y="20" width="12" height="4" rx="1.5" fill="#4F46E5"/>'
+      + '<circle cx="51" cy="13" r="16" fill="#e23b3b" stroke="#fff" stroke-width="3"/>'
+      + '<text x="51" y="20" font-size="18" font-weight="bold" fill="#fff" text-anchor="middle" font-family="sans-serif">' + label + '</text>'
+      + '</svg>';
+    __favLink.href = 'data:image/svg+xml,' + encodeURIComponent(svg);
+  } catch (e) { /* 老浏览器可能不支持 SVG favicon，忽略 */ }
+}
+
+async function refreshChatBadge() {
+  try {
+    if (!state.me || state.me.type !== 'user') { setChatBadge(0); return; }
+    const { data } = await api('/api/chat/unread', { silent: true });
+    setChatBadge((data && data.unread) || 0);
+    // v4.21：桌面通知改在全局轮询里发（此前只在聊天页内发，用户在别的页面完全收不到）
+    if (data && Array.isArray(data.convs)) checkChatNotices(data.convs);
+  } catch { /* 静默 */ }
+}
+function startGlobalChatPoll() {
+  const tick = async () => {
+    await refreshChatBadge();
+    if (window.__badgeTimer) clearTimeout(window.__badgeTimer);
+    // 后台 30s（用户要求），前台 8s（比聊天页内 4s 慢，省请求；又要比原来 15s 更快出通知）
+    window.__badgeTimer = setTimeout(tick, document.hidden ? 60000 : 45000);
+  };
+  // v4.21：浏览器要求「用户手势」才能申请通知权限 —— 首次点击 / 按键时就申请，
+  // 比只在聊天页申请更早，用户离开聊天页后也能收到通知。
+  const askNotifyOnce = () => { if (state.me && state.me.type === 'user') ensureNotifyPermission(); };
+  document.addEventListener('click', askNotifyOnce, { once: true });
+  document.addEventListener('keydown', askNotifyOnce, { once: true });
+  tick();
+  // 回到前台：立刻补一次，别等下一次定时
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) return;
+    refreshChatBadge();
+    if (window.__chatTimer) startChatPoll(); // 在聊天页则立刻恢复轮询
+  });
+}
+
+// ========== v4.29：群管理（成员 / 管理员 / 审核 / 邀请链接）============
+async function openGroupManageModal(conv) {
+  const r = await api('/api/chat/conversations/' + conv.id + '/manage');
+  if (!r.ok) return toast(r.data?.message || '无法加载群信息', 'err');
+  const d = r.data;
+  const isOwner = d.my_role === 'owner';
+  const isAdmin = d.my_role === 'owner' || d.my_role === 'admin';
+  const inviteUrl = d.conv.invite_code ? location.origin + '/chat/join/' + d.conv.invite_code : null;
+
+  const roleLabel = (x) => x === 'owner' ? '<span class="tag-chip">群主</span>' : x === 'admin' ? '<span class="tag-chip">管理员</span>' : '<span class="muted">成员</span>';
+  const reqRows = (d.requests || []).map((q) => `<tr>
+      <td>${esc(q.display_name)}${q.tag ? ' <span class="tag-chip">' + esc(q.tag) + '</span>' : ''}<div class="muted" style="font-size:11px">#${q.user_id}</div></td>
+      <td style="white-space:nowrap"><button class="btn btn-sm btn-primary" data-okreq="${q.id}">通过</button> <button class="btn btn-sm" data-noreq="${q.id}">拒绝</button></td>
+    </tr>`).join('');
+
+  const m = openModal('👥 群管理 · ' + (d.conv.name || '群聊'), `
+    <div class="gm-sec">
+      <div class="field-label">加入方式</div>
+      <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px"><input type="radio" name="jm" value="open"${d.conv.join_mode !== 'approval' ? ' checked' : ''}> 自由加入（任何人凭链接直接进）</label>
+      <label style="display:flex;align-items:center;gap:6px"><input type="radio" name="jm" value="approval"${d.conv.join_mode === 'approval' ? ' checked' : ''}> 需要审核（进群要群主/管理员批准）</label>
+      ${isAdmin ? `<div style="margin-top:8px"><button class="btn btn-sm btn-primary" id="gmSaveMode">保存加入方式</button></div>` : ''}
+    </div>
+    ${inviteUrl ? `<div class="gm-sec"><div class="field-label">邀请链接</div>
+      <div style="display:flex;gap:6px;align-items:center"><input class="input" id="gmInvite" readonly value="${esc(inviteUrl)}" style="flex:1">
+      <button class="btn btn-sm" id="gmCopy">复制</button></div>
+      <div class="muted" style="font-size:11px;margin-top:5px">把这个链接发给好友，对方点开即可加入${d.conv.join_mode === 'approval' ? '（需审核）' : ''}。</div>
+      ${isAdmin ? '<button class="btn btn-sm" id="gmReset" style="margin-top:6px">重置链接（旧链接失效）</button>' : ''}</div>` : ''}
+    ${reqRows ? `<div class="gm-sec"><div class="field-label">待审核申请（${d.requests.length}）</div>
+      <div class="admin-table-wrap" style="max-height:220px;overflow:auto"><table class="admin-table"><thead><tr><th>申请人</th><th>操作</th></tr></thead><tbody>${reqRows}</tbody></table></div></div>` : ''}
+    <div class="gm-sec"><div class="field-label">成员（${d.members.length}）</div>
+      <div class="admin-table-wrap" style="max-height:300px;overflow:auto"><table class="admin-table"><thead><tr><th>成员</th><th>角色</th><th>操作</th></tr></thead><tbody>${
+        d.members.map((u) => `<tr>
+          <td>${esc(u.display_name)}${u.tag ? ' <span class="tag-chip">' + esc(u.tag) + '</span>' : ''}<div class="muted" style="font-size:11px">#${u.user_id}</div></td>
+          <td>${roleLabel(u.role)}</td>
+          <td style="white-space:nowrap">${
+            u.role === 'owner' ? '<span class="muted">—</span>'
+            : isOwner
+              ? `<button class="btn btn-sm" data-setrole="${u.user_id}|${u.role === 'admin' ? 'member' : 'admin'}">${u.role === 'admin' ? '取消管理员' : '设为管理员'}</button> <button class="btn btn-sm btn-danger" data-kick="${u.user_id}">移出</button>`
+              : (isAdmin && u.role !== 'admin' ? `<button class="btn btn-sm btn-danger" data-kick="${u.user_id}">移出</button>` : '<span class="muted">—</span>')
+          }</td></tr>`).join('')
+      }</tbody></table></div></div>`);
+  m.body.classList.add('gm-modal');
+
+  if (inviteUrl) {
+    m.body.querySelector('#gmCopy').onclick = async () => {
+      try { await navigator.clipboard.writeText(inviteUrl); toast('已复制邀请链接'); }
+      catch { m.body.querySelector('#gmInvite').select(); document.execCommand('copy'); toast('已复制'); }
+    };
+  }
+  const saveBtn = m.body.querySelector('#gmSaveMode');
+  if (saveBtn) saveBtn.onclick = async () => {
+    const jm = m.body.querySelector('input[name="jm"]:checked')?.value || 'open';
+    const res = await api('/api/chat/conversations/' + conv.id + '/settings', { method: 'POST', body: JSON.stringify({ join_mode: jm }) });
+    if (!res.ok) return toast(res.data?.message || '保存失败', 'err');
+    toast(jm === 'approval' ? '已开启入群审核' : '已改为自由加入');
+    closeModal(); openGroupManageModal(conv);
+  };
+  const resetBtn = m.body.querySelector('#gmReset');
+  if (resetBtn) resetBtn.onclick = async () => {
+    if (!confirm('重置后旧邀请链接将立即失效，确定？')) return;
+    const res = await api('/api/chat/conversations/' + conv.id + '/settings', { method: 'POST', body: JSON.stringify({ reset_invite: true }) });
+    if (!res.ok) return toast(res.data?.message || '重置失败', 'err');
+    toast('已生成新链接'); closeModal(); openGroupManageModal(conv);
+  };
+  m.body.querySelectorAll('[data-setrole]').forEach((b) => b.onclick = async () => {
+    const [uid, role] = b.dataset.setrole.split('|');
+    const res = await api('/api/chat/conversations/' + conv.id + '/members/' + uid, { method: 'POST', body: JSON.stringify({ role }) });
+    if (!res.ok) return toast(res.data?.message || '设置失败', 'err');
+    toast(role === 'admin' ? '已设为管理员' : '已取消管理员'); closeModal(); openGroupManageModal(conv);
+  });
+  m.body.querySelectorAll('[data-kick]').forEach((b) => b.onclick = async () => {
+    const uid = b.dataset.kick;
+    if (!confirm('确定把该成员移出群聊？')) return;
+    const res = await api('/api/chat/conversations/' + conv.id + '/members/' + uid, { method: 'DELETE' });
+    if (!res.ok) return toast(res.data?.message || '移出失败', 'err');
+    toast('已移出'); closeModal(); openGroupManageModal(conv);
+  });
+  m.body.querySelectorAll('[data-okreq]').forEach((b) => b.onclick = async () => {
+    const res = await api('/api/chat/conversations/' + conv.id + '/requests/' + b.dataset.okreq, { method: 'POST', body: JSON.stringify({ action: 'approve' }) });
+    if (!res.ok) return toast(res.data?.message || '操作失败', 'err');
+    toast('已通过'); closeModal(); openGroupManageModal(conv);
+  });
+  m.body.querySelectorAll('[data-noreq]').forEach((b) => b.onclick = async () => {
+    const res = await api('/api/chat/conversations/' + conv.id + '/requests/' + b.dataset.noreq, { method: 'POST', body: JSON.stringify({ action: 'reject' }) });
+    if (!res.ok) return toast(res.data?.message || '操作失败', 'err');
+    toast('已拒绝'); closeModal(); openGroupManageModal(conv);
+  });
+}
+
+// 通过 /chat/join/:code 主动加入
+async function handleChatJoinRoute(code) {
+  const info = await api('/api/chat/invite/' + encodeURIComponent(code));
+  if (!info.ok) { toast(info.data?.message || '邀请链接无效', 'err'); location.href = '/chat'; return; }
+  if (info.data.is_member) { toast('你已在该群中'); location.href = '/chat'; return; }
+  if (info.data.pending) { toast('你的申请正在等待审核'); location.href = '/chat'; return; }
+  if (!info.data.logged_in) { toast('请先登录后再加入群聊'); sessionStorage.setItem('mdqp_join_code', code); location.href = '/'; return; }
+  if (!confirm('确定加入群「' + (info.data.conv.name || '群聊') + '」？')) { location.href = '/chat'; return; }
+  const res = await api('/api/chat/invite/' + encodeURIComponent(code), { method: 'POST' });
+  if (!res.ok) { toast(res.data?.message || '加入失败', 'err'); location.href = '/chat'; return; }
+  toast(res.data.status === 'pending' ? '已提交申请，等待群主审核' : '已加入群聊');
+  location.href = '/chat';
+}
+
+async function openChatSearchModal() {
+  const m = chatModalOpen(`
+    <h3>💬 发起私聊</h3>
+    <input id="csInput" class="input" placeholder="输入用户名或用户 ID 搜索" autocomplete="off">
+    <div id="csResults" class="chat-pick-list"></div>`);
+  const input = m.querySelector('#csInput'); input.focus();
+  input.addEventListener('input', debounce(async () => {
+    const q = input.value.trim(); if (!q) { m.querySelector('#csResults').innerHTML = ''; return; }
+    const { data } = await api('/api/search/users?q=' + encodeURIComponent(q));
+    const users = (data && data.users) || [];
+    m.querySelector('#csResults').innerHTML = users.length ? users.map((u) => `<button class="chat-pick" data-uid="${u.id}">${avatarHtml(u.avatar, u.display_name || u.username)} <b>${esc(u.display_name || u.username)}</b> <span class="muted">@${esc(u.username)} · UID ${u.id}</span></button>`).join('') : '<div class="muted" style="padding:8px">没有匹配的用户</div>';
+    m.querySelectorAll('.chat-pick').forEach((b) => b.onclick = () => startSingleChat(parseInt(b.dataset.uid, 10)));
+  }, 250));
+}
+
+async function startSingleChat(uid) {
+  chatModalClose();
+  const { data } = await api('/api/chat/single/' + uid, { method: 'POST' });
+  if (data && data.conv_id) { await loadChatConversations(); await openChatConv(data.conv_id); }
+  else toast('无法发起会话', 'err');
+}
+
+async function openCreateGroupModal() {
+  const m = chatModalOpen(`
+    <h3>👥 新建群聊</h3>
+    <label class="field-label">群名称</label>
+    <input id="cgName" class="input" maxlength="40" placeholder="给群起个名字">
+    <label class="field-label">添加成员（默认显示最近聊过的用户，可搜索）</label>
+    <input id="cgSearch" class="input input-sm" placeholder="🔍 搜索用户名 / ID">
+    <div id="cgList" class="chat-pick-list"></div>
+    <div class="chat-modal-foot"><button class="btn btn-ghost" id="cgCancel">取消</button><button class="btn btn-primary" id="cgCreate">创建群聊</button></div>`);
+  const selected = new Set();
+  const search = m.querySelector('#cgSearch');
+  const listEl = m.querySelector('#cgList');
+  const renderPicks = (users) => {
+    listEl.innerHTML = users.length ? users.map((u) => `<button class="chat-pick ${selected.has(u.id) ? 'on' : ''}" data-uid="${u.id}">${avatarHtml(u.avatar, u.display_name || u.username)} <b>${esc(u.display_name || u.username)}</b> <span class="muted">@${esc(u.username)} · UID ${u.id}</span>${selected.has(u.id) ? ' ✓' : ''}</button>`).join('') : '<div class="muted" style="padding:8px">没有可选用户</div>';
+    listEl.querySelectorAll('.chat-pick').forEach((b) => b.onclick = () => { const id = parseInt(b.dataset.uid, 10); if (selected.has(id)) selected.delete(id); else selected.add(id); renderPicks(users); });
+  };
+  const load = async (q) => { const { data } = await api('/api/chat/candidates?q=' + encodeURIComponent(q || '')); renderPicks((data && data.users) || []); };
+  load('');
+  search.addEventListener('input', debounce(() => load(search.value.trim()), 250));
+  m.querySelector('#cgCancel').onclick = chatModalClose;
+  m.querySelector('#cgCreate').onclick = async () => {
+    const name = m.querySelector('#cgName').value.trim();
+    if (!name) { toast('请填写群名称', 'err'); return; }
+    const { data } = await api('/api/chat/groups', { method: 'POST', body: JSON.stringify({ name, member_ids: [...selected] }) });
+    if (data && data.conv_id) { chatModalClose(); await loadChatConversations(); await openChatConv(data.conv_id); }
+    else toast('创建群聊失败', 'err');
+  };
+}
+
+async function openAddMembersModal(convId) {
+  const m = chatModalOpen(`
+    <h3>👥 拉人进群</h3>
+    <input id="amSearch" class="input input-sm" placeholder="🔍 搜索用户名 / ID（默认显示最近聊过的用户）">
+    <div id="amList" class="chat-pick-list"></div>
+    <div class="chat-modal-foot"><button class="btn btn-ghost" id="amCancel">取消</button><button class="btn btn-primary" id="amAdd">确认拉入</button></div>`);
+  const selected = new Set();
+  const search = m.querySelector('#amSearch');
+  const listEl = m.querySelector('#amList');
+  const renderPicks = (users) => {
+    listEl.innerHTML = users.length ? users.map((u) => `<button class="chat-pick ${selected.has(u.id) ? 'on' : ''}" data-uid="${u.id}">${avatarHtml(u.avatar, u.display_name || u.username)} <b>${esc(u.display_name || u.username)}</b> <span class="muted">@${esc(u.username)} · UID ${u.id}</span>${selected.has(u.id) ? ' ✓' : ''}</button>`).join('') : '<div class="muted" style="padding:8px">没有可选用户</div>';
+    listEl.querySelectorAll('.chat-pick').forEach((b) => b.onclick = () => { const id = parseInt(b.dataset.uid, 10); if (selected.has(id)) selected.delete(id); else selected.add(id); renderPicks(users); });
+  };
+  const load = async (q) => { const { data } = await api('/api/chat/candidates?convId=' + convId + '&q=' + encodeURIComponent(q || '')); renderPicks((data && data.users) || []); };
+  load('');
+  search.addEventListener('input', debounce(() => load(search.value.trim()), 250));
+  m.querySelector('#amCancel').onclick = chatModalClose;
+  m.querySelector('#amAdd').onclick = async () => {
+    const ids = [...selected];
+    if (!ids.length) { toast('请先选择成员', 'err'); return; }
+    const { ok } = await api('/api/chat/groups/' + convId + '/members', { method: 'POST', body: JSON.stringify({ member_ids: ids }) });
+    if (ok) { chatModalClose(); toast('已拉入群聊'); await loadChatConversations(); }
+    else toast('拉人失败', 'err');
+  };
+}
+
+async function doLeaveChat(id) {
+  if (!confirm('确定退出该群聊？')) return;
+  const { ok } = await api('/api/chat/conversations/' + id + '/leave', { method: 'POST' });
+  if (ok) { toast('已退出群聊'); chatState.activeId = null; if (document.getElementById('chatLayout')) document.getElementById('chatLayout').classList.remove('chat-conv-open'); await loadChatConversations(); renderChatMainEmpty(); }
+  else toast('退出失败', 'err');
+}
+
+async function doDissolveChat(id) {
+  if (!confirm('确定解散该群聊？群聊与所有消息将被永久删除。')) return;
+  const { ok } = await api('/api/chat/conversations/' + id + '/dissolve', { method: 'POST' });
+  if (ok) { toast('群聊已解散'); chatState.activeId = null; if (document.getElementById('chatLayout')) document.getElementById('chatLayout').classList.remove('chat-conv-open'); await loadChatConversations(); renderChatMainEmpty(); }
+  else toast('解散失败', 'err');
+}
+
 // ==================== 启动 ====================
 document.addEventListener('click', (e) => { const a = e.target.closest('a[data-link]'); if (a && a.getAttribute('href')?.startsWith('/')) { e.preventDefault(); go(a.getAttribute('href')); } });
 window.addEventListener('popstate', render);
@@ -3913,6 +6981,8 @@ window.addEventListener('popstate', render);
   const inviteCode = sp.get('invite_code');
   if (inviteCode && sp.get('logged_in')) { setTimeout(() => bindInvite(inviteCode), 1500); }
   await loadMe(); render();
+  // v4.20：启动全局未读角标轮询（后台 30s / 前台 15s），后台新消息也会闪红点
+  startGlobalChatPoll();
   // v4.10: 补 DAU 埋点（page.view）。同会话只报一次，真实去重在服务端再做 5 分钟节流
   trackPageView();
   // v4.10: 首次登录后询问用户来源渠道（已填写/已跳过则不再问）
