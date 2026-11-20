@@ -313,3 +313,37 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_app_type ON events(app, type, created_at);
 CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);
 CREATE INDEX IF NOT EXISTS idx_events_uid_type ON events(uid, type, created_at); -- v4.10: page.view 去重查询加速
+
+-- ========== v4.17: 聊天系统 ==========
+CREATE TABLE IF NOT EXISTS chat_conversations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  type TEXT NOT NULL DEFAULT 'single',   -- 'single' | 'group'
+  name TEXT DEFAULT '',                   -- 群名（单聊忽略）
+  owner_id INTEGER DEFAULT NULL,          -- 群主 users.id（单聊为 NULL）
+  is_global INTEGER DEFAULT 0,            -- 1 = 全站总群（所有用户默认加入）
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_chat_conv_type_global ON chat_conversations(type, is_global);
+
+CREATE TABLE IF NOT EXISTS chat_members (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  conv_id INTEGER NOT NULL,
+  user_id INTEGER NOT NULL,
+  role TEXT NOT NULL DEFAULT 'member',    -- 'owner' | 'member'
+  joined_at TEXT DEFAULT (datetime('now')),
+  left INTEGER DEFAULT 0,                  -- 1 = 已退出（群聊）
+  last_read_id INTEGER DEFAULT 0,         -- 已读到的最后一条消息 id（未读计数用）
+  muted INTEGER DEFAULT 0,                 -- 1 = 免打扰（v4.18：不推送浏览器通知）
+  UNIQUE(conv_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_chat_members_conv ON chat_members(conv_id, left);
+CREATE INDEX IF NOT EXISTS idx_chat_members_user ON chat_members(user_id, left);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  conv_id INTEGER NOT NULL,
+  sender_id INTEGER NOT NULL,
+  content TEXT NOT NULL,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_chat_messages_conv ON chat_messages(conv_id, id DESC);
