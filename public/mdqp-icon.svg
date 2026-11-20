@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="mdqp">
+  <title>mdqp</title>
+  <!-- 文档（右上角开口，浏览器嵌在开口处；不画连接线） -->
+  <g fill="none" stroke="#4F46E5" stroke-width="26" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M262 164 V420 A38 38 0 0 1 224 458 H57 A38 38 0 0 1 19 420 V128 A38 38 0 0 1 57 90 H186"/>
+  </g>
+  <!-- # 与内容线 -->
+  <g fill="none" stroke="#4F46E5" stroke-width="20" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M96 208 H184"/>
+    <path d="M96 246 H184"/>
+    <path d="M118 179 V273"/>
+    <path d="M162 179 V273"/>
+    <path d="M83 324 H196" stroke-width="22"/>
+    <path d="M83 371 H196" stroke-width="22"/>
+  </g>
+  <!-- 浏览器窗口（上层，压在文档右上角，无缺口） -->
+  <path fill="#4F46E5" fill-rule="evenodd" d="M230 40 H306 A30 30 0 0 1 336 70 V120 A30 30 0 0 1 306 150 H230 A30 30 0 0 1 200 120 V70 A30 30 0 0 1 230 40 Z M226 86 H310 A12 12 0 0 1 322 98 V124 A12 12 0 0 1 310 136 H226 A12 12 0 0 1 214 124 V98 A12 12 0 0 1 226 86 Z M227 60 A7 7 0 1 0 241 60 A7 7 0 1 0 227 60 Z M257 60 A7 7 0 1 0 271 60 A7 7 0 1 0 257 60 Z M287 60 A7 7 0 1 0 301 60 A7 7 0 1 0 287 60 Z"/>
+</svg>
