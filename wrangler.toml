@@ -8,6 +8,11 @@ binding = "db"
 database_name = "mdqp-db"
 database_id = "e334728b-dab4-4731-9225-e7665d2be8ca"
 
+# === 用户站点文件存储（KV，与主站 D1 同账号；qsites 托管项目也绑定同一命名空间）===
+[[kv_namespaces]]
+binding = "SITE_KV"
+id = "467c52a690ac46c9a3d9a9dadb2484d0"
+
 # === cpoauth 凭据（必须用 secret 注入，绝不写进文件）===
 #   npx wrangler pages secret put CPOAUTH_CLIENT_ID --project-name mdqp
 #   npx wrangler pages secret put CPOAUTH_CLIENT_SECRET --project-name mdqp
