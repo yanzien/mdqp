@@ -1,0 +1,21 @@
+name = "mdqptest"
+pages_build_output_dir = "pages-build-test"
+compatibility_date = "2024-11-01"
+
+# === 独立 D1（与主站 mdqp-db 完全隔离的物理库）===
+# 创建：npx wrangler d1 create mdqp-test-db
+# 初始化：npx wrangler d1 execute mdqp-test-db --remote --file=mdqptest/schema.sql
+# 种子：  npx wrangler d1 execute mdqp-test-db --remote --file=mdqptest/seed.sql
+[[d1_databases]]
+binding = "db"
+database_name = "mdqp-test-db"
+database_id = "189ff018-56bb-4669-9c77-c920be5e5e8c"
+
+# === 独立 KV（测试站站点文件，避免污染主站命名空间）===
+[[kv_namespaces]]
+binding = "SITE_KV"
+id = "3734c278d0474ea2a18da6493dbd7d43"
+
+# cpoauth 凭据沿用主站 secret（测试站不开放第三方登录也可用密码注册）
+#   npx wrangler pages secret put CPOAUTH_CLIENT_ID --project-name mdqptest
+#   npx wrangler pages secret put CPOAUTH_CLIENT_SECRET --project-name mdqptest
