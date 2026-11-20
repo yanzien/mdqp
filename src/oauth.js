@@ -8,6 +8,85 @@ import { signJWT, verifyJWT, hashPassword } from './auth.js';
 
 const SESSION_MAX_AGE = 7 * 24 * 3600; // 7 天
 
+// v4.29：用户名字符白名单——只允许英文(a-zA-Z)、中文(\u4e00-\u9fa5)、数字(0-9)、下划线 _、连字符 -
+// 说明：拒绝 "y anzie" 这类含空格的，避免仿冒混淆。\u escapes 是刻意写法（不可见字符同理）。
+const USERNAME_RE = /^[A-Za-z0-9_\-\u4e00-\u9fa5]+$/;
+
+// v4.29.1：敏感词/冒充词拦截
+// 分两类处理，避免误伤：
+//   ① 高危词——子串匹配（误伤面极小）：nazi / gay / 纳粹 / 共产党 / 国民党 / yanzie
+//   ② 短词 la——词边界匹配。若按子串拦会误伤 play/land/black/class/island/palace/
+//      planet/slate/flavor/clarence/Malay/translate 等几十个正常英文名（实测 25/27）。
+const USERNAME_BANNED_SUBSTR = ['nazi', 'gay', '纳粹', '共产党', '国民党', '拉', '给'];
+/** la 用边界匹配：前后不能是字母/数字/下划线/连字符。拦住 la、_la、la_、-la，但不拦 play、land */
+const USERNAME_BANNED_WORDS = ['la'];
+/** 归一化后比对：去零宽/双向字符 + 转小写，防止「yanzie+零宽」伪装绕过 */
+function normalizeUserName(s) {
+  return String(s || '').toLowerCase().replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u2064\uFEFF]/g, '');
+}
+/** 命中返回命中的词（用于提示），未命中返回 null */
+function checkUsernameBanned(username) {
+  const n = normalizeUserName(username);
+  if (!n) return null;
+  // ③ yanzie 系列：站长本人ID 是「yanzien」，而 "yanzien".includes("yanzie")===true，
+  //    若按子串拦会把站长自己也封掉。故只在「非 yanzien 本体」时拦：
+  //    拦 yanzie / yanzie1 / yanziex / yanzienn，但放行 yanzien。
+  if (n !== 'yanzien' && (n.includes('yanzie') || n.replace(/n$/, '').includes('yanzie'))) return 'yanzie';
+  for (const w of USERNAME_BANNED_SUBSTR) if (n.includes(w)) return w;
+  for (const w of USERNAME_BANNED_WORDS) {
+    // 词边界用零宽断言（lookaround），避免"吃掉"分隔符导致 _la / -la 这类漏网
+    const re = new RegExp('(?<![a-z0-9])' + w + '(?![a-z0-9])');
+    if (re.test(n)) return w;
+  }
+  return null;
+}
+
+// ========== v4.29：IP 治理（与 worker.js 内的同名函数保持一致；不跨文件 import 以避免循环依赖）============
+function ipToInt2(ip) {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(String(ip || '').trim());
+  if (!m) return null;
+  let v = 0;
+  for (let i = 1; i <= 4; i++) { const p = parseInt(m[i], 10); if (p > 255) return null; v = (v * 256) + p; }
+  return v >>> 0;
+}
+function parseCidr2(v) {
+  const s = String(v || '').trim(); const i = s.indexOf('/');
+  if (i < 0) return null;
+  const ip = ipToInt2(s.slice(0, i)); const bits = parseInt(s.slice(i + 1), 10);
+  if (ip === null || !Number.isInteger(bits) || bits < 0 || bits > 32) return null;
+  const mask = bits === 0 ? 0 : (0xFFFFFFFF << (32 - bits)) >>> 0;
+  return { base: (ip & mask) >>> 0, bits };
+}
+function cidrContains2(cidr, ip) {
+  const c = parseCidr2(cidr); const v = ipToInt2(ip);
+  if (!c || v === null) return false;
+  if (c.bits === 0) return true;
+  const mask = (0xFFFFFFFF << (32 - c.bits)) >>> 0;
+  return ((v & mask) >>> 0) === c.base;
+}
+/** 查该 IP 是否被封；D1 故障视为未封（治理功能故障不拖垮注册） */
+async function checkIpBan(db, ip) {
+  if (!db || ipToInt2(ip) === null) return null;
+  try {
+    const rows = await db.prepare(
+      "SELECT * FROM ip_bans WHERE (kind = 'ip' AND value = ?) OR (kind = 'cidr' AND (ban_until IS NULL OR ban_until > datetime('now')))"
+    ).bind(ip).all();
+    for (const r of (rows.results || [])) {
+      if (r.kind === 'ip') return r;
+      if (cidrContains2(r.value, ip)) return r;
+    }
+  } catch { return null; }
+  return null;
+}
+/** 记录注册 IP（供后台 IP 治理视图）；表未迁移时静默失败，不阻断注册 */
+async function recordUserIp(db, userId, ip, ua) {
+  if (!db || ipToInt2(ip) === null) return;
+  try {
+    await db.prepare('INSERT INTO user_ips (user_id, ip, ua) VALUES (?, ?, ?)').bind(userId, ip, String(ua || '').slice(0, 200)).run();
+    if (Math.random() < 0.05) await db.prepare("DELETE FROM user_ips WHERE created_at < datetime('now','-30 days')").run();
+  } catch { /* ignore */ }
+}
+
 const oauthRoutes = new Hono();
 
 /** v4.13: 判断用户当前是否被封禁（过期视为未封禁，并惰性清理） */
@@ -183,12 +262,14 @@ oauthRoutes.get('/callback', async (c) => {
     const linkCookie = cookieHeader.match(/mdqp_link=([^;]+)/)?.[1];
     if (linkCookie) {
       const sessionM = cookieHeader.match(/mdqp_session=([^;]+)/);
-      if (sessionM) {
-        const sp = verifyJWT(decodeURIComponent(sessionM[1]), c.env.CPOAUTH_CLIENT_SECRET);
-        if (sp && sp.userId) {
+      const sp = sessionM ? verifyJWT(decodeURIComponent(sessionM[1]), c.env.CPOAUTH_CLIENT_SECRET) : null;
+      if (sp && sp.userId) {
+        try {
           await db.prepare(
             "UPDATE users SET sub = ?, display_name = ?, avatar = ?, linked_accounts = ?, email = ?, email_verified = ?, cpoauth_refresh = ?, cpoauth_token_exp = ?, last_login = datetime('now') WHERE id = ?"
           ).bind(user.sub, name, avatar, linked, email, emailVerified, refreshToken, tokenExp, String(sp.userId)).run();
+          // v4.31：cpoauth 登录也补记 IP（这是最主要的登录方式，漏了会导致 IP 治理视图看不到老号）
+          try { await recordUserIp(db, sp.userId, clientIP(c), c.req.header('User-Agent') || ''); } catch {}
           await db.prepare("UPDATE clipboards SET owner_name = ? WHERE owner_type = 'user' AND owner_id = ?")
             .bind(name, String(sp.userId)).run();
           const finalRedirect = inviteCode ? `/me?linked=1&invite_code=${encodeURIComponent(inviteCode)}` : '/me?linked=1';
@@ -198,9 +279,20 @@ oauthRoutes.get('/callback', async (c) => {
             'oauth_state=; Path=/; Max-Age=0',
             'mdqp_invite=; Path=/; Max-Age=0'
           ]);
+        } catch (e) {
+          // 关联写入失败：绝不能落到下面的「新建账号」流程（那是重复建号 bug 的根因），改为报错返回
+          console.error('[oauth] link-mode update failed:', (e && e.message) || e);
+          return redirectWithCookies('/?error=link_failed', clearCookies);
         }
       }
-      // link cookie 存在但会话已失效：不报错，落到下面的普通登录流程（不会 orphan）
+      // link cookie 存在但会话已失效（登录态过期等）：直接报错返回，绝不新建账号
+      return redirectWithCookies('/?error=link_expired', clearCookies);
+    }
+
+    // 纵深防御：若仍残留 link cookie（正常不会到这里），说明关联流程异常，
+    // 绝不走下面的「新建账号」分支，否则会复现 TK6D11C175 重复建号。
+    if (cookieHeader.match(/mdqp_link=([^;]+)/)) {
+      return redirectWithCookies('/?error=link_failed', clearCookies);
     }
 
     const existing = await db.prepare('SELECT id, role, bio AS curBio FROM users WHERE sub = ?').bind(user.sub).first();
@@ -213,6 +305,8 @@ oauthRoutes.get('/callback', async (c) => {
         .bind(user.username || name, name, avatar, linked, bio, email, emailVerified, refreshToken, tokenExp, user.sub)
         .run();
       userId = existing.id;
+      // v4.31：老号回登录时也补记 IP
+      try { await recordUserIp(db, existing.id, clientIP(c), c.req.header('User-Agent') || ''); } catch {}
       // 同步该用户历史剪贴板的冗余显示名
       await db.prepare("UPDATE clipboards SET owner_name = ? WHERE owner_type = 'user' AND owner_id = ?")
         .bind(name, String(userId)).run();
@@ -227,6 +321,12 @@ oauthRoutes.get('/callback', async (c) => {
         await db.prepare("UPDATE users SET role = 'developer' WHERE id = 1").run();
       }
     }
+
+    // v4.17: 自动加入全站总群（存量用户已加入则 INSERT OR IGNORE 跳过；总群缺失不影响登录）
+    try {
+      const g = await db.prepare("SELECT id FROM chat_conversations WHERE is_global = 1 LIMIT 1").first();
+      if (g) await db.prepare("INSERT OR IGNORE INTO chat_members (conv_id, user_id, role) VALUES (?, ?, 'member')").bind(g.id, Number(userId)).run();
+    } catch (e) { /* 聊天表尚未迁移时不阻断登录 */ }
 
     // v4.13: 已封禁用户禁止通过 cpoauth 登录
     if (await isBannedNow(db, userId)) {
@@ -373,6 +473,95 @@ function safeEqual(a, b) {
   return diff === 0;
 }
 
+// ========== v4.28：注册节流 + 仿冒拦截 ==========
+const REG_IP_COOLDOWN_MS = 3600e3;   // 同 IP 1 小时内不得注册第二个账号
+const REG_SIMILAR_WINDOW_MS = 3 * 3600e3; // 3 小时内相似用户名视为疑似仿冒
+const REG_SIMILARITY_THRESHOLD = 0.6;     // 相似度阈值 60%
+const REG_KV_PREFIX = 'regguard:';
+
+/** Levenshtein 编辑距离（滚动数组，空间 O(min(n,m))） */
+function levenshtein(a, b) {
+  a = String(a); b = String(b);
+  if (a === b) return 0;
+  if (!a.length) return b.length;
+  if (!b.length) return a.length;
+  let prev = new Array(b.length + 1);
+  for (let j = 0; j <= b.length; j++) prev[j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    const cur = new Array(b.length + 1);
+    cur[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a.charCodeAt(i - 1) === b.charCodeAt(j - 1) ? 0 : 1;
+      cur[j] = Math.min(cur[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost);
+    }
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+/** 归一化相似度 0–1（1 = 完全相同）。忽略大小写与不可见字符，仿冒者常插零宽字符 */
+function similarity(a, b) {
+const norm = (s) => String(s || '').toLowerCase().replace(/[\u200B-\u200F\u202A-\u202E\u2060-\u2064\uFEFF]/g, '');
+  const x = norm(a), y = norm(b);
+  if (!x || !y) return 0;
+  const dist = levenshtein(x, y);
+  return 1 - dist / Math.max(x.length, y.length);
+}
+
+/** 记录某 IP/设备最近一次注册时间（KV，零 D1 读） */
+async function regGuardMark(kv, ip, deviceId) {
+  if (!kv) return;
+  const now = Date.now();
+  const ttl = Math.ceil(REG_IP_COOLDOWN_MS / 1000) + 60;
+  try {
+    if (ip && ip !== 'unknown') await kv.put(REG_KV_PREFIX + 'ip:' + ip, String(now), { expirationTtl: ttl });
+    if (deviceId) await kv.put(REG_KV_PREFIX + 'dev:' + deviceId, String(now), { expirationTtl: ttl });
+  } catch { /* KV 不可用不阻断注册 */ }
+}
+
+/**
+ * 注册前置检查。返回 null 放行；否则返回 { status, body }。
+ * - 同 IP/设备 1h 内已注册过 → 429
+ * - 3h 内与已有账号名相似度 ≥ 60% → 拒绝 + 管理员告警（不动老号，受害者不应被罚）
+ */
+async function regGuardCheck(kv, db, ip, deviceId, username) {
+  const now = Date.now();
+  // 1) IP / 设备冷却
+  for (const [key, label] of [[ip && ip !== 'unknown' ? 'ip:' + ip : null, 'IP'], [deviceId ? 'dev:' + deviceId : null, '设备']]) {
+    if (!key) continue;
+    let ts = 0;
+    try { ts = parseInt((await kv?.get(REG_KV_PREFIX + key)) || '0', 10) || 0; } catch { /* ignore */ }
+    if (ts && now - ts < REG_IP_COOLDOWN_MS) {
+      const mins = Math.ceil((REG_IP_COOLDOWN_MS - (now - ts)) / 60000);
+      return { status: 429, body: { error: 'register_cooldown', message: `同一${label} 1 小时内只能注册一个账号，请 ${mins} 分钟后再试` } };
+    }
+  }
+  // 2) 疑似仿冒：与最近注册的账号做相似度比对（uid 1/2 豁免，且绝不处罚老号）
+  try {
+    const recent = await db.prepare(
+      'SELECT id, username, display_name, created_at FROM users WHERE id > 2 ORDER BY id DESC LIMIT 200'
+    ).all();
+    const rows = recent.results || [];
+    for (const u of rows) {
+      if (String(u.id) === '1' || String(u.id) === '2') continue;
+      const ctime = Date.parse((u.created_at || '').replace(' ', 'T') + 'Z');
+      if (!Number.isFinite(ctime) || now - ctime >= REG_SIMILAR_WINDOW_MS) continue;
+      const score = Math.max(similarity(username, u.username), similarity(username, u.display_name || u.username));
+      if (score >= REG_SIMILARITY_THRESHOLD) {
+        console.warn('[reg-guard] 疑似仿冒注册被拦截', { ip, username, similarTo: u.id, similarName: u.username, score });
+        return {
+          status: 403,
+          body: {
+            error: 'similar_username',
+            message: `该用户名与近期已有账号过于相似（${Math.round(score * 100)}%），为防止冒充他人已拒绝注册，请换一个用户名`
+          }
+        };
+      }
+    }
+  } catch { /* 查表失败不阻断注册 */ }
+  return null;
+}
+
 /** 登录前检查：超过阈值直接拒绝。返回 null 表示放行 */
 async function loginGuard(db, ip, username) {
   const since = `-${GUARD_WINDOW_MIN} minutes`;
@@ -408,6 +597,28 @@ oauthRoutes.post('/password/register', async (c) => {
   const password = (body.password || '').toString();
   const inviteCode = (body.invite_code || '').toString().trim();
 
+  // v4.28：注册前先拦——同 IP/设备 1h 冷却 + 疑似仿冒用户名（不动老号，避免罚受害者）
+  const ipAddr = clientIP(c);
+  // v4.29：IP / 网段封禁——被封则无法注册
+  const ipBan = await checkIpBan(c.env.db, ipAddr);
+  if (ipBan) {
+    return c.json({
+      error: 'ip_banned',
+      message: '你所在的 IP 已被站长封禁' + (ipBan.reason ? `（原因：${ipBan.reason}）` : '') + (ipBan.ban_until ? `，解封时间：${ipBan.ban_until} UTC` : '（永久）')
+    }, 403);
+  }
+  // v4.29：用户名只允许英文、中文、数字、下划线 _、连字符 -（拒绝 "y anzie" 这类含空格/奇字符）
+  if (!USERNAME_RE.test(username)) {
+    return c.json({ error: 'invalid_username_charset', message: '用户名只能包含英文、中文、数字、下划线 _ 和连字符 -，不能有空格或其他符号' }, 400);
+  }
+  // v4.29.1：敏感词 / 冒充词拦截（nazi、gay、纳粹、共产党、国民党、yanzie 系列、la、拉、给）
+  const bannedWord = checkUsernameBanned(username);
+  if (bannedWord) {
+    return c.json({ error: 'username_banned', message: '用户名包含不允许使用的词「' + bannedWord + '」，请换一个' }, 400);
+  }
+  const guard = await regGuardCheck(c.env.SITE_KV, db, ipAddr, (body.device_id || '').toString().slice(0, 64), username);
+  if (guard) return c.json(guard.body, guard.status);
+
   if (username.length < 2 || username.length > 20)
     return c.json({ error: 'invalid_username', message: '用户名需 2–20 个字符' }, 400);
   if (password.length < PW_MIN)
@@ -436,6 +647,15 @@ oauthRoutes.post('/password/register', async (c) => {
   const userId = r.meta.last_row_id;
   // 站点首位用户 = 开发者（全新部署时自动册封）
   if (userId === 1) await db.prepare("UPDATE users SET role = 'developer' WHERE id = 1").run();
+  // v4.28：登记该 IP/设备的注册时间，触发 1 小时冷却
+  await regGuardMark(c.env.SITE_KV, clientIP(c), (body.device_id || '').toString().slice(0, 64));
+  // v4.29：记录注册 IP，供后台 IP 治理视图聚合
+  await recordUserIp(db, userId, clientIP(c), c.req.header('User-Agent') || '');
+  // v4.17: 新注册用户自动加入全站总群
+  try {
+    const g = await db.prepare("SELECT id FROM chat_conversations WHERE is_global = 1 LIMIT 1").first();
+    if (g) await db.prepare("INSERT OR IGNORE INTO chat_members (conv_id, user_id, role) VALUES (?, ?, 'member')").bind(g.id, Number(userId)).run();
+  } catch (e) { /* 聊天表尚未迁移时不阻断注册 */ }
   // 邀请关系：被邀请者绑定邀请人（仅首次）
   if (inviterId) {
     const me = await db.prepare('SELECT inviter_id FROM users WHERE id = ?').bind(String(userId)).first();
@@ -452,6 +672,14 @@ oauthRoutes.post('/password/register', async (c) => {
   return jsonWithCookies({ ok: true, user: { id: Number(userId), name: username } }, [sessionCookie(jwt)]);
 });
 
+/** 记录登录尝试。D1 不可用时静默跳过——它只是审计/限流数据，不该阻断登录 */
+async function recordAttemptSafe(db, ip, username, ok) {
+  try { await recordAttempt(db, ip, username, ok); } catch { /* D1 故障：跳过记录 */ }
+}
+async function isBannedNowSafe(db, userId) {
+  try { return await isBannedNow(db, userId); } catch { return false; } // 查不到就视为未封禁
+}
+
 /** 密码登录 */
 oauthRoutes.post('/password/login', async (c) => {
   const db = c.env.db;
@@ -466,7 +694,12 @@ oauthRoutes.post('/password/login', async (c) => {
     return c.json({ error: 'invalid_credentials', message: '用户名或密码错误' }, 401);
 
   const ip = clientIP(c);
-  const blockedBy = await loginGuard(db, ip, username);
+  // v4.30.1：D1 故障时放行撞库守卫——否则它读 login_attempts 会先炸，
+  // 根本走不到下面的 KV 凭证缓存，登录就彻底不可用了。
+  let blockedBy = null;
+  try {
+    blockedBy = await loginGuard(db, ip, username);
+  } catch { /* D1 不可用：跳过限流，密码校验本身仍走 KV 凭证 */ }
   if (blockedBy) {
     return c.json(
       { error: 'too_many_attempts', message: `尝试过于频繁，请 ${GUARD_WINDOW_MIN} 分钟后再试` },
@@ -474,26 +707,50 @@ oauthRoutes.post('/password/login', async (c) => {
     );
   }
 
-  const row = await db
-    .prepare('SELECT id, username, display_name, avatar, password_hash, sub, banned, ban_until FROM users WHERE (username = ? OR email = ?) AND password_hash != \'\'')
-    .bind(username, username)
-    .first();
+  // v4.30.1：登录凭证走 KV 缓存——D1 读配额耗尽时登录仍可用。
+  // 这里缓存的是"用户名 → 密码哈希"等少量字段，KV 读配额独立且远大于 D1。
+  const credKey = 'cred:' + String(username).toLowerCase();
+  let row = null;
+  try {
+    const cached = c.env.SITE_KV ? await c.env.SITE_KV.get(credKey, 'json') : null;
+    if (cached) row = cached;
+  } catch { /* KV 不可用则回落到 D1 */ }
+  if (!row) {
+    try {
+      row = await db
+        .prepare('SELECT id, username, display_name, avatar, password_hash, sub, banned, ban_until FROM users WHERE (username = ? OR email = ?) AND password_hash != \'\'')
+        .bind(username, username)
+        .first();
+    } catch (e) {
+      // v4.30.1：D1 与 KV 凭证都拿不到（首次登录 + D1 配额耗尽）。
+      // 这时无法验证密码，**必须诚实拒绝**——绝不能因为降级就放行任何密码。
+      console.error('[login] D1 与 KV 凭证均不可用，无法验证密码：', (e && e.message) || e);
+      return c.json({
+        error: 'service_unavailable',
+        message: '站长的数据库读取额度已用尽，暂时无法验证登录。请稍后再试——这不是你的密码问题。'
+      }, 503);
+    }
+    // 只缓存"确实是密码账号"的结果；未命中（用户不存在/非密码账号）不缓存，避免缓存脏数据
+    if (row && c.env.SITE_KV) {
+      try { await c.env.SITE_KV.put(credKey, JSON.stringify(row), { expirationTtl: 3600 }); } catch {}
+    }
+  }
 
   // 注意：无论"用户不存在"还是"密码错误"，都返回同一句话，避免泄露账号是否存在
   if (!row) {
-    await recordAttempt(db, ip, username, false);
+    await recordAttemptSafe(db, ip, username, false);
     return c.json({ error: 'invalid_credentials', message: '用户名或密码错误' }, 401);
   }
 
   // v4.13: 已封禁用户禁止登录（先于密码校验，避免被封禁账号探测）
-  if (await isBannedNow(db, row.id)) {
-    await recordAttempt(db, ip, username, false);
+  if (await isBannedNowSafe(db, row.id)) {
+    await recordAttemptSafe(db, ip, username, false);
     return c.json({ error: 'banned', message: '该账号已被封禁，无法登录' }, 403);
   }
 
   const ph = await hashPassword(password);
   if (!safeEqual(ph, row.password_hash || '')) {
-    await recordAttempt(db, ip, username, false);
+    await recordAttemptSafe(db, ip, username, false);
     return c.json({ error: 'invalid_credentials', message: '用户名或密码错误' }, 401);
   }
 
@@ -502,8 +759,11 @@ oauthRoutes.post('/password/login', async (c) => {
     { userId: Number(row.id), sub: row.sub, name, avatar: row.avatar || '', exp: Math.floor(Date.now() / 1000) + SESSION_MAX_AGE },
     c.env.CPOAUTH_CLIENT_SECRET
   );
-  await db.prepare("UPDATE users SET last_login = datetime('now') WHERE id = ?").bind(row.id).run();
-  await recordAttempt(db, ip, username, true);
+  try { await db.prepare("UPDATE users SET last_login = datetime('now') WHERE id = ?").bind(row.id).run(); } catch {}
+  // v4.31：登录时也补记 IP——否则 v4.29 之前注册的老号在 IP 治理视图里永远没有记录，
+  // 会让管理员误以为「没有人共用 IP」，实际是数据缺失。
+  try { await recordUserIp(db, row.id, ip, c.req.header('User-Agent') || ''); } catch {}
+  await recordAttemptSafe(db, ip, username, true);
   return jsonWithCookies({ ok: true, user: { id: Number(row.id), name } }, [sessionCookie(jwt)]);
 });
 
